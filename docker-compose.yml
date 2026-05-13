@@ -13,6 +13,18 @@ services:
       timeout: 5s
       retries: 5
 
+  nfs:
+    image: itsthenetwork/nfs-server-alpine:latest
+    container_name: klipper-farm-nfs
+    privileged: true
+    environment:
+      SHARED_DIRECTORY: /exports
+    volumes:
+      - ./storage:/exports
+    ports:
+      - "2049:2049"
+    restart: unless-stopped
+
   backend:
     build:
       context: .
