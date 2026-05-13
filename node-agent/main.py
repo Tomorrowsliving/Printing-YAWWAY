@@ -34,7 +34,7 @@ async def get_health():
 
         return {
             "hostname": socket.gethostname(),
-            "ip_address": socket.gethostbyname(socket.gethostname()),
+            "ip_address": get_local_ip(),
             "cpu_usage": cpu_usage,
             "ram_usage": ram.percent,
             "temperature": temp,
@@ -89,6 +89,18 @@ def run_systemctl(action: str, service_name: str):
         return {"status": "success", "action": action, "service": service_name}
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=f"Failed to {action} {service_name}: {e}")
+
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # doesn't even have to be reachable
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
 
 def get_pi_model():
     try:
