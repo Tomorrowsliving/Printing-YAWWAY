@@ -9,7 +9,7 @@ class Node(Base):
     id = Column(Integer, primary_key=True, index=True)
     hostname = Column(String, unique=True, index=True)
     ip_address = Column(String)
-    agent_port = Column(Integer, default=8000)
+    agent_port = Column(Integer, default=8001)
     cpu_usage = Column(Float, default=0.0)
     ram_usage = Column(Float, default=0.0)
     temperature = Column(Float, default=0.0)

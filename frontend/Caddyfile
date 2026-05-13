@@ -4,10 +4,10 @@
     try_files {path} /index.html
 
     handle_path /api/* {
-        reverse_proxy backend:8000
+        reverse_proxy backend:8001
     }
 
     handle_path /ws/* {
-        reverse_proxy backend:8000
+        reverse_proxy backend:8001
     }
 }

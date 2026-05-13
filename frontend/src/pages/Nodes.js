@@ -12,7 +12,7 @@ const NodeOverview = ({ addToast }) => {
   const [formData, setFormData] = useState({
     hostname: '',
     ip_address: '',
-    agent_port: 8000,
+    agent_port: 8001,
     model: '',
     notes: ''
   });

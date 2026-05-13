@@ -13,4 +13,4 @@ COPY backend ./backend
 COPY storage ./storage
 
 # Launch from the parent directory of the 'backend' package
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8001"]

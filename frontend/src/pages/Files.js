@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { File, Folder, Search, Filter, Save, X, Edit, Trash2, Loader2, FileWarning } from 'lucide-react';
+import { File, Folder, Search, Filter, Save, X, Edit, Trash2, Loader2, FileWarning, RefreshCw } from 'lucide-react';
 import axios from 'axios';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';

@@ -5,7 +5,7 @@ from datetime import datetime
 class NodeBase(BaseModel):
     hostname: str
     ip_address: str
-    agent_port: int = 8000
+    agent_port: int = 8001
     model: Optional[str] = None
     notes: Optional[str] = None
 

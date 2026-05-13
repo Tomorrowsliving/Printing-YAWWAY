@@ -24,9 +24,9 @@ export const printerService = {
 };
 
 export const agentService = {
-  getHealth: (ip, port = 8000) => axios.get(`http://${ip}:${port}/health`),
-  getUsb: (ip, port = 8000) => axios.get(`http://${ip}:${port}/usb`),
-  getInstances: (ip, port = 8000) => axios.get(`http://${ip}:${port}/instances`),
+  getHealth: (ip, port = 8001) => axios.get(`http://${ip}:${port}/health`),
+  getUsb: (ip, port = 8001) => axios.get(`http://${ip}:${port}/usb`),
+  getInstances: (ip, port = 8001) => axios.get(`http://${ip}:${port}/instances`),
   controlInstance: (ip, port, action, instance) =>
     axios.post(`http://${ip}:${port}/instances/${action}`, { name: instance }),
 };

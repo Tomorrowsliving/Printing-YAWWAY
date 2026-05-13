@@ -37,7 +37,7 @@ Create a central server to manage printer profiles, configs, G-code storage, nod
 
 1. Ensure Python 3.9+ is installed.
 2. Install dependencies: `pip install -r requirements.txt`.
-3. Run the agent: `uvicorn main:app --host 0.0.0.0 --port 8000`.
+3. Run the agent: `uvicorn main:app --host 0.0.0.0 --port 8001`.
 4. (Optional) Set up as a systemd service using the provided example file.
 
 ## NFS Configuration
