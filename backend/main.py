@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from .routers import nodes, printers, files, assignments, events, backups, websocket, settings, notifications
 import asyncio
@@ -18,15 +18,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(nodes.router)
-app.include_router(printers.router)
-app.include_router(files.router)
-app.include_router(assignments.router)
-app.include_router(events.router)
-app.include_router(backups.router)
+# Create a main API router with /api prefix
+api_router = APIRouter(prefix="/api")
+
+api_router.include_router(nodes.router)
+api_router.include_router(printers.router)
+api_router.include_router(files.router)
+api_router.include_router(assignments.router)
+api_router.include_router(events.router)
+api_router.include_router(backups.router)
+api_router.include_router(settings.router)
+api_router.include_router(notifications.router)
+
+# Include the API router in the app
+app.include_router(api_router)
+
+# WebSocket usually sits outside /api or uses its own prefix
+# But for consistency with Caddy, let's keep it under /ws
 app.include_router(websocket.router)
-app.include_router(settings.router)
-app.include_router(notifications.router)
 
 @app.on_event("startup")
 async def startup_event():
@@ -63,6 +72,7 @@ async def monitor_nodes():
 
         await asyncio.sleep(30)
 
+@app.get("/api")
 @app.get("/")
 async def root():
     return {"message": "Klipper Farm Control Plane API is running"}

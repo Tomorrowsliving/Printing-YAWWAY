@@ -3,11 +3,11 @@
     file_server
     try_files {path} /index.html
 
-    handle_path /api/* {
+    handle /api/* {
         reverse_proxy backend:8001
     }
 
-    handle_path /ws/* {
+    handle /ws/* {
         reverse_proxy backend:8001
     }
 }
