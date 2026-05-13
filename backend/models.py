@@ -7,7 +7,9 @@ class Node(Base):
     __tablename__ = "nodes"
 
     id = Column(Integer, primary_key=True, index=True)
-    hostname = Column(String, unique=True, index=True)
+    node_uuid = Column(String, unique=True, index=True)
+    hostname = Column(String, index=True)
+    name = Column(String) # User-defined display name
     ip_address = Column(String)
     agent_port = Column(Integer, default=8001)
     cpu_usage = Column(Float, default=0.0)
@@ -15,6 +17,7 @@ class Node(Base):
     temperature = Column(Float, default=0.0)
     uptime = Column(String)
     online = Column(Boolean, default=False)
+    approved = Column(Boolean, default=False)
     last_seen = Column(DateTime(timezone=True))
     model = Column(String)
     notes = Column(Text)

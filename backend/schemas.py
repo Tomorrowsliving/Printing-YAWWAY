@@ -4,16 +4,32 @@ from datetime import datetime
 
 class NodeBase(BaseModel):
     hostname: str
+    name: Optional[str] = None
     ip_address: str
     agent_port: int = 8001
     model: Optional[str] = None
     notes: Optional[str] = None
+    approved: bool = False
 
 class NodeCreate(NodeBase):
-    pass
+    node_uuid: Optional[str] = None
+
+class NodeHeartbeat(BaseModel):
+    node_uuid: str
+    hostname: str
+    ip_address: str
+    agent_port: int
+    model: str
+    cpu_usage: float
+    ram_usage: float
+    temperature: float
+    uptime: str
+    usb_devices: List[dict] = []
+    service_instances: List[dict] = []
 
 class Node(NodeBase):
     id: int
+    node_uuid: Optional[str]
     cpu_usage: float
     ram_usage: float
     temperature: float

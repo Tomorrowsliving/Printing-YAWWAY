@@ -13,3 +13,5 @@ aiofiles
 emails
 jinja2
 alembic
+requests
+ipaddress

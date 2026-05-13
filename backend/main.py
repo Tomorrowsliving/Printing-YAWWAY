@@ -1,6 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .routers import nodes, printers, files, assignments, events, backups, websocket, settings, notifications
+import asyncio
+import datetime
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update
+from .database import AsyncSessionLocal
+from .models import Node, Event
 
 app = FastAPI(title="Klipper Farm Control Plane API")
 
@@ -21,6 +27,41 @@ app.include_router(backups.router)
 app.include_router(websocket.router)
 app.include_router(settings.router)
 app.include_router(notifications.router)
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(monitor_nodes())
+
+async def monitor_nodes():
+    """Background task to detect offline nodes"""
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                # Mark nodes offline if last_seen > 60 seconds
+                threshold = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=60)
+
+                # Find nodes going offline
+                result = await db.execute(
+                    select(Node).where(Node.online == True).where(Node.last_seen < threshold)
+                )
+                nodes_to_offline = result.scalars().all()
+
+                for node in nodes_to_offline:
+                    node.online = False
+                    event = Event(
+                        node_id=node.id,
+                        severity="warning",
+                        event_type="node_offline",
+                        message=f"Node {node.hostname} is offline (no heartbeat for 60s)"
+                    )
+                    db.add(event)
+                    print(f"Node {node.hostname} marked offline")
+
+                await db.commit()
+        except Exception as e:
+            print(f"Error in monitor_nodes: {e}")
+
+        await asyncio.sleep(30)
 
 @app.get("/")
 async def root():
