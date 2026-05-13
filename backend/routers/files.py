@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File
 import os
 import shutil
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
+from fastapi.responses import FileResponse
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -15,13 +16,17 @@ class FileInfo(BaseModel):
     size: int
     last_modified: float
 
+class SaveFileRequest(BaseModel):
+    content: str
+
 @router.get("/{printer_slug}/{file_type}", response_model=List[FileInfo])
 async def list_files(printer_slug: str, file_type: str):
     # file_type could be: config, gcode, logs
     target_path = os.path.join(STORAGE_ROOT, printer_slug, file_type)
 
     if not os.path.exists(target_path):
-        return []
+        # Create directory if it doesn't exist to make it easier for user
+        os.makedirs(target_path, exist_ok=True)
 
     files = []
     for item in os.listdir(target_path):
@@ -49,7 +54,7 @@ async def read_file(path: str):
         return {"content": f.read()}
 
 @router.post("/save")
-async def save_file(path: str, content: str):
+async def save_file(path: str, req: SaveFileRequest):
     if not os.path.abspath(path).startswith(os.path.abspath(STORAGE_ROOT)):
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -60,9 +65,30 @@ async def save_file(path: str, content: str):
             shutil.copy2(path, backup_path)
 
     with open(path, "w") as f:
-        f.write(content)
+        f.write(req.content)
 
     return {"status": "success"}
+
+@router.post("/upload")
+async def upload_file(printer_slug: str, file_type: str, file: UploadFile = File(...)):
+    target_dir = os.path.join(STORAGE_ROOT, printer_slug, file_type)
+    os.makedirs(target_dir, exist_ok=True)
+
+    file_path = os.path.join(target_dir, file.filename)
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    return {"filename": file.filename, "status": "success"}
+
+@router.get("/download")
+async def download_file(path: str):
+    if not os.path.abspath(path).startswith(os.path.abspath(STORAGE_ROOT)):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return FileResponse(path, filename=os.path.basename(path))
 
 @router.delete("/delete")
 async def delete_file(path: str):
@@ -70,7 +96,10 @@ async def delete_file(path: str):
         raise HTTPException(status_code=403, detail="Access denied")
 
     if os.path.exists(path):
-        os.remove(path)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
         return {"status": "success"}
     else:
         raise HTTPException(status_code=404, detail="File not found")

@@ -1,12 +1,30 @@
 import React, { useState, useEffect } from 'react';
-import { Printer, Play, AlertTriangle, ExternalLink, Settings as SettingsIcon, RefreshCw } from 'lucide-react';
+import { Printer, Play, AlertTriangle, ExternalLink, Settings as SettingsIcon, RefreshCw, Plus, Loader2 } from 'lucide-react';
 import { printerService } from '../services/api';
 import { Link } from 'react-router-dom';
+import { Modal } from '../components/UI';
 
-const Fleet = () => {
+const Fleet = ({ addToast }) => {
   const [printers, setPrinters] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const [formData, setFormData] = useState({
+    name: '',
+    slug: '',
+    model: '',
+    mcu_serial: '',
+    expected_mcu_serial: '',
+    klipper_service_name: '',
+    moonraker_service_name: '',
+    moonraker_port: 7125,
+    config_path: '',
+    gcode_path: '',
+    webcam_url: '',
+    embedded_ui_url: ''
+  });
 
   useEffect(() => {
     fetchPrinters();
@@ -20,10 +38,40 @@ const Fleet = () => {
       setPrinters(Array.isArray(res.data) ? res.data : []);
       setError(null);
     } catch (err) {
-      console.error("Error fetching printers:", err);
-      setError("Could not connect to the central server. Please check if the backend is running.");
+      setError("Could not connect to the central server.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    setFormData(prev => {
+      const newData = { ...prev, [name]: value };
+      if (name === 'name' && !prev.slug) {
+        newData.slug = value.toLowerCase().replace(/[^a-z0-9]/g, '-');
+      }
+      return newData;
+    });
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setIsSubmitting(true);
+    try {
+      await printerService.createPrinter(formData);
+      addToast(`Printer ${formData.name} added successfully!`, 'success');
+      setIsModalOpen(false);
+      fetchPrinters();
+      setFormData({
+        name: '', slug: '', model: '', mcu_serial: '', expected_mcu_serial: '',
+        klipper_service_name: '', moonraker_service_name: '', moonraker_port: 7125,
+        config_path: '', gcode_path: '', webcam_url: '', embedded_ui_url: ''
+      });
+    } catch (err) {
+      addToast(err.response?.data?.detail || "Failed to create printer", 'error');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -51,17 +99,14 @@ const Fleet = () => {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold">Fleet Overview</h2>
-        <button className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-bold transition-colors shadow-lg shadow-blue-900/20">
-          Add Printer
+        <button
+          onClick={() => setIsModalOpen(true)}
+          className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-bold transition-colors shadow-lg shadow-blue-900/20"
+        >
+          <Plus size={18} />
+          <span>Add Printer</span>
         </button>
       </div>
-
-      {error && (
-        <div className="bg-red-500/10 border border-red-500/20 p-4 rounded-xl flex items-center space-x-3 text-red-500">
-          <AlertTriangle size={20} />
-          <span className="text-sm font-medium">{error}</span>
-        </div>
-      )}
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         {printers.map((printer) => (
@@ -78,7 +123,7 @@ const Fleet = () => {
               <div className="flex justify-between items-start">
                 <div>
                   <div className="flex items-center space-x-2">
-                    <h3 className="font-bold text-lg">{printer.name || 'Unknown Printer'}</h3>
+                    <h3 className="font-bold text-lg">{printer.name}</h3>
                     <div className={`w-3 h-3 rounded-full ${getStatusColor(printer.status)} shadow-sm`}></div>
                   </div>
                   <p className="text-xs text-slate-400">Node: {printer.node?.hostname || 'Unassigned'}</p>
@@ -96,7 +141,6 @@ const Fleet = () => {
               <div className="py-4">
                 <div className="flex justify-between items-end mb-1">
                   <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{printer.status || 'offline'}</span>
-                  {printer.status === 'printing' && <span className="text-xs font-bold text-blue-400">45%</span>}
                 </div>
                 <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden">
                   <div
@@ -107,24 +151,66 @@ const Fleet = () => {
               </div>
 
               <div className="flex space-x-3">
-                <button className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-xs font-bold transition-colors text-slate-200">
+                <button onClick={() => addToast("Emergency Stop not implemented yet", "info")} className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-xs font-bold transition-colors text-slate-200">
                   Emergency Stop
                 </button>
-                <button className="px-4 bg-blue-600 hover:bg-blue-700 py-2 rounded-lg transition-colors text-white shadow-md">
+                <button onClick={() => addToast("Quick Print not implemented yet", "info")} className="px-4 bg-blue-600 hover:bg-blue-700 py-2 rounded-lg transition-colors text-white shadow-md">
                   <Play size={16} fill="currentColor" />
                 </button>
               </div>
             </div>
           </div>
         ))}
-        {printers.length === 0 && !loading && (
-          <div className="col-span-full py-16 text-center bg-slate-800/50 border border-slate-700 rounded-xl border-dashed">
-            <Printer size={48} className="mx-auto text-slate-700 mb-4 opacity-20" />
-            <p className="text-slate-400 font-medium">No printers found in the fleet.</p>
-            <p className="text-xs text-slate-500 mt-1">Connect a printer to get started.</p>
-          </div>
-        )}
       </div>
+
+      <Modal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        title="Add New Printer"
+        footer={
+          <div className="flex justify-end space-x-3">
+            <button onClick={() => setIsModalOpen(false)} className="px-4 py-2 text-sm font-bold text-slate-400 hover:text-white transition-colors">Cancel</button>
+            <button
+              form="printer-form"
+              disabled={isSubmitting}
+              className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 px-6 py-2 rounded-lg text-sm font-bold transition-colors"
+            >
+              {isSubmitting ? <Loader2 className="animate-spin" size={18} /> : <span>Add Printer</span>}
+            </button>
+          </div>
+        }
+      >
+        <form id="printer-form" onSubmit={handleSubmit} className="space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-slate-500 uppercase">Printer Name</label>
+              <input required name="name" value={formData.name} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" />
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-slate-500 uppercase">Slug</label>
+              <input required name="slug" value={formData.slug} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-500 uppercase">Model</label>
+            <input name="model" value={formData.model} onChange={handleInputChange} placeholder="e.g. Ender 3 V2" className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-slate-500 uppercase">Expected MCU Serial</label>
+              <input name="expected_mcu_serial" value={formData.expected_mcu_serial} onChange={handleInputChange} placeholder="/dev/serial/by-id/..." className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" />
+            </div>
+            <div className="space-y-1">
+              <label className="text-[10px] font-bold text-slate-500 uppercase">Moonraker Port</label>
+              <input type="number" name="moonraker_port" value={formData.moonraker_port} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-bold text-slate-500 uppercase">Embedded UI URL</label>
+            <input name="embedded_ui_url" value={formData.embedded_ui_url} onChange={handleInputChange} placeholder="http://pi-ip" className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" />
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 };

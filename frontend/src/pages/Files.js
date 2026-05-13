@@ -1,25 +1,27 @@
 import React, { useState, useEffect } from 'react';
-import { File, Folder, Search, Filter, Save, X, Edit, Trash2 } from 'lucide-react';
+import { File, Folder, Search, Filter, Save, X, Edit, Trash2, Loader2, FileWarning } from 'lucide-react';
 import axios from 'axios';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';
 
-const FileManager = () => {
+const FileManager = ({ addToast }) => {
   const [printers, setPrinters] = useState([]);
   const [selectedPrinter, setSelectedPrinter] = useState('');
   const [selectedType, setSelectedType] = useState('config');
   const [files, setFiles] = useState([]);
+  const [loading, setLoading] = useState(false);
   const [editingFile, setEditingFile] = useState(null);
   const [editContent, setEditContent] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
-    // Fetch printers to populate dropdown
     axios.get(`${API_BASE_URL}/printers`)
       .then(res => {
         setPrinters(res.data);
         if (res.data.length > 0) setSelectedPrinter(res.data[0].slug);
-      });
-  }, []);
+      })
+      .catch(() => addToast("Failed to fetch printers", "error"));
+  }, [addToast]);
 
   useEffect(() => {
     if (selectedPrinter && selectedType) {
@@ -28,12 +30,14 @@ const FileManager = () => {
   }, [selectedPrinter, selectedType]);
 
   const fetchFiles = async () => {
+    setLoading(true);
     try {
       const res = await axios.get(`${API_BASE_URL}/files/${selectedPrinter}/${selectedType}`);
       setFiles(res.data);
     } catch (err) {
-      console.error("Error fetching files:", err);
       setFiles([]);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -43,20 +47,23 @@ const FileManager = () => {
       setEditingFile(file);
       setEditContent(res.data.content);
     } catch (err) {
-      alert("Failed to read file");
+      addToast("Failed to read file", "error");
     }
   };
 
   const handleSave = async () => {
+    setIsSaving(true);
     try {
-      await axios.post(`${API_BASE_URL}/files/save`, null, {
-        params: { path: editingFile.path, content: editContent }
+      await axios.post(`${API_BASE_URL}/files/save`, { content: editContent }, {
+        params: { path: editingFile.path }
       });
-      alert("File saved successfully (backup created)");
+      addToast("File saved successfully (backup created)", "success");
       setEditingFile(null);
       fetchFiles();
     } catch (err) {
-      alert("Failed to save file");
+      addToast("Failed to save file", "error");
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -64,9 +71,10 @@ const FileManager = () => {
     if (!window.confirm(`Are you sure you want to delete ${file.name}?`)) return;
     try {
       await axios.delete(`${API_BASE_URL}/files/delete`, { params: { path: file.path } });
+      addToast("File deleted", "success");
       fetchFiles();
     } catch (err) {
-      alert("Failed to delete file");
+      addToast("Failed to delete file", "error");
     }
   };
 
@@ -76,100 +84,105 @@ const FileManager = () => {
         <h2 className="text-2xl font-bold">File Manager</h2>
       </div>
 
-      <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 flex flex-wrap gap-4">
-        <div className="flex items-center space-x-2">
-          <label className="text-sm font-bold text-slate-500 uppercase">Printer:</label>
+      <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 flex flex-wrap gap-4 items-end">
+        <div className="space-y-1">
+          <label className="text-[10px] font-bold text-slate-500 uppercase">Printer</label>
           <select
             value={selectedPrinter}
             onChange={(e) => setSelectedPrinter(e.target.value)}
-            className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-sm outline-none focus:border-blue-500"
+            className="w-48 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500"
           >
+            <option value="">Select Printer...</option>
             {printers.map(p => <option key={p.id} value={p.slug}>{p.name}</option>)}
           </select>
         </div>
-        <div className="flex items-center space-x-2">
-          <label className="text-sm font-bold text-slate-500 uppercase">Type:</label>
+        <div className="space-y-1">
+          <label className="text-[10px] font-bold text-slate-500 uppercase">File Type</label>
           <select
             value={selectedType}
             onChange={(e) => setSelectedType(e.target.value)}
-            className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-sm outline-none focus:border-blue-500"
+            className="w-48 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500"
           >
             <option value="config">Configuration</option>
             <option value="gcode">G-code</option>
             <option value="logs">Logs</option>
           </select>
         </div>
+        <button onClick={fetchFiles} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors">
+          <RefreshCw size={18} className={loading ? "animate-spin" : ""} />
+        </button>
       </div>
 
       <div className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
-        <table className="w-full text-left">
-          <thead>
-            <tr className="border-b border-slate-700 bg-slate-900/50">
-              <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase">Name</th>
-              <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase">Size</th>
-              <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase">Modified</th>
-              <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-700">
-            {files.map((file) => (
-              <tr key={file.path} className="hover:bg-slate-700/30 transition-colors">
-                <td className="px-6 py-4 flex items-center space-x-3">
-                  <File size={18} className="text-blue-400" />
-                  <span className="font-medium">{file.name}</span>
-                </td>
-                <td className="px-6 py-4 text-sm text-slate-400">
-                  {(file.size / 1024).toFixed(2)} KB
-                </td>
-                <td className="px-6 py-4 text-sm text-slate-400">
-                  {new Date(file.last_modified * 1000).toLocaleString()}
-                </td>
-                <td className="px-6 py-4 text-right space-x-2">
-                  <button onClick={() => handleEdit(file)} className="p-1.5 hover:bg-slate-600 rounded-lg transition-colors text-blue-400">
-                    <Edit size={16} />
-                  </button>
-                  <button onClick={() => handleDelete(file)} className="p-1.5 hover:bg-slate-600 rounded-lg transition-colors text-red-400">
-                    <Trash2 size={16} />
-                  </button>
-                </td>
+        {loading ? (
+          <div className="p-12 flex justify-center"><Loader2 className="animate-spin text-blue-500" size={32} /></div>
+        ) : (
+          <table className="w-full text-left">
+            <thead>
+              <tr className="border-b border-slate-700 bg-slate-900/50">
+                <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase">Name</th>
+                <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase text-right">Actions</th>
               </tr>
-            ))}
-            {files.length === 0 && (
-              <tr>
-                <td colSpan="4" className="px-6 py-12 text-center text-slate-500">No files found.</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-slate-700">
+              {files.map((file) => (
+                <tr key={file.path} className="hover:bg-slate-700/30 transition-colors">
+                  <td className="px-6 py-4 flex items-center space-x-3">
+                    <File size={18} className="text-blue-400" />
+                    <span className="font-medium text-sm">{file.name}</span>
+                  </td>
+                  <td className="px-6 py-4 text-right space-x-2">
+                    <button onClick={() => handleEdit(file)} className="p-1.5 hover:bg-slate-600 rounded-lg transition-colors text-blue-400">
+                      <Edit size={16} />
+                    </button>
+                    <button onClick={() => handleDelete(file)} className="p-1.5 hover:bg-slate-600 rounded-lg transition-colors text-red-400">
+                      <Trash2 size={16} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {files.length === 0 && (
+                <tr>
+                  <td colSpan="2" className="px-6 py-12 text-center text-slate-500 italic flex flex-col items-center">
+                    <FileWarning size={32} className="mb-2 opacity-20" />
+                    <span>No files found for this printer and type.</span>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        )}
       </div>
 
-      {/* Editor Modal */}
       {editingFile && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-800 border border-slate-700 rounded-2xl w-full max-w-4xl h-[80vh] flex flex-col shadow-2xl">
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-[60] animate-in fade-in duration-200">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl w-full max-w-5xl h-[85vh] flex flex-col shadow-2xl animate-in zoom-in-95 duration-200">
             <div className="p-4 border-b border-slate-700 flex justify-between items-center">
-              <div>
-                <h3 className="font-bold">Editing: {editingFile.name}</h3>
-                <p className="text-xs text-slate-400">{editingFile.path}</p>
+              <div className="flex items-center space-x-3">
+                <div className="p-2 bg-blue-500/10 text-blue-500 rounded-lg"><Edit size={20} /></div>
+                <div>
+                  <h3 className="font-bold">{editingFile.name}</h3>
+                  <p className="text-[10px] text-slate-500 font-mono">{editingFile.path}</p>
+                </div>
               </div>
-              <button onClick={() => setEditingFile(null)} className="p-2 hover:bg-slate-700 rounded-lg">
-                <X size={20} />
-              </button>
+              <button onClick={() => setEditingFile(null)} className="p-2 hover:bg-slate-700 rounded-lg transition-colors"><X size={20} /></button>
             </div>
-            <div className="flex-1 p-4">
+            <div className="flex-1 p-4 bg-slate-900">
               <textarea
                 value={editContent}
                 onChange={(e) => setEditContent(e.target.value)}
-                className="w-full h-full bg-slate-900 text-slate-300 font-mono text-sm p-4 rounded-xl border border-slate-700 outline-none focus:border-blue-500 resize-none"
+                className="w-full h-full bg-transparent text-blue-100 font-mono text-sm p-4 outline-none resize-none"
+                spellCheck="false"
               />
             </div>
-            <div className="p-4 border-t border-slate-700 flex justify-end space-x-3">
-              <button onClick={() => setEditingFile(null)} className="px-4 py-2 text-sm font-bold text-slate-400 hover:text-white transition-colors">
-                Cancel
-              </button>
-              <button onClick={handleSave} className="flex items-center space-x-2 px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-bold transition-colors">
-                <Save size={18} />
-                <span>Save Changes</span>
+            <div className="p-4 border-t border-slate-700 flex justify-end space-x-3 bg-slate-800/50">
+              <button onClick={() => setEditingFile(null)} className="px-4 py-2 text-sm font-bold text-slate-400 hover:text-white transition-colors">Cancel</button>
+              <button
+                onClick={handleSave}
+                disabled={isSaving}
+                className="flex items-center space-x-2 px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 rounded-lg text-sm font-bold transition-colors"
+              >
+                {isSaving ? <Loader2 className="animate-spin" size={18} /> : <><Save size={18} /><span>Save & Backup</span></>}
               </button>
             </div>
           </div>

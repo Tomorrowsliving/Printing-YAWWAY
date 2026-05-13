@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List
 from ..database import get_db
-from ..models import Printer, Node, PrinterNote
+from ..models import Printer, Node, PrinterNote, Event
 from ..schemas import PrinterCreate, Printer as PrinterSchema
 import datetime
 
@@ -14,6 +14,15 @@ async def create_printer(printer_in: PrinterCreate, db: AsyncSession = Depends(g
     printer = Printer(**printer_in.model_dump())
     printer.created_at = datetime.datetime.now(datetime.timezone.utc)
     db.add(printer)
+
+    # Record event
+    event = Event(
+        severity="info",
+        event_type="printer_creation",
+        message=f"Printer {printer.name} created."
+    )
+    db.add(event)
+
     await db.flush()
     return printer
 

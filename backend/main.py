@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import nodes, printers, files, assignments, events, backups, websocket
+from .routers import nodes, printers, files, assignments, events, backups, websocket, settings, notifications
 
 app = FastAPI(title="Klipper Farm Control Plane API")
 
@@ -19,6 +19,8 @@ app.include_router(assignments.router)
 app.include_router(events.router)
 app.include_router(backups.router)
 app.include_router(websocket.router)
+app.include_router(settings.router)
+app.include_router(notifications.router)
 
 @app.get("/")
 async def root():
