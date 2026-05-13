@@ -40,15 +40,44 @@ Create a central server to manage printer profiles, configs, G-code storage, nod
 3. Run the agent: `uvicorn main:app --host 0.0.0.0 --port 8000`.
 4. (Optional) Set up as a systemd service using the provided example file.
 
-## NFS Assumptions
+## NFS Configuration
 
-- Central server exports `/srv/klipper-farm` (or similar) as an NFS share.
-- Raspberry Pi nodes mount this share at a consistent path.
-- Paths are structured as:
-  - `/srv/klipper-farm/printers/{printer_slug}/config`
-  - `/srv/klipper-farm/printers/{printer_slug}/gcode`
-  - `/srv/klipper-farm/printers/{printer_slug}/logs`
-  - `/srv/klipper-farm/backups`
+The central server runs an NFS server container (`nfs`) that exports the `./storage` directory.
+
+### Server Side
+The NFS container is configured in `docker-compose.yml`:
+- Image: `itsthenetwork/nfs-server-alpine`
+- Exported path: `/exports` (mapped from `./storage`)
+- Port: `2049`
+
+### Client Side (Raspberry Pi)
+To mount the shared storage on your Pi nodes:
+
+1. Install NFS client:
+   ```bash
+   sudo apt update && sudo apt install -y nfs-common
+   ```
+2. Create mount point:
+   ```bash
+   sudo mkdir -p /mnt/klipper-farm
+   ```
+3. Mount the share (replace `YOUR_SERVER_IP` with the dashboard server's IP):
+   ```bash
+   sudo mount YOUR_SERVER_IP:/exports /mnt/klipper-farm
+   ```
+4. To make it persistent, add to `/etc/fstab`:
+   ```text
+   YOUR_SERVER_IP:/exports /mnt/klipper-farm nfs defaults,soft,intr 0 0
+   ```
+
+## Storage Layout
+
+The `storage/` directory is organised as follows:
+- `printers/`: Klipper/Moonraker instance data per printer.
+- `gcodes/`: Centralised G-code file storage.
+- `backups/`: System and configuration backups.
+- `configs/`: Global or shared configuration templates.
+- `uploads/`: Temporary directory for file uploads.
 
 ## UI Labels & Language
 
