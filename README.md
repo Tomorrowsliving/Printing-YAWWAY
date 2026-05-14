@@ -86,3 +86,27 @@ The `storage/` directory is organised as follows:
 ## UI Labels & Language
 
 This project uses British English (e.g., "Initialise", "Organise", "Colour") for all UI labels, comments, and documentation.
+
+## Recommended Node Agent Installation
+
+To support automatic updates, it is recommended to install the node-agent via Git:
+
+```bash
+# Install dependencies
+sudo apt update && sudo apt install -y git python3-venv python3-pip
+
+# Clone the repository
+git clone https://github.com/Tomorrowsliving/Printing-YAWWAY-.git
+cd Printing-YAWWAY-/node-agent
+
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Run manually to test
+export BACKEND_URL=http://your-server-ip:8001
+python3 main.py
+```
+
+When setting up as a systemd service, ensure `Environment=NODE_AGENT_DIR=/path/to/Printing-YAWWAY-/node-agent` is included in the unit file.

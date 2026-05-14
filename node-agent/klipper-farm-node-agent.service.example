@@ -1,0 +1,16 @@
+[Unit]
+Description=Klipper Farm Node Agent
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/Printing-YAWWAY-/node-agent
+Environment=BACKEND_URL=http://YOUR_SERVER_IP:8001
+Environment=NODE_AGENT_DIR=/home/pi/Printing-YAWWAY-/node-agent
+ExecStart=/home/pi/Printing-YAWWAY-/node-agent/venv/bin/python3 main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
