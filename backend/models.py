@@ -21,6 +21,13 @@ class Node(Base):
     last_seen = Column(DateTime(timezone=True))
     model = Column(String)
     notes = Column(Text)
+
+    # Versioning & Updates
+    agent_version = Column(String, default="1.0.0")
+    update_available = Column(Boolean, default=False)
+    last_update_check = Column(DateTime(timezone=True))
+    status = Column(String, default="discovered") # discovered, approved, online, offline, updating, error
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

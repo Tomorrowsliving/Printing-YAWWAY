@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 import psutil
 import socket
@@ -11,6 +11,9 @@ import json
 import requests
 import asyncio
 from contextlib import asynccontextmanager
+from typing import List, Optional
+
+VERSION = "1.0.0"
 
 # Local storage for node UUID
 NODE_ID_PATH = os.path.expanduser("~/.klipper-farm/node_id")
@@ -20,7 +23,6 @@ def get_node_uuid():
         with open(NODE_ID_PATH, "r") as f:
             return f.read().strip()
 
-    # Generate new UUID
     new_id = str(uuid.uuid4())
     os.makedirs(os.path.dirname(NODE_ID_PATH), exist_ok=True)
     with open(NODE_ID_PATH, "w") as f:
@@ -29,148 +31,9 @@ def get_node_uuid():
 
 BACKEND_URL = os.getenv("BACKEND_URL")
 
-async def heartbeat_task():
-    if not BACKEND_URL:
-        print("BACKEND_URL not set. Heartbeat disabled.")
-        return
-
-    node_uuid = get_node_uuid()
-    print(f"Starting heartbeat to {BACKEND_URL}")
-    while True:
-        try:
-            # Get current stats
-            cpu_usage = psutil.cpu_percent(interval=None)
-            ram = psutil.virtual_memory()
-
-            temp = 0.0
-            if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
-                with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-                    temp = float(f.read()) / 1000.0
-
-            # Get USB devices
-            usb_devices = []
-            usb_path = "/dev/serial/by-id"
-            if os.path.exists(usb_path):
-                for dev in os.listdir(usb_path):
-                    usb_devices.append({
-                        "id": dev,
-                        "path": os.path.join(usb_path, dev)
-                    })
-
-            payload = {
-                "node_uuid": node_uuid,
-                "hostname": socket.gethostname(),
-                "ip_address": get_local_ip(),
-                "agent_port": 8001,
-                "model": get_pi_model(),
-                "cpu_usage": cpu_usage,
-                "ram_usage": ram.percent,
-                "temperature": temp,
-                "uptime": f"{int(time.time() - psutil.boot_time())}s",
-                "usb_devices": usb_devices,
-                "service_instances": [] # Tasks will be populated in future iterations
-            }
-
-            requests.post(f"{BACKEND_URL}/api/nodes/heartbeat", json=payload, timeout=5)
-        except Exception as e:
-            print(f"Heartbeat failed: {e}")
-
-        await asyncio.sleep(15)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Start heartbeat task
-    task = asyncio.create_task(heartbeat_task())
-    yield
-    task.cancel()
-
-app = FastAPI(title="Klipper Farm Node Agent", lifespan=lifespan)
-
-class ServiceCommand(BaseModel):
-    name: str
-
-@app.get("/health")
-async def get_health():
-    try:
-        cpu_usage = psutil.cpu_percent(interval=1)
-        ram = psutil.virtual_memory()
-
-        temp = 0.0
-        try:
-            if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
-                with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
-                    temp = float(f.read()) / 1000.0
-            else:
-                temps = psutil.sensors_temperatures()
-                if 'cpu_thermal' in temps:
-                    temp = temps['cpu_thermal'][0].current
-                elif 'coretemp' in temps:
-                    temp = temps['coretemp'][0].current
-        except Exception:
-            pass
-
-        return {
-            "hostname": socket.gethostname(),
-            "ip_address": get_local_ip(),
-            "cpu_usage": cpu_usage,
-            "ram_usage": ram.percent,
-            "temperature": temp,
-            "uptime": f"{int(time.time() - psutil.boot_time())}s",
-            "online": True,
-            "pi_model": get_pi_model()
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/usb")
-async def get_usb():
-    devices = []
-    path = "/dev/serial/by-id"
-    if os.path.exists(path):
-        for dev in os.listdir(path):
-            devices.append({
-                "id": dev,
-                "path": os.path.join(path, dev),
-                "target": os.path.realpath(os.path.join(path, dev))
-            })
-    return devices
-
-@app.get("/instances")
-async def get_instances():
-    # Placeholder: In real usage, we'd list klipper-* and moonraker-* services
-    # For now, return empty list or mock data
-    return []
-
-@app.post("/instances/start")
-async def start_instance(cmd: ServiceCommand):
-    return run_systemctl("start", cmd.name)
-
-@app.post("/instances/stop")
-async def stop_instance(cmd: ServiceCommand):
-    return run_systemctl("stop", cmd.name)
-
-@app.post("/instances/restart")
-async def restart_instance(cmd: ServiceCommand):
-    return run_systemctl("restart", cmd.name)
-
-def run_systemctl(action: str, service_name: str):
-    # Security: validate service name
-    if not re.match(r"^[a-zA-Z0-9\-\.]+$", service_name):
-        raise HTTPException(status_code=400, detail="Invalid service name")
-
-    if not service_name.startswith(("klipper", "moonraker", "node-agent")):
-        raise HTTPException(status_code=400, detail="Unauthorised service name")
-
-    try:
-        subprocess.run(["sudo", "systemctl", action, service_name], check=True)
-        return {"status": "success", "action": action, "service": service_name}
-    except subprocess.CalledProcessError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to {action} {service_name}: {e}")
-
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        # doesn't even have to be reachable
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
     except Exception:
@@ -187,6 +50,154 @@ def get_pi_model():
     except Exception:
         pass
     return "Unknown"
+
+async def heartbeat_task():
+    if not BACKEND_URL:
+        print("BACKEND_URL not set. Heartbeat disabled.")
+        return
+
+    node_uuid = get_node_uuid()
+    print(f"Starting heartbeat to {BACKEND_URL}")
+    while True:
+        try:
+            cpu_usage = psutil.cpu_percent(interval=None)
+            ram = psutil.virtual_memory()
+
+            temp = 0.0
+            if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
+                with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+                    temp = float(f.read()) / 1000.0
+
+            usb_devices = []
+            usb_path = "/dev/serial/by-id"
+            if os.path.exists(usb_path):
+                for dev in os.listdir(usb_path):
+                    usb_devices.append({"id": dev, "path": os.path.join(usb_path, dev)})
+
+            payload = {
+                "node_uuid": node_uuid,
+                "hostname": socket.gethostname(),
+                "ip_address": get_local_ip(),
+                "agent_port": 8001,
+                "model": get_pi_model(),
+                "cpu_usage": cpu_usage,
+                "ram_usage": ram.percent,
+                "temperature": temp,
+                "uptime": f"{int(time.time() - psutil.boot_time())}s",
+                "agent_version": VERSION,
+                "usb_devices": usb_devices,
+                "service_instances": []
+            }
+
+            requests.post(f"{BACKEND_URL}/api/nodes/heartbeat", json=payload, timeout=5)
+        except Exception as e:
+            print(f"Heartbeat failed: {e}")
+
+        await asyncio.sleep(15)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(heartbeat_task())
+    yield
+    task.cancel()
+
+app = FastAPI(title="Klipper Farm Node Agent", lifespan=lifespan)
+
+class ServiceCommand(BaseModel):
+    name: str
+
+@app.get("/version")
+async def get_version():
+    return {
+        "version": VERSION,
+        "hostname": socket.gethostname(),
+        "ip_address": get_local_ip()
+    }
+
+@app.get("/health")
+async def get_health():
+    try:
+        cpu_usage = psutil.cpu_percent(interval=1)
+        ram = psutil.virtual_memory()
+
+        temp = 0.0
+        if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
+            with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+                temp = float(f.read()) / 1000.0
+
+        return {
+            "hostname": socket.gethostname(),
+            "ip_address": get_local_ip(),
+            "cpu_usage": cpu_usage,
+            "ram_usage": ram.percent,
+            "temperature": temp,
+            "uptime": f"{int(time.time() - psutil.boot_time())}s",
+            "online": True,
+            "pi_model": get_pi_model(),
+            "version": VERSION
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/update")
+async def update_agent():
+    """Trigger a git-based update and service restart"""
+    try:
+        # 1. Create backup of current folder
+        subprocess.run(["tar", "-czf", "../node-agent-backup.tar.gz", "."], check=True)
+
+        # 2. Git pull
+        subprocess.run(["git", "pull"], check=True)
+
+        # 3. Pip install
+        subprocess.run(["pip", "install", "-r", "requirements.txt"], check=True)
+
+        # 4. Restart service (async to allow response to return)
+        os.system("sleep 2 && sudo systemctl restart klipper-farm-agent &")
+
+        return {"status": "success", "message": "Update initiated. Service will restart in 2 seconds."}
+    except Exception as e:
+        # Rollback
+        subprocess.run(["tar", "-xzf", "../node-agent-backup.tar.gz"], check=True)
+        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}. Rollback completed.")
+
+@app.get("/usb")
+async def get_usb():
+    devices = []
+    path = "/dev/serial/by-id"
+    if os.path.exists(path):
+        for dev in os.listdir(path):
+            devices.append({
+                "id": dev,
+                "path": os.path.join(path, dev),
+                "target": os.path.realpath(os.path.join(path, dev))
+            })
+    return devices
+
+@app.post("/instances/start")
+async def start_instance(cmd: ServiceCommand):
+    return run_systemctl("start", cmd.name)
+
+@app.post("/instances/stop")
+async def stop_instance(cmd: ServiceCommand):
+    return run_systemctl("stop", cmd.name)
+
+@app.post("/instances/restart")
+async def restart_instance(cmd: ServiceCommand):
+    return run_systemctl("restart", cmd.name)
+
+def run_systemctl(action: str, service_name: str):
+    if not re.match(r"^[a-zA-Z0-9\-\.]+$", service_name):
+        raise HTTPException(status_code=400, detail="Invalid service name")
+
+    if not service_name.startswith(("klipper", "moonraker", "node-agent")):
+        raise HTTPException(status_code=400, detail="Unauthorised service name")
+
+    try:
+        subprocess.run(["sudo", "systemctl", action, service_name], check=True)
+        return {"status": "success", "action": action, "service": service_name}
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to {action} {service_name}: {e}")
 
 if __name__ == "__main__":
     import uvicorn

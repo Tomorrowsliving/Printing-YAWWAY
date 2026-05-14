@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Server, Activity, Thermometer, Cpu, HardDrive, CheckCircle, XCircle, RefreshCw, Plus, Loader2, Usb, Layers, ShieldCheck, Edit, Trash2, Save } from 'lucide-react';
+import { Server, Activity, Thermometer, Cpu, HardDrive, CheckCircle, XCircle, RefreshCw, Plus, Loader2, Usb, Layers, ShieldCheck, Edit, Trash2, Save, ArrowUpCircle } from 'lucide-react';
 import { nodeService, agentService } from '../services/api';
 import { Modal } from '../components/UI';
 import axios from 'axios';
@@ -10,6 +10,7 @@ const NodeOverview = ({ addToast }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [actionNodeId, setActionNodeId] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
 
   const [formData, setFormData] = useState({
@@ -27,7 +28,7 @@ const NodeOverview = ({ addToast }) => {
 
   useEffect(() => {
     fetchNodes();
-    const interval = setInterval(fetchNodes, 5000);
+    const interval = setInterval(fetchNodes, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -68,23 +69,43 @@ const NodeOverview = ({ addToast }) => {
   };
 
   const handleApprove = async (nodeId) => {
+    setActionNodeId(nodeId);
     try {
       await axios.post(`/api/nodes/${nodeId}/approve`);
       addToast("Node approved", "success");
       fetchNodes();
     } catch (err) {
-      addToast("Failed to approve node", "error");
+      addToast(err.response?.data?.detail || "Failed to approve node", "error");
+    } finally {
+      setActionNodeId(null);
     }
   };
 
   const handleDeleteNode = async (nodeId) => {
     if (!window.confirm("Are you sure you want to remove this node? This will not stop any services running on the node itself.")) return;
+    setActionNodeId(nodeId);
     try {
       await axios.delete(`/api/nodes/${nodeId}`);
       addToast("Node removed from dashboard", "success");
       fetchNodes();
     } catch (err) {
-      addToast("Failed to delete node", "error");
+      addToast(err.response?.data?.detail || "Failed to delete node", "error");
+    } finally {
+      setActionNodeId(null);
+    }
+  };
+
+  const handleUpdateNodeAgent = async (nodeId) => {
+    if (!window.confirm("Trigger remote update on this node? The agent will restart.")) return;
+    setActionNodeId(nodeId);
+    try {
+      await axios.post(`/api/nodes/${nodeId}/update`);
+      addToast("Update sequence started", "success");
+      fetchNodes();
+    } catch (err) {
+      addToast(err.response?.data?.detail || "Failed to trigger update", "error");
+    } finally {
+      setActionNodeId(null);
     }
   };
 
@@ -116,13 +137,15 @@ const NodeOverview = ({ addToast }) => {
   };
 
   const handleRefresh = async (node) => {
-    addToast(`Refreshing ${node.hostname}...`, 'info');
+    setActionNodeId(node.id);
     try {
       await axios.post(`/api/nodes/${node.id}/refresh`);
       fetchNodes();
       addToast("Refresh successful", "success");
     } catch (err) {
       addToast(err.response?.data?.detail || "Node unreachable", 'error');
+    } finally {
+      setActionNodeId(null);
     }
   };
 
@@ -157,7 +180,13 @@ const NodeOverview = ({ addToast }) => {
             {!node.approved && (
                <div className="flex items-center justify-between bg-blue-500/10 -mx-5 -mt-5 p-3 px-5 border-b border-blue-500/20 rounded-t-xl mb-4">
                   <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">New Discovery</span>
-                  <button onClick={() => handleApprove(node.id)} className="text-[10px] font-bold bg-blue-600 hover:bg-blue-500 text-white px-2 py-0.5 rounded">Approve</button>
+                  <button
+                    disabled={actionNodeId === node.id}
+                    onClick={() => handleApprove(node.id)}
+                    className="text-[10px] font-bold bg-blue-600 hover:bg-blue-500 disabled:bg-slate-600 text-white px-2 py-0.5 rounded flex items-center space-x-1"
+                  >
+                    {actionNodeId === node.id ? <Loader2 className="animate-spin" size={10} /> : <span>Approve</span>}
+                  </button>
                </div>
             )}
 
@@ -168,11 +197,11 @@ const NodeOverview = ({ addToast }) => {
                 </div>
                 <div className="min-w-0">
                   <h3 className="font-bold text-lg truncate pr-2">{node.name || node.hostname}</h3>
-                  <p className="text-[10px] font-mono text-slate-500 truncate uppercase">{node.hostname} • {node.node_uuid?.substring(0,8) || 'No UUID'}</p>
+                  <p className="text-[10px] font-mono text-slate-500 truncate uppercase">{node.hostname} • v{node.agent_version || '1.0.0'}</p>
                 </div>
               </div>
               <div className={`flex items-center space-x-1 text-[10px] font-bold uppercase tracking-tighter px-2 py-0.5 rounded-full shrink-0 ${node.online ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
-                <span>{node.online ? 'Online' : 'Offline'}</span>
+                <span>{node.status}</span>
               </div>
             </div>
 
@@ -208,11 +237,16 @@ const NodeOverview = ({ addToast }) => {
             </div>
 
             <div className="flex space-x-2 pt-2">
-              <button onClick={() => handleRefresh(node)} className="flex-1 flex items-center justify-center space-x-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-[10px] font-bold transition-colors">
-                <RefreshCw size={12} /> <span>Refresh</span>
+              <button
+                disabled={actionNodeId === node.id}
+                onClick={() => handleRefresh(node)}
+                className="flex-1 flex items-center justify-center space-x-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 py-2 rounded-lg text-[10px] font-bold transition-colors"
+              >
+                {actionNodeId === node.id ? <Loader2 className="animate-spin" size={12} /> : <><RefreshCw size={12} /> <span>Refresh</span></>}
               </button>
-              <button onClick={() => handleEditClick(node)} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors text-slate-400"><Edit size={14} /></button>
-              <button onClick={() => handleDeleteNode(node.id)} className="p-2 bg-slate-700 hover:bg-red-900/40 rounded-lg transition-colors text-red-500/70"><Trash2 size={14} /></button>
+              <button onClick={() => handleEditClick(node)} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors text-slate-400" title="Edit"><Edit size={14} /></button>
+              <button onClick={() => handleUpdateNodeAgent(node.id)} className="p-2 bg-slate-700 hover:bg-blue-900/40 rounded-lg transition-colors text-blue-400" title="Update Agent"><ArrowUpCircle size={14} /></button>
+              <button onClick={() => handleDeleteNode(node.id)} className="p-2 bg-slate-700 hover:bg-red-900/40 rounded-lg transition-colors text-red-500/70" title="Delete"><Trash2 size={14} /></button>
             </div>
           </div>
         ))}
