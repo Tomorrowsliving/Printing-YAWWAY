@@ -27,10 +27,15 @@ def get_node_uuid():
         f.write(new_id)
     return new_id
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8001")
+BACKEND_URL = os.getenv("BACKEND_URL")
 
 async def heartbeat_task():
+    if not BACKEND_URL:
+        print("BACKEND_URL not set. Heartbeat disabled.")
+        return
+
     node_uuid = get_node_uuid()
+    print(f"Starting heartbeat to {BACKEND_URL}")
     while True:
         try:
             # Get current stats
