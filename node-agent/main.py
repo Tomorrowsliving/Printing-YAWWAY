@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 VERSION = "1.0.0"
+AGENT_PORT = int(os.getenv("NODE_AGENT_PORT", 8001))
 
 # Local storage for node UUID
 NODE_ID_PATH = os.path.expanduser("~/.klipper-farm/node_id")
@@ -57,7 +58,7 @@ async def heartbeat_task():
         return
 
     node_uuid = get_node_uuid()
-    print(f"Starting heartbeat to {BACKEND_URL}")
+    print(f"Starting heartbeat to {BACKEND_URL} from port {AGENT_PORT}")
     while True:
         try:
             cpu_usage = psutil.cpu_percent(interval=None)
@@ -78,7 +79,7 @@ async def heartbeat_task():
                 "node_uuid": node_uuid,
                 "hostname": socket.gethostname(),
                 "ip_address": get_local_ip(),
-                "agent_port": 8001,
+                "agent_port": AGENT_PORT,
                 "model": get_pi_model(),
                 "cpu_usage": cpu_usage,
                 "ram_usage": ram.percent,
@@ -141,25 +142,15 @@ async def get_health():
 
 @app.post("/update")
 async def update_agent():
-    """Trigger a git-based update and service restart"""
     try:
-        # 1. Create backup of current folder
         subprocess.run(["tar", "-czf", "../node-agent-backup.tar.gz", "."], check=True)
-
-        # 2. Git pull
         subprocess.run(["git", "pull"], check=True)
-
-        # 3. Pip install
         subprocess.run(["pip", "install", "-r", "requirements.txt"], check=True)
-
-        # 4. Restart service (async to allow response to return)
         os.system("sleep 2 && sudo systemctl restart klipper-farm-agent &")
-
-        return {"status": "success", "message": "Update initiated. Service will restart in 2 seconds."}
+        return {"status": "success", "message": "Update initiated."}
     except Exception as e:
-        # Rollback
         subprocess.run(["tar", "-xzf", "../node-agent-backup.tar.gz"], check=True)
-        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}. Rollback completed.")
+        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}.")
 
 @app.get("/usb")
 async def get_usb():
@@ -201,4 +192,4 @@ def run_systemctl(action: str, service_name: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=AGENT_PORT)

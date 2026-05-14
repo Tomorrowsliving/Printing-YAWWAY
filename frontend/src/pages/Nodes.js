@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Server, Activity, Thermometer, Cpu, HardDrive, CheckCircle, XCircle, RefreshCw, Plus, Loader2, Usb, Layers, ShieldCheck, Edit, Trash2, Save, ArrowUpCircle } from 'lucide-react';
+import { Server, Activity, Thermometer, Cpu, HardDrive, CheckCircle, XCircle, RefreshCw, Plus, Loader2, Usb, Layers, ShieldCheck, Edit, Trash2, Save, ArrowUpCircle, Search } from 'lucide-react';
 import { nodeService, agentService } from '../services/api';
 import { Modal } from '../components/UI';
 import axios from 'axios';
@@ -10,21 +10,12 @@ const NodeOverview = ({ addToast }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isDetecting, setIsDetecting] = useState(false);
   const [actionNodeId, setActionNodeId] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
 
-  const [formData, setFormData] = useState({
-    hostname: '',
-    ip_address: '',
-    agent_port: 8001,
-    model: '',
-    notes: ''
-  });
-
-  const [editData, setEditEditData] = useState({
-    name: '',
-    notes: ''
-  });
+  const [formData, setFormData] = useState({ hostname: '', ip_address: '', agent_port: 8001, model: '', notes: '' });
+  const [editData, setEditData] = useState({ hostname: '', ip_address: '', agent_port: 8001, model: '', notes: '', approved: false });
 
   useEffect(() => {
     fetchNodes();
@@ -45,12 +36,12 @@ const NodeOverview = ({ addToast }) => {
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: name === 'agent_port' ? parseInt(value) : value }));
+    setFormData(prev => ({ ...prev, [name]: name === 'agent_port' ? parseInt(value) || '' : value }));
   };
 
   const handleEditInputChange = (e) => {
-    const { name, value } = e.target;
-    setEditEditData(prev => ({ ...prev, [name]: value }));
+    const { name, value, type, checked } = e.target;
+    setEditData(prev => ({ ...prev, [name]: type === 'checkbox' ? checked : (name === 'agent_port' ? parseInt(value) || '' : value) }));
   };
 
   const handleSubmit = async (e) => {
@@ -58,7 +49,7 @@ const NodeOverview = ({ addToast }) => {
     setIsSubmitting(true);
     try {
       await nodeService.registerNode(formData);
-      addToast(`Node ${formData.hostname} registered!`, 'success');
+      addToast(`Node registered successfully`, 'success');
       setIsModalOpen(false);
       fetchNodes();
     } catch (err) {
@@ -82,11 +73,11 @@ const NodeOverview = ({ addToast }) => {
   };
 
   const handleDeleteNode = async (nodeId) => {
-    if (!window.confirm("Are you sure you want to remove this node? This will not stop any services running on the node itself.")) return;
+    if (!window.confirm("Remove this node?")) return;
     setActionNodeId(nodeId);
     try {
-      await axios.delete(`/api/nodes/${nodeId}`);
-      addToast("Node removed from dashboard", "success");
+      await nodeService.deleteNode(nodeId);
+      addToast("Node removed", "success");
       fetchNodes();
     } catch (err) {
       addToast(err.response?.data?.detail || "Failed to delete node", "error");
@@ -95,8 +86,62 @@ const NodeOverview = ({ addToast }) => {
     }
   };
 
+  const handleRefresh = async (node) => {
+    setActionNodeId(node.id);
+    try {
+      await axios.post(`/api/nodes/${node.id}/refresh`);
+      fetchNodes();
+      addToast("Refresh complete", "success");
+    } catch (err) {
+      addToast(err.response?.data?.detail || "Node unreachable", 'error');
+    } finally {
+      setActionNodeId(null);
+    }
+  };
+
+  const handleDetectPort = async () => {
+    setIsDetecting(true);
+    try {
+      const res = await axios.post(`/api/nodes/${selectedNode.id}/detect-port`);
+      setEditData(prev => ({ ...prev, agent_port: res.data.agent_port }));
+      addToast(`Detected agent on port ${res.data.agent_port}`, "success");
+    } catch (err) {
+      addToast(err.response?.data?.detail || "Could not detect agent port", "error");
+    } finally {
+      setIsDetecting(false);
+    }
+  };
+
+  const handleEditClick = (node) => {
+    setSelectedNode(node);
+    setEditData({
+      hostname: node.hostname || '',
+      ip_address: node.ip_address || '',
+      agent_port: node.agent_port || 8001,
+      model: node.model || '',
+      notes: node.notes || '',
+      approved: node.approved || false
+    });
+    setIsEditModalOpen(true);
+  };
+
+  const handleUpdateNode = async (e) => {
+    e.preventDefault();
+    setIsSubmitting(true);
+    try {
+      await nodeService.updateNode(selectedNode.id, editData);
+      addToast("Node updated", "success");
+      setIsEditModalOpen(false);
+      fetchNodes();
+    } catch (err) {
+      addToast(err.response?.data?.detail || "Failed to update node", "error");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const handleUpdateNodeAgent = async (nodeId) => {
-    if (!window.confirm("Trigger remote update on this node? The agent will restart.")) return;
+    if (!window.confirm("Trigger remote update on this node?")) return;
     setActionNodeId(nodeId);
     try {
       await axios.post(`/api/nodes/${nodeId}/update`);
@@ -109,210 +154,78 @@ const NodeOverview = ({ addToast }) => {
     }
   };
 
-  const handleEditClick = (node) => {
-    setSelectedNode(node);
-    setEditEditData({
-      name: node.name || '',
-      notes: node.notes || ''
-    });
-    setIsEditModalOpen(true);
-  };
-
-  const handleUpdateNode = async (e) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-    try {
-      await axios.post(`/api/nodes/`, {
-        ...selectedNode,
-        ...editData
-      });
-      addToast("Node updated", "success");
-      setIsEditModalOpen(false);
-      fetchNodes();
-    } catch (err) {
-      addToast("Failed to update node", "error");
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleRefresh = async (node) => {
-    setActionNodeId(node.id);
-    try {
-      await axios.post(`/api/nodes/${node.id}/refresh`);
-      fetchNodes();
-      addToast("Refresh successful", "success");
-    } catch (err) {
-      addToast(err.response?.data?.detail || "Node unreachable", 'error');
-    } finally {
-      setActionNodeId(null);
-    }
-  };
-
   if (loading && nodes.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center h-64 space-y-4">
-        <RefreshCw className="text-blue-500 animate-spin" size={32} />
-        <div className="text-slate-400 font-medium">Initialising Nodes...</div>
-      </div>
-    );
+    return <div className="p-12 text-center text-slate-500 animate-pulse">Initialising...</div>;
   }
 
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <div>
-          <h2 className="text-2xl font-bold">Node Overview</h2>
-          <p className="text-xs text-slate-500 mt-1">Management and discovery of Raspberry Pi execution nodes</p>
-        </div>
-        <button
-          onClick={() => setIsModalOpen(true)}
-          className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-bold transition-colors shadow-lg shadow-blue-900/20"
-        >
-          <Plus size={18} />
-          <span>Add Node Manually</span>
+        <h2 className="text-2xl font-bold">Nodes</h2>
+        <button onClick={() => setIsModalOpen(true)} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center space-x-2 shadow-lg shadow-blue-900/20">
+          <Plus size={18} /> <span>Add Manual</span>
         </button>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {nodes.map((node) => (
-          <div key={node.id} className={`bg-slate-800 border rounded-xl p-5 space-y-4 transition-all ${node.approved ? 'border-slate-700' : 'border-blue-500 shadow-lg shadow-blue-900/10'}`}>
-            {!node.approved && (
-               <div className="flex items-center justify-between bg-blue-500/10 -mx-5 -mt-5 p-3 px-5 border-b border-blue-500/20 rounded-t-xl mb-4">
-                  <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">New Discovery</span>
-                  <button
-                    disabled={actionNodeId === node.id}
-                    onClick={() => handleApprove(node.id)}
-                    className="text-[10px] font-bold bg-blue-600 hover:bg-blue-500 disabled:bg-slate-600 text-white px-2 py-0.5 rounded flex items-center space-x-1"
-                  >
-                    {actionNodeId === node.id ? <Loader2 className="animate-spin" size={10} /> : <span>Approve</span>}
-                  </button>
+          <div key={node.id} className={`bg-slate-800 border rounded-xl p-5 space-y-4 ${node.approved ? 'border-slate-700' : 'border-blue-500 shadow-lg shadow-blue-900/10'}`}>
+            <div className="flex justify-between items-start min-w-0">
+               <div className="flex items-center space-x-3 truncate">
+                  <div className={`p-2 rounded-lg ${node.online ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}><Server size={20} /></div>
+                  <div className="truncate text-left">
+                    <h3 className="font-bold text-slate-200 truncate">{node.name || node.hostname}</h3>
+                    <p className="text-[10px] text-slate-500 font-mono">http://${node.ip_address}:${node.agent_port}</p>
+                  </div>
                </div>
-            )}
-
-            <div className="flex justify-between items-start">
-              <div className="flex items-center space-x-3 text-left min-w-0">
-                <div className={`p-2 rounded-lg shrink-0 ${node.online ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
-                  <Server size={24} />
-                </div>
-                <div className="min-w-0">
-                  <h3 className="font-bold text-lg truncate pr-2">{node.name || node.hostname}</h3>
-                  <p className="text-[10px] font-mono text-slate-500 truncate uppercase">{node.hostname} • v{node.agent_version || '1.0.0'}</p>
-                </div>
-              </div>
-              <div className={`flex items-center space-x-1 text-[10px] font-bold uppercase tracking-tighter px-2 py-0.5 rounded-full shrink-0 ${node.online ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
-                <span>{node.status}</span>
-              </div>
+               <div className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded-full ${node.online ? 'bg-green-900/40 text-green-400' : 'bg-red-900/40 text-red-400'}`}>
+                 {node.status}
+               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
-              <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-700/50">
-                <div className="flex items-center space-x-2 mb-1">
-                  <Cpu size={14} className="text-blue-400" />
-                  <span className="text-[9px] text-slate-500 font-bold uppercase">CPU</span>
-                </div>
-                <p className="text-sm font-bold">{node.cpu_usage || 0}%</p>
-              </div>
-              <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-700/50">
-                <div className="flex items-center space-x-2 mb-1">
-                  <HardDrive size={14} className="text-purple-400" />
-                  <span className="text-[9px] text-slate-500 font-bold uppercase">RAM</span>
-                </div>
-                <p className="text-sm font-bold">{node.ram_usage || 0}%</p>
-              </div>
-            </div>
-
-            <div className="text-[11px] space-y-1">
-               <p className="flex justify-between">
-                 <span className="text-slate-500">IP Address:</span>
-                 <span className="text-slate-300 font-mono">{node.ip_address}:{node.agent_port}</span>
-               </p>
-               <p className="flex justify-between">
-                 <span className="text-slate-500">Model:</span>
-                 <span className="text-slate-300 truncate max-w-[120px]">{node.model || 'Unknown'}</span>
-               </p>
-               {node.notes && (
-                 <p className="text-slate-400 italic mt-2 line-clamp-2">"{node.notes}"</p>
-               )}
+               <div className="bg-slate-900/50 p-2 rounded-lg text-center border border-slate-700/50"><p className="text-[10px] font-bold text-slate-500 uppercase mb-1">CPU</p><p className="font-bold text-sm text-slate-200">{node.cpu_usage || 0}%</p></div>
+               <div className="bg-slate-900/50 p-2 rounded-lg text-center border border-slate-700/50"><p className="text-[10px] font-bold text-slate-500 uppercase mb-1">RAM</p><p className="font-bold text-sm text-slate-200">{node.ram_usage || 0}%</p></div>
             </div>
 
             <div className="flex space-x-2 pt-2">
-              <button
-                disabled={actionNodeId === node.id}
-                onClick={() => handleRefresh(node)}
-                className="flex-1 flex items-center justify-center space-x-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 py-2 rounded-lg text-[10px] font-bold transition-colors"
-              >
-                {actionNodeId === node.id ? <Loader2 className="animate-spin" size={12} /> : <><RefreshCw size={12} /> <span>Refresh</span></>}
+              <button disabled={actionNodeId === node.id} onClick={() => handleRefresh(node)} className="flex-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 py-1.5 rounded-lg text-[10px] font-bold flex items-center justify-center transition-colors">
+                {actionNodeId === node.id ? <Loader2 size={12} className="animate-spin" /> : <><RefreshCw size={12} className="mr-1" /> Refresh</>}
               </button>
-              <button onClick={() => handleEditClick(node)} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors text-slate-400" title="Edit"><Edit size={14} /></button>
-              <button onClick={() => handleUpdateNodeAgent(node.id)} className="p-2 bg-slate-700 hover:bg-blue-900/40 rounded-lg transition-colors text-blue-400" title="Update Agent"><ArrowUpCircle size={14} /></button>
-              <button onClick={() => handleDeleteNode(node.id)} className="p-2 bg-slate-700 hover:bg-red-900/40 rounded-lg transition-colors text-red-500/70" title="Delete"><Trash2 size={14} /></button>
+              <button onClick={() => handleEditClick(node)} className="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-slate-400 transition-colors" title="Edit"><Edit size={14} /></button>
+              {!node.approved && <button onClick={() => handleApprove(node.id)} className="px-3 bg-blue-600 hover:bg-blue-500 rounded-lg text-[10px] font-bold transition-colors">Approve</button>}
+              {node.agent_version && <button onClick={() => handleUpdateNodeAgent(node.id)} className="p-1.5 bg-slate-700 hover:bg-blue-900/40 rounded-lg text-blue-400 transition-colors" title="Update Agent"><ArrowUpCircle size={14} /></button>}
+              <button onClick={() => handleDeleteNode(node.id)} className="p-1.5 bg-slate-700 hover:bg-red-900/40 rounded-lg text-red-500/70 transition-colors" title="Delete"><Trash2 size={14} /></button>
             </div>
           </div>
         ))}
       </div>
 
-      <Modal
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        title="Register Node Manually"
-        footer={
-          <div className="flex justify-end space-x-3">
-            <button onClick={() => setIsModalOpen(false)} className="px-4 py-2 text-sm font-bold text-slate-400 hover:text-white transition-colors">Cancel</button>
-            <button
-              form="node-form"
-              disabled={isSubmitting}
-              className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 px-6 py-2 rounded-lg text-sm font-bold transition-colors shadow-lg shadow-blue-900/20"
-            >
-              {isSubmitting ? <Loader2 className="animate-spin" size={18} /> : <span>Register</span>}
-            </button>
-          </div>
-        }
-      >
-        <form id="node-form" onSubmit={handleSubmit} className="space-y-4">
-          <div className="space-y-1">
-            <label className="text-[10px] font-bold text-slate-500 uppercase">Hostname</label>
-            <input required name="hostname" value={formData.hostname} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" />
-          </div>
+      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title="Add Node Manually">
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div><label className="text-[10px] font-bold text-slate-500 uppercase">Hostname</label><input required name="hostname" value={formData.hostname} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
           <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-1">
-              <label className="text-[10px] font-bold text-slate-500 uppercase">IP Address</label>
-              <input required name="ip_address" value={formData.ip_address} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" />
-            </div>
-            <div className="space-y-1">
-              <label className="text-[10px] font-bold text-slate-500 uppercase">Agent Port</label>
-              <input type="number" name="agent_port" value={formData.agent_port} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" />
-            </div>
+            <div><label className="text-[10px] font-bold text-slate-500 uppercase">IP Address</label><input required name="ip_address" value={formData.ip_address} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
+            <div><label className="text-[10px] font-bold text-slate-500 uppercase">Agent Port</label><input type="number" name="agent_port" value={formData.agent_port} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
           </div>
+          <div className="flex justify-end pt-4"><button disabled={isSubmitting} className="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded-lg font-bold text-sm shadow-lg shadow-blue-900/20">Register</button></div>
         </form>
       </Modal>
 
-      <Modal
-        isOpen={isEditModalOpen}
-        onClose={() => setIsEditModalOpen(false)}
-        title="Configure Node"
-        footer={
-          <div className="flex justify-end space-x-3">
-            <button onClick={() => setIsEditModalOpen(false)} className="px-4 py-2 text-sm font-bold text-slate-400 hover:text-white transition-colors">Cancel</button>
-            <button
-              form="node-edit-form"
-              disabled={isSubmitting}
-              className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 px-6 py-2 rounded-lg text-sm font-bold transition-colors shadow-lg shadow-blue-900/20"
-            >
-              {isSubmitting ? <Loader2 className="animate-spin" size={18} /> : <><Save size={18} /><span>Save Changes</span></>}
+      <Modal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} title="Edit Node">
+        <form onSubmit={handleUpdateNode} className="space-y-4">
+          <div><label className="text-[10px] font-bold text-slate-500 uppercase">Hostname</label><input required name="hostname" value={editData.hostname} onChange={handleEditInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
+          <div className="flex gap-4">
+            <div className="flex-1"><label className="text-[10px] font-bold text-slate-500 uppercase">IP Address</label><input required name="ip_address" value={editData.ip_address} onChange={handleEditInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
+            <div className="w-32"><label className="text-[10px] font-bold text-slate-500 uppercase">Port</label><input type="number" name="agent_port" value={editData.agent_port} onChange={handleEditInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
+            <button type="button" onClick={handleDetectPort} disabled={isDetecting} className="self-end p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-blue-400 transition-colors" title="Detect Port">
+               {isDetecting ? <Loader2 size={20} className="animate-spin" /> : <Search size={20} />}
             </button>
           </div>
-        }
-      >
-        <form id="node-edit-form" onSubmit={handleUpdateNode} className="space-y-4">
-          <div className="space-y-1">
-            <label className="text-[10px] font-bold text-slate-500 uppercase">Display Name</label>
-            <input name="name" value={editData.name} onChange={handleEditInputChange} placeholder={selectedNode?.hostname} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" />
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] font-bold text-slate-500 uppercase">Notes</label>
-            <textarea name="notes" value={editData.notes} onChange={handleEditInputChange} rows={3} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500 resize-none" />
-          </div>
+          <div><label className="text-[10px] font-bold text-slate-500 uppercase">Model</label><input name="model" value={editData.model} onChange={handleEditInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
+          <div><label className="text-[10px] font-bold text-slate-500 uppercase">Notes</label><textarea name="notes" value={editData.notes} onChange={handleEditInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm resize-none outline-none focus:border-blue-500" rows={3} /></div>
+          <div className="flex items-center space-x-2"><input type="checkbox" id="approved-check" name="approved" checked={editData.approved} onChange={handleEditInputChange} className="w-4 h-4 rounded bg-slate-900 border-slate-700" /><label htmlFor="approved-check" className="text-xs font-bold text-slate-400 uppercase">Approved</label></div>
+          <div className="flex justify-end pt-4"><button disabled={isSubmitting} className="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded-lg font-bold text-sm shadow-lg shadow-blue-900/20">Save Changes</button></div>
         </form>
       </Modal>
     </div>

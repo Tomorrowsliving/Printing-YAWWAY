@@ -11,6 +11,6 @@ def test_read_root():
 
 def test_list_nodes_empty():
     # Test endpoint existence even if DB fails
-    response = client.get("/nodes/")
+    response = client.get("/api/nodes/")
     # If DB is not running, it might return 500, but the router is wired
     assert response.status_code in [200, 500]

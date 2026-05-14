@@ -20,7 +20,6 @@ def is_local_ip(ip: str) -> bool:
 
 @router.post("/", response_model=NodeSchema)
 async def register_node(node_in: NodeCreate, db: AsyncSession = Depends(get_db)):
-    # Check for duplicates by hostname OR (ip AND port)
     result = await db.execute(
         select(Node).where(
             or_(
@@ -55,6 +54,20 @@ async def register_node(node_in: NodeCreate, db: AsyncSession = Depends(get_db))
     await db.flush()
     return node
 
+@router.put("/{node_id}", response_model=NodeSchema)
+async def update_node(node_id: int, node_in: NodeCreate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    for field, value in node_in.model_dump(exclude_unset=True).items():
+        setattr(node, field, value)
+
+    node.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    await db.flush()
+    return node
+
 @router.get("/", response_model=List[NodeSchema])
 async def list_nodes(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Node).order_by(Node.hostname))
@@ -76,39 +89,21 @@ async def delete_node(node_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Node not found")
 
     node_hostname = node.hostname
-
-    # Unassign printers assigned to this node
-    await db.execute(
-        update(Printer).where(Printer.assigned_node_id == node_id).values(assigned_node_id=None)
-    )
-
+    await db.execute(update(Printer).where(Printer.assigned_node_id == node_id).values(assigned_node_id=None))
     await db.delete(node)
 
-    event = Event(
-        severity="warning",
-        event_type="node_deleted",
-        message=f"Node {node_hostname} was removed from dashboard"
-    )
+    event = Event(severity="warning", event_type="node_deleted", message=f"Node {node_hostname} was removed")
     db.add(event)
     await db.flush()
-    return {"status": "success", "message": f"Node {node_hostname} deleted"}
+    return {"status": "success"}
 
 @router.post("/heartbeat", response_model=NodeSchema)
 async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession = Depends(get_db)):
-    # Security: Only accept local network heartbeats
     client_host = request.client.host
     if not is_local_ip(client_host) and not is_local_ip(hb.ip_address):
         raise HTTPException(status_code=403, detail="Non-local heartbeats rejected")
 
-    # Prevent duplicate discovery for same hostname when wired/wireless IPs exist.
-    result = await db.execute(
-        select(Node).where(
-            or_(
-                Node.node_uuid == hb.node_uuid,
-                Node.hostname == hb.hostname
-            )
-        )
-    )
+    result = await db.execute(select(Node).where(or_(Node.node_uuid == hb.node_uuid, Node.hostname == hb.hostname)))
     node = result.scalar_one_or_none()
 
     is_new = False
@@ -119,8 +114,6 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
     elif node.node_uuid != hb.node_uuid and node.hostname == hb.hostname:
         node.node_uuid = hb.node_uuid
 
-    # Prefer wired IP (e.g. 10.1.* or 192.168.*)
-    # We update IP if it's the preferred range or if no IP is set yet
     if hb.ip_address.startswith(("10.1.", "192.168.")) or not node.ip_address:
         node.ip_address = hb.ip_address
 
@@ -134,20 +127,11 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
     node.agent_version = hb.agent_version
     node.online = True
     node.last_seen = datetime.datetime.now(datetime.timezone.utc)
-
-    if node.approved:
-        node.status = "online"
+    if node.approved: node.status = "online"
 
     await db.flush()
-
     if is_new:
-        event = Event(
-            node_id=node.id,
-            severity="info",
-            event_type="node_discovered",
-            message=f"New node discovered: {node.hostname}"
-        )
-        db.add(event)
+        db.add(Event(node_id=node.id, severity="info", event_type="node_discovered", message=f"New node discovered: {node.hostname}"))
 
     return node
 
@@ -155,20 +139,11 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
 async def approve_node(node_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
-
+    if not node: raise HTTPException(status_code=404, detail="Node not found")
     node.approved = True
     node.status = "approved"
     node.updated_at = datetime.datetime.now(datetime.timezone.utc)
-
-    event = Event(
-        node_id=node.id,
-        severity="info",
-        event_type="node_approved",
-        message=f"Node {node.hostname} approved"
-    )
-    db.add(event)
+    db.add(Event(node_id=node.id, severity="info", event_type="node_approved", message=f"Node {node.hostname} approved"))
     await db.flush()
     return node
 
@@ -176,59 +151,62 @@ async def approve_node(node_id: int, db: AsyncSession = Depends(get_db)):
 async def refresh_node(node_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+    if not node: raise HTTPException(status_code=404, detail="Node not found")
 
     url = f"http://{node.ip_address}:{node.agent_port}/health"
     try:
-        res = requests.get(url, timeout=5)
+        res = requests.get(url, timeout=3)
         res.raise_for_status()
         data = res.json()
-
-        node.hostname = data.get("hostname", node.hostname)
         node.cpu_usage = data.get("cpu_usage", 0.0)
         node.ram_usage = data.get("ram_usage", 0.0)
         node.temperature = data.get("temperature", 0.0)
         node.uptime = data.get("uptime", node.uptime)
-        node.agent_version = data.get("version", node.agent_version)
         node.online = True
         node.last_seen = datetime.datetime.now(datetime.timezone.utc)
         node.status = "online" if node.approved else "discovered"
-
         await db.flush()
         return node
     except Exception as e:
-        # Never cause 500/502, just update state and return 400 with details
         node.online = False
         node.status = "offline"
         await db.flush()
         raise HTTPException(status_code=400, detail=f"Failed to reach node at {url}: {str(e)}")
 
+@router.post("/{node_id}/detect-port", response_model=NodeSchema)
+async def detect_node_port(node_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node: raise HTTPException(status_code=404, detail="Node not found")
+
+    common_ports = [8001, 8002, 8003, 7126, 7125]
+    for port in common_ports:
+        url = f"http://{node.ip_address}:{port}/health"
+        try:
+            res = requests.get(url, timeout=1)
+            if res.status_code == 200:
+                node.agent_port = port
+                node.online = True
+                node.status = "online" if node.approved else "discovered"
+                await db.flush()
+                return node
+        except: continue
+
+    raise HTTPException(status_code=404, detail=f"No agent found on {node.ip_address} using common ports.")
+
 @router.post("/{node_id}/update")
 async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
-
+    if not node: raise HTTPException(status_code=404, detail="Node not found")
     url = f"http://{node.ip_address}:{node.agent_port}/update"
     try:
         node.status = "updating"
         await db.flush()
-
-        res = requests.post(url, timeout=30)
+        res = requests.post(url, timeout=10)
         res.raise_for_status()
-
-        event = Event(
-            node_id=node.id,
-            severity="info",
-            event_type="node_update_triggered",
-            message=f"Update triggered for node {node.hostname}"
-        )
-        db.add(event)
-        await db.flush()
         return res.json()
     except Exception as e:
         node.status = "error"
         await db.flush()
-        raise HTTPException(status_code=400, detail=f"Failed to trigger update at {url}: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Update failed at {url}: {str(e)}")

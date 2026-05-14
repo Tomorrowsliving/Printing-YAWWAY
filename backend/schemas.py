@@ -10,9 +10,6 @@ class NodeBase(BaseModel):
     model: Optional[str] = None
     notes: Optional[str] = None
     approved: bool = False
-    status: str = "discovered"
-    agent_version: str = "1.0.0"
-    update_available: bool = False
 
 class NodeCreate(NodeBase):
     node_uuid: Optional[str] = None
@@ -39,6 +36,9 @@ class Node(NodeBase):
     temperature: float
     uptime: Optional[str]
     online: bool
+    status: str
+    agent_version: Optional[str]
+    update_available: bool
     last_seen: Optional[datetime]
     created_at: datetime
     updated_at: Optional[datetime]
