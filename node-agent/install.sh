@@ -12,7 +12,8 @@ fi
 
 BACKEND_URL=""
 AGENT_PORT="8001"
-INSTALL_DIR="/opt/klipper-farm-node-agent"
+REPO_URL="https://github.com/Tomorrowsliving/Printing-YAWWAY-.git"
+REPO_DIR="/opt/klipper-farm-control"
 ENV_FILE="/etc/klipper-farm-node-agent.env"
 SERVICE_FILE="/etc/systemd/system/klipper-farm-node-agent.service"
 SUDOERS_FILE="/etc/sudoers.d/klipper-farm-node-agent"
@@ -22,7 +23,7 @@ while [[ "$#" -gt 0 ]]; do
     case $1 in
         --backend-url) BACKEND_URL="$2"; shift ;;
         --port) AGENT_PORT="$2"; shift ;;
-        --install-dir) INSTALL_DIR="$2"; shift ;;
+        --repo-url) REPO_URL="$2"; shift ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
     shift
@@ -30,7 +31,6 @@ done
 
 if [ -z "$BACKEND_URL" ]; then
     echo "Error: --backend-url is required"
-    echo "Usage: sudo ./install.sh --backend-url http://10.1.8.133:8001 [--port 8001]"
     exit 1
 fi
 
@@ -41,12 +41,18 @@ echo "Installing system dependencies..."
 apt-get update
 apt-get install -y python3 python3-venv python3-pip git curl tar
 
-# 2. Create installation directory and copy files
-echo "Setting up directory $INSTALL_DIR..."
-mkdir -p "$INSTALL_DIR"
-cp -r . "$INSTALL_DIR/"
+# 2. Clone the repository for auto-update support
+echo "Cloning repository to $REPO_DIR..."
+if [ -d "$REPO_DIR" ]; then
+    echo "Directory exists, pulling latest..."
+    git -C "$REPO_DIR" pull || true
+else
+    git clone "$REPO_URL" "$REPO_DIR"
+fi
 
-# 3. Create virtual environment reliably
+INSTALL_DIR="$REPO_DIR/node-agent"
+
+# 3. Create virtual environment in node-agent folder
 echo "Creating Python virtual environment..."
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
@@ -64,10 +70,11 @@ cat <<EOF_ENV > "$ENV_FILE"
 BACKEND_URL=$BACKEND_URL
 NODE_AGENT_PORT=$AGENT_PORT
 NODE_AGENT_DIR=$INSTALL_DIR
+NODE_AGENT_REPO_DIR=$REPO_DIR
 EOF_ENV
 chmod 600 "$ENV_FILE"
 
-# 6. Create systemd service using venv uvicorn
+# 6. Create systemd service
 echo "Creating systemd service..."
 cat <<EOF_SVC > "$SERVICE_FILE"
 [Unit]
@@ -110,3 +117,4 @@ echo "--- Installation Complete ---"
 echo "Node Agent is running at: http://$NODE_IP:$AGENT_PORT"
 echo "Health check URL: http://$NODE_IP:$AGENT_PORT/health"
 echo "Backend URL: $BACKEND_URL"
+echo "Repo Location: $REPO_DIR"

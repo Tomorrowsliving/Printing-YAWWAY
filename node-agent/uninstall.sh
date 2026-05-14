@@ -9,7 +9,7 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-INSTALL_DIR="/opt/klipper-farm-node-agent"
+REPO_DIR="/opt/klipper-farm-control"
 ENV_FILE="/etc/klipper-farm-node-agent.env"
 SERVICE_FILE="/etc/systemd/system/klipper-farm-node-agent.service"
 SUDOERS_FILE="/etc/sudoers.d/klipper-farm-node-agent"
@@ -38,13 +38,13 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 # 4. Remove installation directory
-if [ -d "$INSTALL_DIR" ]; then
-    read -p "Do you want to remove the installation directory $INSTALL_DIR? (y/N): " confirm
-    if [[ \$confirm == [yY] || \$confirm == [yY][eE][sS] ]]; then
-        echo "Removing $INSTALL_DIR..."
-        rm -rf "$INSTALL_DIR"
+if [ -d "$REPO_DIR" ]; then
+    read -p "Do you want to remove the installation directory $REPO_DIR? (y/N): " confirm
+    if [[ $confirm == [yY] || $confirm == [yY][eE][sS] ]]; then
+        echo "Removing $REPO_DIR..."
+        rm -rf "$REPO_DIR"
     else
-        echo "Skipping removal of $INSTALL_DIR."
+        echo "Skipping removal of $REPO_DIR."
     fi
 fi
 

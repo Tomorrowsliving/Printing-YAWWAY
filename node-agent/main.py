@@ -17,6 +17,7 @@ from typing import List, Optional
 VERSION = "1.0.0"
 AGENT_PORT = int(os.getenv("NODE_AGENT_PORT", 8001))
 NODE_AGENT_DIR = os.getenv("NODE_AGENT_DIR", os.path.dirname(os.path.abspath(__file__)))
+NODE_AGENT_REPO_DIR = os.getenv("NODE_AGENT_REPO_DIR", os.path.dirname(NODE_AGENT_DIR))
 
 # Local storage for node UUID
 NODE_ID_PATH = os.path.expanduser("~/.klipper-farm/node_id")
@@ -56,25 +57,16 @@ def get_pi_model():
 
 def get_git_info():
     try:
-        commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=NODE_AGENT_DIR).decode().strip()
+        commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=NODE_AGENT_REPO_DIR).decode().strip()
         return commit
     except:
-        try:
-            parent_dir = os.path.dirname(NODE_AGENT_DIR)
-            commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=parent_dir).decode().strip()
-            return commit
-        except:
-            return "unknown"
+        return "unknown"
 
 def get_last_updated():
     try:
-        return subprocess.check_output(["git", "log", "-1", "--format=%cd"], cwd=NODE_AGENT_DIR).decode().strip()
+        return subprocess.check_output(["git", "log", "-1", "--format=%cd"], cwd=NODE_AGENT_REPO_DIR).decode().strip()
     except:
-        try:
-            parent_dir = os.path.dirname(NODE_AGENT_DIR)
-            return subprocess.check_output(["git", "log", "-1", "--format=%cd"], cwd=parent_dir).decode().strip()
-        except:
-            return "unknown"
+        return "unknown"
 
 async def heartbeat_task():
     if not BACKEND_URL:
@@ -170,36 +162,31 @@ async def get_health():
 @app.post("/update")
 async def update_agent():
     """Trigger a git-based update and service restart"""
-    # 1. Check if it's a git repo
-    git_dir = os.path.join(NODE_AGENT_DIR, ".git")
-    parent_git_dir = os.path.join(os.path.dirname(NODE_AGENT_DIR), ".git")
-
-    if not os.path.exists(git_dir) and not os.path.exists(parent_git_dir):
+    git_dir = os.path.join(NODE_AGENT_REPO_DIR, ".git")
+    if not os.path.exists(git_dir):
         return JSONResponse(
             status_code=400,
             content={
                 "success": False,
-                "error": "Node-agent was not installed from Git. Auto-update is unavailable."
+                "error": f"Node-agent was not installed from Git (no .git in {NODE_AGENT_REPO_DIR}). Auto-update unavailable."
             }
         )
 
-    update_root = NODE_AGENT_DIR if os.path.exists(git_dir) else os.path.dirname(NODE_AGENT_DIR)
-
     try:
-        # 2. Create backup
-        subprocess.run(["tar", "-czf", "/tmp/node-agent-backup.tar.gz", "-C", update_root, "."], check=True)
+        # Create backup
+        subprocess.run(["tar", "-czf", "/tmp/node-agent-backup.tar.gz", "-C", NODE_AGENT_REPO_DIR, "."], check=True)
 
-        # 3. Update from git
-        subprocess.run(["git", "-C", update_root, "pull"], check=True)
+        # Update from git
+        subprocess.run(["git", "-C", NODE_AGENT_REPO_DIR, "pull"], check=True)
 
-        # 4. Update dependencies
+        # Update dependencies
         pip_cmd = os.path.join(NODE_AGENT_DIR, "venv", "bin", "pip")
         if not os.path.exists(pip_cmd):
             pip_cmd = "pip"
 
         subprocess.run([pip_cmd, "install", "-r", os.path.join(NODE_AGENT_DIR, "requirements.txt")], check=True)
 
-        # 5. Restart service
+        # Restart service
         os.system("sleep 2 && sudo systemctl restart klipper-farm-node-agent &")
 
         return {
@@ -209,7 +196,7 @@ async def update_agent():
     except Exception as e:
         # Rollback attempt
         try:
-            subprocess.run(["tar", "-xzf", "/tmp/node-agent-backup.tar.gz", "-C", update_root], check=True)
+            subprocess.run(["tar", "-xzf", "/tmp/node-agent-backup.tar.gz", "-C", NODE_AGENT_REPO_DIR], check=True)
         except:
             pass
         return JSONResponse(

@@ -101,7 +101,7 @@ sudo ./install.sh --backend-url http://YOUR_SERVER_IP:8001 --port 8001
 
 This script will:
 - Install system dependencies (Python, Git, etc.).
-- Install the agent to `/opt/klipper-farm-node-agent`.
+- Install the agent to `/opt/klipper-farm-control`.
 - Set up a virtual environment and install requirements.
 - Create a systemd service and start the agent automatically.
 - Configure narrow sudoers rules for automatic updates.
