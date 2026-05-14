@@ -8,6 +8,10 @@ from ..schemas import NodeCreate, NodeHeartbeat, Node as NodeSchema
 import datetime
 import ipaddress
 import requests
+import logging
+
+# Setup logger
+logger = logging.getLogger("klipper-farm")
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 
@@ -154,23 +158,33 @@ async def refresh_node(node_id: int, db: AsyncSession = Depends(get_db)):
     if not node: raise HTTPException(status_code=404, detail="Node not found")
 
     url = f"http://{node.ip_address}:{node.agent_port}/health"
+    logger.info(f"Refreshing node {node.id} ({node.hostname}) at {url}")
+    print(f"Refreshing node {node.id} ({node.hostname}) at {url}")
+
     try:
-        res = requests.get(url, timeout=3)
-        res.raise_for_status()
-        data = res.json()
-        node.cpu_usage = data.get("cpu_usage", 0.0)
-        node.ram_usage = data.get("ram_usage", 0.0)
-        node.temperature = data.get("temperature", 0.0)
-        node.uptime = data.get("uptime", node.uptime)
-        node.online = True
-        node.last_seen = datetime.datetime.now(datetime.timezone.utc)
-        node.status = "online" if node.approved else "discovered"
-        await db.flush()
-        return node
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            node.cpu_usage = data.get("cpu_usage", 0.0)
+            node.ram_usage = data.get("ram_usage", 0.0)
+            node.temperature = data.get("temperature", 0.0)
+            node.uptime = data.get("uptime", node.uptime)
+            node.model = data.get("pi_model", data.get("model", node.model))
+            node.agent_version = data.get("version", node.agent_version)
+            node.online = True
+            node.last_seen = datetime.datetime.now(datetime.timezone.utc)
+            node.status = "online" if node.approved else "discovered"
+
+            await db.flush()
+            return node
+        else:
+            raise Exception(f"Received status code {res.status_code}")
     except Exception as e:
+        logger.error(f"Failed to refresh node {node.id}: {str(e)}")
         node.online = False
         node.status = "offline"
         await db.flush()
+        # Return 400 with details for the UI
         raise HTTPException(status_code=400, detail=f"Failed to reach node at {url}: {str(e)}")
 
 @router.post("/{node_id}/detect-port", response_model=NodeSchema)
