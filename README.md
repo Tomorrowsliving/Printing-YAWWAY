@@ -89,24 +89,38 @@ This project uses British English (e.g., "Initialise", "Organise", "Colour") for
 
 ## Recommended Node Agent Installation
 
-To support automatic updates, it is recommended to install the node-agent via Git:
+The easiest way to install the node-agent on a Raspberry Pi is using the provided one-command installer.
+
+### Automatic Installation (Recommended)
 
 ```bash
-# Install dependencies
-sudo apt update && sudo apt install -y git python3-venv python3-pip
-
-# Clone the repository
 git clone https://github.com/Tomorrowsliving/Printing-YAWWAY-.git
 cd Printing-YAWWAY-/node-agent
-
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# Run manually to test
-export BACKEND_URL=http://your-server-ip:8001
-python3 main.py
+sudo ./install.sh --backend-url http://YOUR_SERVER_IP:8001 --port 8001
 ```
 
-When setting up as a systemd service, ensure `Environment=NODE_AGENT_DIR=/path/to/Printing-YAWWAY-/node-agent` is included in the unit file.
+This script will:
+- Install system dependencies (Python, Git, etc.).
+- Install the agent to `/opt/klipper-farm-node-agent`.
+- Set up a virtual environment and install requirements.
+- Create a systemd service and start the agent automatically.
+- Configure narrow sudoers rules for automatic updates.
+
+### Manual Installation
+
+If you prefer to install manually:
+
+1. Install dependencies: `sudo apt update && sudo apt install -y git python3-venv python3-pip`.
+2. Clone and enter the directory.
+3. Create venv: `python3 -m venv venv && source venv/bin/activate`.
+4. Install requirements: `pip install -r requirements.txt`.
+5. Run manually: `export BACKEND_URL=http://your-server-ip:8001 && python3 main.py`.
+
+When setting up as a systemd service, ensure `Environment=NODE_AGENT_DIR=/path/to/node-agent` is included in the unit file.
+
+### Uninstallation
+
+To remove the agent and its configuration:
+```bash
+sudo ./uninstall.sh
+```
