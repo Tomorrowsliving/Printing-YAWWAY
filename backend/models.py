@@ -70,6 +70,14 @@ class PrinterNote(Base):
 
     printer = relationship("Printer", back_populates="notes")
 
+class Assignment(Base):
+    __tablename__ = "assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    printer_id = Column(Integer, ForeignKey("printers.id"))
+    node_id = Column(Integer, ForeignKey("nodes.id"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 class Event(Base):
     __tablename__ = "events"
 

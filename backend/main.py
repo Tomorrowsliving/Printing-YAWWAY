@@ -5,8 +5,8 @@ import asyncio
 import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
-from .database import AsyncSessionLocal
-from .models import Node, Event
+from .database import AsyncSessionLocal, engine, Base
+from .models import Node, Event, Printer, PrinterNote, Backup, NotificationSetting, FileRecord, Assignment
 
 app = FastAPI(title="Klipper Farm Control Plane API")
 
@@ -34,11 +34,17 @@ api_router.include_router(notifications.router)
 app.include_router(api_router)
 
 # WebSocket usually sits outside /api or uses its own prefix
-# But for consistency with Caddy, let's keep it under /ws
 app.include_router(websocket.router)
 
 @app.on_event("startup")
 async def startup_event():
+    # Initialise Database Tables
+    print("Initialising database tables...")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    print("Database tables initialised.")
+
+    # Start background tasks
     asyncio.create_task(monitor_nodes())
 
 async def monitor_nodes():
