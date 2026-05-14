@@ -1,4 +1,4 @@
-# Printing-YAWWAY-
+# Printing-YAWWAY
 
 A modular, expandable Klipper print farm control platform for managing multiple 3D printers across distributed Raspberry Pi nodes.
 
@@ -15,7 +15,7 @@ Designed for:
 
 # Overview
 
-Printing-YAWWAY- separates **printer profiles** from the physical Raspberry Pi running them.
+Printing-YAWWAY separates **printer profiles** from the physical Raspberry Pi running them.
 
 Instead of permanently tying one printer to one Pi, the dashboard treats each printer as a logical profile which can be:
 
@@ -191,8 +191,8 @@ README.md
 Clone the repository:
 
 ```bash
-git clone https://github.com/Tomorrowsliving/Printing-YAWWAY-.git
-cd Printing-YAWWAY-
+git clone https://github.com/Tomorrowsliving/Printing-YAWWAY.git
+cd Printing-YAWWAY
 ```
 
 Copy the environment template:
@@ -238,8 +238,8 @@ The installer automatically:
 Run:
 
 ```bash
-git clone https://github.com/Tomorrowsliving/Printing-YAWWAY-.git
-cd Printing-YAWWAY-/node-agent
+git clone https://github.com/Tomorrowsliving/Printing-YAWWAY.git
+cd Printing-YAWWAY/node-agent
 
 sudo ./install.sh \
   --backend-url http://YOUR_SERVER_IP \
