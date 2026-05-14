@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from typing import List
 from ..database import get_db
 from ..models import Node, Event
 from ..schemas import NodeCreate, NodeHeartbeat, Node as NodeSchema
 import datetime
 import ipaddress
+import requests
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
 
@@ -19,17 +20,26 @@ def is_local_ip(ip: str) -> bool:
 
 @router.post("/", response_model=NodeSchema)
 async def register_node(node_in: NodeCreate, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.hostname == node_in.hostname))
+    # Check for duplicates by hostname/ip/port
+    result = await db.execute(
+        select(Node).where(
+            or_(
+                Node.hostname == node_in.hostname,
+                (Node.ip_address == node_in.ip_address) & (Node.agent_port == node_in.agent_port)
+            )
+        )
+    )
     existing_node = result.scalar_one_or_none()
 
     if existing_node:
-        for field, value in node_in.model_dump().items():
+        for field, value in node_in.model_dump(exclude_unset=True).items():
             setattr(existing_node, field, value)
         existing_node.last_seen = datetime.datetime.now(datetime.timezone.utc)
         existing_node.online = True
         node = existing_node
     else:
         node = Node(**node_in.model_dump())
+        node.approved = True # Manual registration = auto-approved
         node.last_seen = datetime.datetime.now(datetime.timezone.utc)
         node.online = True
         db.add(node)
@@ -39,7 +49,7 @@ async def register_node(node_in: NodeCreate, db: AsyncSession = Depends(get_db))
         node_id=node.id,
         severity="info",
         event_type="node_registration",
-        message=f"Node {node.hostname} registered/updated at {node.ip_address}"
+        message=f"Node {node.hostname} registered/updated manually at {node.ip_address}"
     )
     db.add(event)
 
@@ -58,6 +68,25 @@ async def get_node(node_id: int, db: AsyncSession = Depends(get_db)):
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
     return node
+
+@router.delete("/{node_id}")
+async def delete_node(node_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    await db.delete(node)
+
+    event = Event(
+        severity="warning",
+        event_type="node_deleted",
+        message=f"Node {node.hostname} was removed from the dashboard"
+    )
+    db.add(event)
+
+    await db.flush()
+    return {"status": "success"}
 
 @router.post("/heartbeat", response_model=NodeSchema)
 async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession = Depends(get_db)):
@@ -112,5 +141,26 @@ async def approve_node(node_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{node_id}/refresh")
 async def refresh_node(node_id: int, db: AsyncSession = Depends(get_db)):
-    # Placeholder for explicit refresh logic if needed
-    return {"status": "success"}
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    url = f"http://{node.ip_address}:{node.agent_port}/health"
+    try:
+        res = requests.get(url, timeout=5)
+        res.raise_for_status()
+        data = res.json()
+
+        node.hostname = data.get("hostname", node.hostname)
+        node.cpu_usage = data.get("cpu_usage", 0.0)
+        node.ram_usage = data.get("ram_usage", 0.0)
+        node.temperature = data.get("temperature", 0.0)
+        node.uptime = data.get("uptime", node.uptime)
+        node.online = True
+        node.last_seen = datetime.datetime.now(datetime.timezone.utc)
+
+        await db.flush()
+        return {"status": "success", "data": data}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to reach node at {url}: {str(e)}")

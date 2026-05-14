@@ -3,9 +3,6 @@ import { Server, Activity, Thermometer, Cpu, HardDrive, CheckCircle, XCircle, Re
 import { nodeService, agentService } from '../services/api';
 import { Modal } from '../components/UI';
 import axios from 'axios';
-import api from '../services/api';
-
-
 
 const NodeOverview = ({ addToast }) => {
   const [nodes, setNodes] = useState([]);
@@ -64,7 +61,7 @@ const NodeOverview = ({ addToast }) => {
       setIsModalOpen(false);
       fetchNodes();
     } catch (err) {
-      addToast("Failed to register node", 'error');
+      addToast(err.response?.data?.detail || "Failed to register node", 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -77,6 +74,17 @@ const NodeOverview = ({ addToast }) => {
       fetchNodes();
     } catch (err) {
       addToast("Failed to approve node", "error");
+    }
+  };
+
+  const handleDeleteNode = async (nodeId) => {
+    if (!window.confirm("Are you sure you want to remove this node? This will not stop any services running on the node itself.")) return;
+    try {
+      await axios.delete(`/api/nodes/${nodeId}`);
+      addToast("Node removed from dashboard", "success");
+      fetchNodes();
+    } catch (err) {
+      addToast("Failed to delete node", "error");
     }
   };
 
@@ -93,10 +101,6 @@ const NodeOverview = ({ addToast }) => {
     e.preventDefault();
     setIsSubmitting(true);
     try {
-      // In a real app we'd have a specific PUT /nodes/{id}
-      // For MVP, we can reuse register_node logic if backend supports it,
-      // but let's assume we need a proper update.
-      // Re-using register_node for now as it's an 'upsert' in current backend
       await axios.post(`/api/nodes/`, {
         ...selectedNode,
         ...editData
@@ -114,10 +118,11 @@ const NodeOverview = ({ addToast }) => {
   const handleRefresh = async (node) => {
     addToast(`Refreshing ${node.hostname}...`, 'info');
     try {
-      await agentService.getHealth(node.ip_address, node.agent_port);
+      await axios.post(`/api/nodes/${node.id}/refresh`);
       fetchNodes();
+      addToast("Refresh successful", "success");
     } catch (err) {
-      addToast("Node unreachable", 'error');
+      addToast(err.response?.data?.detail || "Node unreachable", 'error');
     }
   };
 
@@ -207,7 +212,7 @@ const NodeOverview = ({ addToast }) => {
                 <RefreshCw size={12} /> <span>Refresh</span>
               </button>
               <button onClick={() => handleEditClick(node)} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors text-slate-400"><Edit size={14} /></button>
-              <button onClick={() => addToast("USB list not implemented", "info")} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors text-slate-400"><Usb size={14} /></button>
+              <button onClick={() => handleDeleteNode(node.id)} className="p-2 bg-slate-700 hover:bg-red-900/40 rounded-lg transition-colors text-red-500/70"><Trash2 size={14} /></button>
             </div>
           </div>
         ))}
