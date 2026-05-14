@@ -9,12 +9,12 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@db/
 if DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
 
-engine = create_async_engine(DATABASE_URL, echo=True)
+engine = create_async_engine(DATABASE_URL, echo=False)
 
 AsyncSessionLocal = async_sessionmaker(
-    bind=engine,
-    class_=AsyncSession,
+    engine,
     expire_on_commit=False,
+    class_=AsyncSession
 )
 
 Base = declarative_base()

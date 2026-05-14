@@ -22,6 +22,7 @@ while [[ "$#" -gt 0 ]]; do
     case $1 in
         --backend-url) BACKEND_URL="$2"; shift ;;
         --port) AGENT_PORT="$2"; shift ;;
+        --install-dir) INSTALL_DIR="$2"; shift ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
     shift
@@ -40,29 +41,35 @@ echo "Installing system dependencies..."
 apt-get update
 apt-get install -y python3 python3-venv python3-pip git curl tar
 
-# 2. Create installation directory
+# 2. Create installation directory and copy files
 echo "Setting up directory $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR"
 cp -r . "$INSTALL_DIR/"
 
-# 3. Create virtual environment
+# 3. Create virtual environment reliably
 echo "Creating Python virtual environment..."
 python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
 "$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
 
-# 4. Create environment file
+# 4. Verify uvicorn exists
+if [ ! -x "$INSTALL_DIR/venv/bin/uvicorn" ]; then
+    echo "Error: uvicorn was not installed correctly in the venv."
+    exit 1
+fi
+
+# 5. Create environment file
 echo "Creating environment file $ENV_FILE..."
-cat <<EOF > "$ENV_FILE"
+cat <<EOF_ENV > "$ENV_FILE"
 BACKEND_URL=$BACKEND_URL
 NODE_AGENT_PORT=$AGENT_PORT
 NODE_AGENT_DIR=$INSTALL_DIR
-EOF
+EOF_ENV
 chmod 600 "$ENV_FILE"
 
-# 5. Create systemd service
+# 6. Create systemd service using venv uvicorn
 echo "Creating systemd service..."
-cat <<EOF > "$SERVICE_FILE"
+cat <<EOF_SVC > "$SERVICE_FILE"
 [Unit]
 Description=Klipper Farm Node Agent
 After=network.target
@@ -72,32 +79,34 @@ Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=$INSTALL_DIR/venv/bin/python3 main.py
+ExecStart=$INSTALL_DIR/venv/bin/uvicorn main:app --host 0.0.0.0 --port $AGENT_PORT
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF_SVC
 
-# 6. Create narrow sudoers file for auto-updates
-echo "Configuring sudoers for service management..."
-cat <<EOF > "$SUDOERS_FILE"
-# Allow node-agent to restart its own service for updates
+# 7. Create sudoers file for auto-updates
+echo "Configuring sudoers..."
+cat <<EOF_SUDO > "$SUDOERS_FILE"
 ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart klipper-farm-node-agent.service
 ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl status klipper-farm-node-agent.service
-EOF
+EOF_SUDO
 chmod 440 "$SUDOERS_FILE"
 
-# 7. Enable and start service
+# 8. Enable and start service
 echo "Starting service..."
 systemctl daemon-reload
 systemctl enable klipper-farm-node-agent
 systemctl restart klipper-farm-node-agent
 
-# 8. Final Health Check Info
+# 9. Verify and show status
+echo "--- Installation Verification ---"
+systemctl status klipper-farm-node-agent --no-pager
+
 NODE_IP=$(hostname -I | awk '{print $1}')
 echo "--- Installation Complete ---"
 echo "Node Agent is running at: http://$NODE_IP:$AGENT_PORT"
 echo "Health check URL: http://$NODE_IP:$AGENT_PORT/health"
-echo "Backend URL configured as: $BACKEND_URL"
+echo "Backend URL: $BACKEND_URL"
