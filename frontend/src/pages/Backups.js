@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { Database, Download, RotateCcw, Plus, AlertCircle, CheckCircle2, Clock, Loader2, DatabaseBackup } from 'lucide-react';
 import axios from 'axios';
+import api from '../services/api';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';
+
 
 const Backups = ({ addToast }) => {
   const [backups, setBackups] = useState([]);
@@ -15,7 +16,7 @@ const Backups = ({ addToast }) => {
 
   const fetchBackups = async () => {
     try {
-      const res = await axios.get(`${API_BASE_URL}/backups`);
+      const res = await axios.get(`/api/backups`);
       setBackups(Array.isArray(res.data) ? res.data : []);
     } catch (err) {
       console.error("Error fetching backups:", err);
@@ -27,7 +28,7 @@ const Backups = ({ addToast }) => {
   const handleCreateBackup = async () => {
     setActionLoading(true);
     try {
-      await axios.post(`${API_BASE_URL}/backups/create`);
+      await axios.post(`/api/backups/create`);
       addToast('Backup created successfully', 'success');
       fetchBackups();
     } catch (err) {
@@ -42,7 +43,7 @@ const Backups = ({ addToast }) => {
 
     setActionLoading(true);
     try {
-      await axios.post(`${API_BASE_URL}/backups/restore/${backup.id}`);
+      await axios.post(`/api/backups/restore/${backup.id}`);
       addToast('System restored successfully', 'success');
     } catch (err) {
       addToast('Restore failed', 'error');

@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { History, Info, AlertTriangle, XCircle, RefreshCw, Filter, Loader2, History as HistoryIcon } from 'lucide-react';
 import axios from 'axios';
+import api from '../services/api';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';
+
 
 const Events = ({ addToast }) => {
   const [events, setEvents] = useState([]);
@@ -21,7 +22,7 @@ const Events = ({ addToast }) => {
       if (filterType) params.event_type = filterType;
       if (filterSeverity) params.severity = filterSeverity;
 
-      const res = await axios.get(`${API_BASE_URL}/events`, { params });
+      const res = await axios.get(`/api/events`, { params });
       setEvents(Array.isArray(res.data) ? res.data : []);
     } catch (err) {
       console.error("Error fetching events:", err);

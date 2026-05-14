@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { ArrowRight, AlertCircle, CheckCircle2, Server, Printer as PrinterIcon, ArrowLeftRight, Loader2 } from 'lucide-react';
 import axios from 'axios';
+import api from '../services/api';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';
+
 
 const Assignments = ({ addToast }) => {
   const [printers, setPrinters] = useState([]);
@@ -20,8 +21,8 @@ const Assignments = ({ addToast }) => {
     setDataLoading(true);
     try {
       const [pRes, nRes] = await Promise.all([
-        axios.get(`${API_BASE_URL}/printers`),
-        axios.get(`${API_BASE_URL}/nodes`)
+        axios.get(`/api/printers`),
+        axios.get(`/api/nodes`)
       ]);
       setPrinters(pRes.data);
       setNodes(nRes.data);
@@ -44,7 +45,7 @@ const Assignments = ({ addToast }) => {
 
     setLoading(true);
     try {
-      await axios.post(`${API_BASE_URL}/assignments/migrate`, {
+      await axios.post(`/api/assignments/migrate`, {
         printer_id: selectedPrinter.id,
         target_node_id: parseInt(targetNode)
       });

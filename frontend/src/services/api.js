@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';
+const API_BASE_URL = process.env.REACT_APP_API_URL || '';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -10,17 +10,17 @@ const api = axios.create({
 });
 
 export const nodeService = {
-  getNodes: () => api.get('/nodes'),
-  getNode: (id) => api.get(`/nodes/${id}`),
-  registerNode: (data) => api.post('/nodes', data),
+  getNodes: () => api.get('/api/nodes'),
+  getNode: (id) => api.get(`/api/nodes/${id}`),
+  registerNode: (data) => api.post('/api/nodes', data),
 };
 
 export const printerService = {
-  getPrinters: () => api.get('/printers'),
-  getPrinter: (id) => api.get(`/printers/${id}`),
-  createPrinter: (data) => api.post('/printers', data),
-  updatePrinter: (id, data) => api.put(`/printers/${id}`, data),
-  deletePrinter: (id) => api.delete(`/printers/${id}`),
+  getPrinters: () => api.get('/api/printers'),
+  getPrinter: (id) => api.get(`/api/printers/${id}`),
+  createPrinter: (data) => api.post('/api/printers', data),
+  updatePrinter: (id, data) => api.put(`/api/printers/${id}`, data),
+  deletePrinter: (id) => api.delete(`/api/printers/${id}`),
 };
 
 export const agentService = {

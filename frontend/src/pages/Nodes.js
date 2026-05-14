@@ -3,8 +3,9 @@ import { Server, Activity, Thermometer, Cpu, HardDrive, CheckCircle, XCircle, Re
 import { nodeService, agentService } from '../services/api';
 import { Modal } from '../components/UI';
 import axios from 'axios';
+import api from '../services/api';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';
+
 
 const NodeOverview = ({ addToast }) => {
   const [nodes, setNodes] = useState([]);
@@ -71,7 +72,7 @@ const NodeOverview = ({ addToast }) => {
 
   const handleApprove = async (nodeId) => {
     try {
-      await axios.post(`${API_BASE_URL}/nodes/${nodeId}/approve`);
+      await axios.post(`/api/nodes/${nodeId}/approve`);
       addToast("Node approved", "success");
       fetchNodes();
     } catch (err) {
@@ -96,7 +97,7 @@ const NodeOverview = ({ addToast }) => {
       // For MVP, we can reuse register_node logic if backend supports it,
       // but let's assume we need a proper update.
       // Re-using register_node for now as it's an 'upsert' in current backend
-      await axios.post(`${API_BASE_URL}/nodes/`, {
+      await axios.post(`/api/nodes/`, {
         ...selectedNode,
         ...editData
       });

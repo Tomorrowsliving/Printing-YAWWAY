@@ -66,7 +66,7 @@ async def heartbeat_task():
                 "service_instances": [] # Tasks will be populated in future iterations
             }
 
-            requests.post(f"{BACKEND_URL}/nodes/heartbeat", json=payload, timeout=5)
+            requests.post(f"{BACKEND_URL}/api/nodes/heartbeat", json=payload, timeout=5)
         except Exception as e:
             print(f"Heartbeat failed: {e}")
 

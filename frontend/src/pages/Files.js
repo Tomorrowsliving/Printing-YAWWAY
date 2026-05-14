@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { File, Folder, Search, Filter, Save, X, Edit, Trash2, Loader2, FileWarning, RefreshCw } from 'lucide-react';
 import axios from 'axios';
+import api from '../services/api';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';
+
 
 const FileManager = ({ addToast }) => {
   const [printers, setPrinters] = useState([]);
@@ -15,7 +16,7 @@ const FileManager = ({ addToast }) => {
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
-    axios.get(`${API_BASE_URL}/printers`)
+    axios.get(`/api/printers`)
       .then(res => {
         setPrinters(res.data);
         if (res.data.length > 0) setSelectedPrinter(res.data[0].slug);
@@ -32,7 +33,7 @@ const FileManager = ({ addToast }) => {
   const fetchFiles = async () => {
     setLoading(true);
     try {
-      const res = await axios.get(`${API_BASE_URL}/files/${selectedPrinter}/${selectedType}`);
+      const res = await axios.get(`/api/files/${selectedPrinter}/${selectedType}`);
       setFiles(res.data);
     } catch (err) {
       setFiles([]);
@@ -43,7 +44,7 @@ const FileManager = ({ addToast }) => {
 
   const handleEdit = async (file) => {
     try {
-      const res = await axios.get(`${API_BASE_URL}/files/read`, { params: { path: file.path } });
+      const res = await axios.get(`/api/files/read`, { params: { path: file.path } });
       setEditingFile(file);
       setEditContent(res.data.content);
     } catch (err) {
@@ -54,7 +55,7 @@ const FileManager = ({ addToast }) => {
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      await axios.post(`${API_BASE_URL}/files/save`, { content: editContent }, {
+      await axios.post(`/api/files/save`, { content: editContent }, {
         params: { path: editingFile.path }
       });
       addToast("File saved successfully (backup created)", "success");
@@ -70,7 +71,7 @@ const FileManager = ({ addToast }) => {
   const handleDelete = async (file) => {
     if (!window.confirm(`Are you sure you want to delete ${file.name}?`)) return;
     try {
-      await axios.delete(`${API_BASE_URL}/files/delete`, { params: { path: file.path } });
+      await axios.delete(`/api/files/delete`, { params: { path: file.path } });
       addToast("File deleted", "success");
       fetchFiles();
     } catch (err) {

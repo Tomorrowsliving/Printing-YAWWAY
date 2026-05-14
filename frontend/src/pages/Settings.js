@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { Mail, ShieldCheck, Save, Send, Loader2 } from 'lucide-react';
 import axios from 'axios';
+import api from '../services/api';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || '/api';
+
 
 const Settings = ({ addToast }) => {
   const [smtp, setSmtp] = useState({
@@ -19,7 +20,7 @@ const Settings = ({ addToast }) => {
   const handleSaveSettings = async () => {
     setIsSaving(true);
     try {
-      await axios.post(`${API_BASE_URL}/settings/email`, smtp);
+      await axios.post(`/api/settings/email`, smtp);
       addToast("Settings saved successfully", "success");
     } catch (err) {
       addToast("Failed to save settings", "error");
@@ -32,7 +33,7 @@ const Settings = ({ addToast }) => {
     if (!testEmail) return addToast("Enter a test email address", "info");
     setIsTesting(true);
     try {
-      await axios.post(`${API_BASE_URL}/notifications/test`, { email: testEmail, config: smtp });
+      await axios.post(`/api/notifications/test`, { email: testEmail, config: smtp });
       addToast("Test email sent!", "success");
     } catch (err) {
       addToast("Failed to send test email", "error");
