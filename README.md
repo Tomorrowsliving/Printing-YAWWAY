@@ -1,494 +1,126 @@
-# Printing-YAWWAY
+# Klipper Farm Control Plane
 
-A modular, expandable Klipper print farm control platform for managing multiple 3D printers across distributed Raspberry Pi nodes.
+A modular, expandable print farm dashboard for managing multiple Klipper-based 3D printers.
 
-Designed for:
+## Project Structure
 
-* Klipper print farms
-* Centralised configuration management
-* Disposable/stateless Pi nodes
-* Multi-printer deployments
-* Future network-boot infrastructure
-* Centralised G-code and backup management
+- `backend/`: Python FastAPI service for central management and API.
+- `frontend/`: React + Tailwind CSS dashboard UI.
+- `node-agent/`: Lightweight Python FastAPI service running on Raspberry Pi nodes.
+- `storage/`: Centralised storage for configs, G-code, logs, and backups (designed for NFS).
 
----
+## Goal
 
-# Overview
+Create a central server to manage printer profiles, configs, G-code storage, node status, backups, events, and printer-to-node assignments. Raspberry Pis act as disposable Klipper execution nodes, mounting the central storage over NFS.
 
-Printing-YAWWAY separates **printer profiles** from the physical Raspberry Pi running them.
+## Tech Stack
 
-Instead of permanently tying one printer to one Pi, the dashboard treats each printer as a logical profile which can be:
+- Backend: Python FastAPI
+- Frontend: React + Tailwind CSS
+- Database: PostgreSQL
+- Real-time Updates: WebSockets
+- Deployment: Docker Compose (Dashboard/Backend/DB/Reverse Proxy)
+- Node Agent: Python FastAPI (installed on Pis)
+- Reverse Proxy: Caddy
+- Storage: NFS share from central server
 
-* assigned to different nodes
-* migrated between Pis
-* centrally managed
-* backed up automatically
-* monitored from a single dashboard
+## Setup Instructions
 
-The central server manages:
+### Backend & Dashboard (Docker Compose)
 
-* printer profiles
-* configurations
-* G-code storage
-* backups
-* node health
-* event logging
-* printer assignments
-* update orchestration
+1. Copy `.env.example` to `.env` and configure your settings.
+2. Ensure you have Docker and Docker Compose installed.
+3. Run `docker-compose up -d`.
+4. Access the dashboard at `http://localhost`.
 
-Raspberry Pis act as lightweight execution nodes running:
+### Node Agent (on Raspberry Pi)
 
-* Klipper
-* Moonraker
-* webcam services
-* node-agent
+1. Ensure Python 3.9+ is installed.
+2. Install dependencies: `pip install -r requirements.txt`.
+3. Set the backend URL environment variable:
+   ```bash
+   export BACKEND_URL=http://CENTRAL_SERVER_IP
+   ```
+4. Run the agent: `uvicorn main:app --host 0.0.0.0 --port 8001`.
+5. (Optional) Set up as a systemd service using the provided example file. Ensure `Environment=BACKEND_URL=http://CENTRAL_SERVER_IP` is added to the service file.
 
-All printer data is designed to live centrally over NFS.
+## NFS Configuration
 
----
+The central server runs an NFS server container (`nfs`) that exports the `./storage` directory.
 
-# Features
+### Server Side
+The NFS container is configured in `docker-compose.yml`:
+- Image: `itsthenetwork/nfs-server-alpine`
+- Exported path: `/exports` (mapped from `./storage`)
+- Port: `2049`
 
-## Current MVP Features
+### Client Side (Raspberry Pi)
+To mount the shared storage on your Pi nodes:
 
-### Central Dashboard
+1. Install NFS client:
+   ```bash
+   sudo apt update && sudo apt install -y nfs-common
+   ```
+2. Create mount point:
+   ```bash
+   sudo mkdir -p /mnt/klipper-farm
+   ```
+3. Mount the share (replace `YOUR_SERVER_IP` with the dashboard server's IP):
+   ```bash
+   sudo mount YOUR_SERVER_IP:/exports /mnt/klipper-farm
+   ```
+4. To make it persistent, add to `/etc/fstab`:
+   ```text
+   YOUR_SERVER_IP:/exports /mnt/klipper-farm nfs defaults,soft,intr 0 0
+   ```
 
-* Fleet overview
-* Node overview
-* Printer overview
-* Live node health monitoring
-* CPU/RAM/temperature monitoring
-* Node approval workflow
-* Printer-to-node assignment tracking
-* Centralised event logging
-* Embedded Mainsail/Fluidd support
-* WebSocket live updates
-* Centralised G-code storage
-* NFS-based shared storage
-* Node-agent remote update support
-* Automatic node discovery
-* Service restart controls
+## Storage Layout
 
-### Raspberry Pi Node-Agent
+The `storage/` directory is organised as follows:
+- `printers/`: Klipper/Moonraker instance data per printer.
+- `gcodes/`: Centralised G-code file storage.
+- `backups/`: System and configuration backups.
+- `configs/`: Global or shared configuration templates.
+- `uploads/`: Temporary directory for file uploads.
 
-* Health reporting
-* USB device discovery
-* Service management
-* Heartbeat registration
-* Remote update support
-* Automatic installation
-* Systemd integration
-* Narrow sudoers integration
-* Lightweight FastAPI API
+## UI Labels & Language
 
-### Infrastructure
+This project uses British English (e.g., "Initialise", "Organise", "Colour") for all UI labels, comments, and documentation.
 
-* Docker Compose deployment
-* PostgreSQL database
-* Caddy reverse proxy
-* NFS server container
-* Modular backend/frontend architecture
+## Recommended Node Agent Installation
 
----
+The easiest way to install the node-agent on a Raspberry Pi is using the provided one-command installer.
 
-# Planned Features
-
-* Automatic printer migration
-* Printer failover handling
-* Auto reassignment prompts
-* Stateless/network-boot Pi nodes
-* Webcam streaming
-* Discord/email notifications
-* Multi-user authentication
-* Role-based access control
-* Backup scheduling
-* Cluster-aware scheduling
-* Printer usage analytics
-* Print queue orchestration
-* OTA node-agent updates
-* Remote Klipper config editing
-* Full file browser
-* Multi-camera support
-* Per-printer permissions
-* AI-assisted diagnostics
-
----
-
-# Architecture
-
-## Central Server
-
-The central server runs:
-
-* Dashboard frontend
-* FastAPI backend
-* PostgreSQL database
-* WebSocket server
-* NFS server
-* Reverse proxy
-* Backup services
-* Central storage
-
-## Raspberry Pi Nodes
-
-Each Pi runs:
-
-* Klipper
-* Moonraker
-* webcam services
-* node-agent
-* local systemd services
-
-Each printer instance has:
-
-* separate Klipper service
-* separate Moonraker service
-* separate socket
-* separate logs
-* separate config directory
-* separate Moonraker port
-
----
-
-# Tech Stack
-
-| Component         | Technology           |
-| ----------------- | -------------------- |
-| Backend           | FastAPI              |
-| Frontend          | React + Tailwind CSS |
-| Database          | PostgreSQL           |
-| Realtime Updates  | WebSockets           |
-| Reverse Proxy     | Caddy                |
-| Node-Agent        | FastAPI              |
-| Deployment        | Docker Compose       |
-| Storage           | NFS                  |
-| Container Runtime | Docker               |
-
----
-
-# Repository Structure
-
-```text
-backend/        FastAPI backend API
-frontend/       React dashboard frontend
-node-agent/     Raspberry Pi node-agent
-storage/        Centralised storage
-docker-compose.yml
-README.md
-```
-
----
-
-# Backend Setup
-
-## Requirements
-
-* Docker
-* Docker Compose
-
-## Start the Stack
-
-Clone the repository:
+### Automatic Installation (Recommended)
 
 ```bash
-git clone https://github.com/Tomorrowsliving/Printing-YAWWAY.git
-cd Printing-YAWWAY
+git clone https://github.com/Tomorrowsliving/Printing-YAWWAY-.git
+cd Printing-YAWWAY-/node-agent
+sudo ./install.sh --backend-url http://YOUR_SERVER_IP:8001 --port 8001
 ```
 
-Copy the environment template:
+This script will:
+- Install system dependencies (Python, Git, etc.).
+- Install the agent to `/opt/klipper-farm-control`.
+- Set up a virtual environment and install requirements.
+- Create a systemd service and start the agent automatically.
+- Configure narrow sudoers rules for automatic updates.
 
-```bash
-cp .env.example .env
-```
+### Manual Installation
 
-Start the stack:
+If you prefer to install manually:
 
-```bash
-docker compose up -d --build
-```
+1. Install dependencies: `sudo apt update && sudo apt install -y git python3-venv python3-pip`.
+2. Clone and enter the directory.
+3. Create venv: `python3 -m venv venv && source venv/bin/activate`.
+4. Install requirements: `pip install -r requirements.txt`.
+5. Run manually: `export BACKEND_URL=http://your-server-ip:8001 && python3 main.py`.
 
-Dashboard:
+When setting up as a systemd service, ensure `Environment=NODE_AGENT_DIR=/path/to/node-agent` is included in the unit file.
 
-```text
-http://SERVER_IP
-```
+### Uninstallation
 
-API:
-
-```text
-http://SERVER_IP/api
-```
-
----
-
-# Raspberry Pi Node-Agent Installation
-
-## Recommended Installation
-
-The installer automatically:
-
-* installs dependencies
-* creates the virtual environment
-* installs Python requirements
-* creates systemd services
-* configures sudoers rules
-* enables automatic startup
-* configures environment files
-
-Run:
-
-```bash
-git clone https://github.com/Tomorrowsliving/Printing-YAWWAY.git
-cd Printing-YAWWAY/node-agent
-
-sudo ./install.sh \
-  --backend-url http://YOUR_SERVER_IP \
-  --port 8001
-```
-
-Example:
-
-```bash
-sudo ./install.sh \
-  --backend-url http://10.1.8.133 \
-  --port 8001
-```
-
----
-
-# Node-Agent Service
-
-After installation:
-
-```bash
-systemctl status klipper-farm-node-agent
-```
-
-Health endpoint:
-
-```text
-http://PI_IP:8001/health
-```
-
-Restart service:
-
-```bash
-sudo systemctl restart klipper-farm-node-agent
-```
-
-View logs:
-
-```bash
-journalctl -u klipper-farm-node-agent -f
-```
-
----
-
-# NFS Shared Storage
-
-The central server exports the storage directory using NFS.
-
-## Server Export
-
-Docker service:
-
-* `itsthenetwork/nfs-server-alpine`
-
-Exported path:
-
-```text
-/exports
-```
-
-Mapped from:
-
-```text
-./storage
-```
-
----
-
-# Raspberry Pi NFS Mount
-
-Install NFS tools:
-
-```bash
-sudo apt update
-sudo apt install -y nfs-common
-```
-
-Create mount point:
-
-```bash
-sudo mkdir -p /mnt/klipper-farm
-```
-
-Mount the share:
-
-```bash
-sudo mount SERVER_IP:/exports /mnt/klipper-farm
-```
-
-Persistent mount:
-
-```bash
-sudo nano /etc/fstab
-```
-
-Add:
-
-```text
-SERVER_IP:/exports /mnt/klipper-farm nfs defaults,soft,intr 0 0
-```
-
----
-
-# Storage Layout
-
-```text
-storage/
-├── printers/
-├── gcodes/
-├── backups/
-├── configs/
-└── uploads/
-```
-
-## printers/
-
-Per-printer instance data:
-
-* configs
-* logs
-* Moonraker state
-* macros
-
-## gcodes/
-
-Centralised G-code storage.
-
-## backups/
-
-Automatic backups and snapshots.
-
-## configs/
-
-Shared templates and reusable configs.
-
-## uploads/
-
-Temporary upload staging.
-
----
-
-# API Endpoints
-
-## Node-Agent
-
-| Endpoint                | Description        |
-| ----------------------- | ------------------ |
-| GET /health             | Node health        |
-| GET /usb                | USB device listing |
-| GET /instances          | Running instances  |
-| POST /instances/start   | Start instance     |
-| POST /instances/stop    | Stop instance      |
-| POST /instances/restart | Restart instance   |
-| POST /update            | Update node-agent  |
-
----
-
-# Dashboard Pages
-
-## Fleet Overview
-
-* Printer list
-* Status monitoring
-* Quick actions
-* Embedded UI access
-
-## Node Overview
-
-* Node health
-* CPU/RAM/temp monitoring
-* USB device visibility
-* Online/offline state
-
-## Printer Detail
-
-* Logs
-* Service controls
-* Config references
-* Webcam placeholder
-* Node assignment
-
-## Assignment Page
-
-* Printer migration
-* Node selection
-* MCU verification
-* Assignment management
-
-## Event Log
-
-* Service restarts
-* Node errors
-* MCU disconnects
-* Migration history
-
----
-
-# Language & UI Standards
-
-This project uses British English throughout:
-
-* Initialise
-* Organise
-* Colour
-* Optimise
-
----
-
-# Security Notes
-
-Current MVP defaults:
-
-* local-network deployment
-* no authentication enabled by default
-
-Recommended production setup:
-
-* VPN or Cloudflare Tunnel
-* authentication enabled
-* firewall restrictions
-* TLS certificates
-* segmented printer VLAN/network
-
----
-
-# Development Goals
-
-Primary priorities:
-
-1. Stable MVP
-2. Modular architecture
-3. Expandable infrastructure
-4. Centralised management
-5. Reliable node orchestration
-
-The project intentionally avoids overcomplicating the first release while maintaining long-term scalability.
-
----
-
-# Uninstallation
-
-Remove the node-agent:
-
+To remove the agent and its configuration:
 ```bash
 sudo ./uninstall.sh
 ```
-
----
-
-# License
-
-Work in progress.

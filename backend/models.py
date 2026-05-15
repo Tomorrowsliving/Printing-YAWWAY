@@ -54,7 +54,7 @@ class Printer(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
-    node = relationship("Node", back_populates="printers")
+    node = relationship("Node", back_populates="printers", lazy="selectin")
     notes = relationship("PrinterNote", back_populates="printer", uselist=False)
 
 class PrinterNote(Base):
