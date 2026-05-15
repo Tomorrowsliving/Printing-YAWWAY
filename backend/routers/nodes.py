@@ -425,7 +425,7 @@ async def proxy_create_instance(node_id: int, data: dict = Body(...), db: AsyncS
     url = f"http://{node.ip_address}:{node.agent_port}/instances/create"
     try:
         async with httpx.AsyncClient() as client:
-            res = await client.post(url, json=data, timeout=10)
+            res = await client.post(url, json=data, timeout=30)
         if res.status_code == 200:
             return res.json()
         else:
@@ -433,3 +433,42 @@ async def proxy_create_instance(node_id: int, data: dict = Body(...), db: AsyncS
     except Exception as e:
         logger.error(f"Failed to create instance on node {node.hostname}: {e}")
         raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")
+
+@router.get("/{node_id}/software/check")
+async def proxy_software_check(node_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node: raise HTTPException(status_code=404, detail="Node not found")
+    url = f"http://{node.ip_address}:{node.agent_port}/software/check"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=5)
+        return res.json()
+    except:
+        raise HTTPException(status_code=502, detail="Node unreachable")
+
+@router.post("/{node_id}/software/install-klipper")
+async def proxy_install_klipper(node_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node: raise HTTPException(status_code=404, detail="Node not found")
+    url = f"http://{node.ip_address}:{node.agent_port}/software/install-klipper"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, timeout=300)
+        return res.json()
+    except:
+        raise HTTPException(status_code=502, detail="Node unreachable or timeout")
+
+@router.post("/{node_id}/software/install-moonraker")
+async def proxy_install_moonraker(node_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node: raise HTTPException(status_code=404, detail="Node not found")
+    url = f"http://{node.ip_address}:{node.agent_port}/software/install-moonraker"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, timeout=300)
+        return res.json()
+    except:
+        raise HTTPException(status_code=502, detail="Node unreachable or timeout")

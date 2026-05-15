@@ -11,8 +11,8 @@ from ..schemas import Backup as BackupSchema
 
 router = APIRouter(prefix="/backups", tags=["backups"])
 
-BACKUP_PATH = os.getenv("BACKUP_PATH", "storage/backups")
-PRINTERS_PATH = os.getenv("PRINTERS_PATH", "storage/printers")
+BACKUP_PATH = os.getenv("BACKUP_PATH", "/mnt/klipper-farm/backups")
+PRINTERS_PATH = os.getenv("PRINTERS_PATH", "/mnt/klipper-farm/printers")
 
 @router.get("/", response_model=List[BackupSchema])
 async def list_backups(db: AsyncSession = Depends(get_db)):

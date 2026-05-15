@@ -160,7 +160,7 @@ const PrinterDetail = ({ addToast }) => {
             <div className="space-y-4">
               <div>
                 <p className="text-slate-500 uppercase text-[9px] font-bold tracking-widest mb-1">Config Path</p>
-                <p className="truncate font-mono bg-slate-900 p-2 rounded text-[11px] text-blue-300 border border-slate-700">{printer.config_path || '/srv/klipper-farm/default/config'}</p>
+                <p className="truncate font-mono bg-slate-900 p-2 rounded text-[11px] text-blue-300 border border-slate-700">{printer.config_path || '/mnt/klipper-farm/default/config'}</p>
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>

@@ -104,7 +104,18 @@ ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart klipper-farm-node-agent
 ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl status klipper-farm-node-agent.service
 ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart klipper*
 ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart moonraker*
+ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop klipper*
+ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop moonraker*
+ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl start klipper*
+ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl start moonraker*
+ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl enable klipper*
+ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl enable moonraker*
+ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload
 ALL ALL=(ALL) NOPASSWD: /usr/sbin/reboot
+ALL ALL=(ALL) NOPASSWD: /usr/bin/apt-get update
+ALL ALL=(ALL) NOPASSWD: /usr/bin/apt-get install *
+ALL ALL=(ALL) NOPASSWD: /usr/bin/mv /tmp/klipper-*.service /etc/systemd/system/
+ALL ALL=(ALL) NOPASSWD: /usr/bin/mv /tmp/moonraker-*.service /etc/systemd/system/
 EOF_SUDO
 chmod 440 "$SUDOERS_FILE"
 

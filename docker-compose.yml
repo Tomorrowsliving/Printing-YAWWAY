@@ -31,10 +31,10 @@ services:
       dockerfile: ./backend/Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://user:password@db/klipper_farm
-      PRINTERS_PATH: /app/storage/printers
-      BACKUP_PATH: /app/storage/backups
+      PRINTERS_PATH: /mnt/klipper-farm/printers
+      BACKUP_PATH: /mnt/klipper-farm/backups
     volumes:
-      - ./storage:/app/storage
+      - ./storage:/mnt/klipper-farm
     depends_on:
       db:
         condition: service_healthy

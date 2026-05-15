@@ -74,6 +74,8 @@ class InstanceCreate(BaseModel):
     config_path: str
     gcode_path: str
     logs_path: str
+    printer_cfg_content: Optional[str] = None
+    moonraker_conf_content: Optional[str] = None
 
 def clean_string(value):
     if value is None:
@@ -170,29 +172,86 @@ async def list_instances():
 @app.post("/instances/create")
 async def create_instance(data: InstanceCreate):
     """
-    Creates systemd services and minimal config for a new printer instance.
-    In a real MVP, this would also write the service files to /etc/systemd/system/
+    Creates systemd services and config for a new printer instance.
     """
     logger.info(f"Creating instance for {data.printer_slug}")
 
     # Ensure directories exist (NFS usually)
-    os.makedirs(data.config_path, exist_ok=True)
-    os.makedirs(data.gcode_path, exist_ok=True)
-    os.makedirs(data.logs_path, exist_ok=True)
+    try:
+        os.makedirs(data.config_path, exist_ok=True)
+        os.makedirs(data.gcode_path, exist_ok=True)
+        os.makedirs(data.logs_path, exist_ok=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create directories: {e}")
 
     printer_cfg = os.path.join(data.config_path, "printer.cfg")
-    if not os.path.exists(printer_cfg):
+    if data.printer_cfg_content:
+        with open(printer_cfg, "w") as f:
+            f.write(data.printer_cfg_content)
+    elif not os.path.exists(printer_cfg):
         with open(printer_cfg, "w") as f:
             f.write(f"[mcu]\nserial: {data.mcu_serial}\n\n[printer]\nkinematics: none\nmax_velocity: 300\nmax_accel: 3000\n")
 
     moonraker_conf = os.path.join(data.config_path, "moonraker.conf")
-    if not os.path.exists(moonraker_conf):
+    if data.moonraker_conf_content:
+        with open(moonraker_conf, "w") as f:
+            f.write(data.moonraker_conf_content)
+    elif not os.path.exists(moonraker_conf):
         with open(moonraker_conf, "w") as f:
             f.write(f"[server]\nhost: 0.0.0.0\nport: {data.moonraker_port}\n\n[file_manager]\nconfig_path: {data.config_path}\nlog_path: {data.logs_path}\n\n[authorization]\ntrusted_clients:\n  127.0.0.1\n  192.168.0.0/16\n  10.0.0.0/8\n  172.16.0.0/12\n")
 
-    # TODO: In production, generate and install systemd units here.
-    # For now, we return success to simulate the flow.
-    return {"status": "success", "message": f"Configs generated for {data.printer_slug}. Systemd units pending manual install or root implementation."}
+    # Install Systemd Units
+    klipper_service = f"klipper-{data.printer_slug}.service"
+    moonraker_service = f"moonraker-{data.printer_slug}.service"
+
+    klipper_unit = f"""[Unit]
+Description=Klipper for {data.printer_slug}
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/klippy-env/bin/python /opt/klipper/klippy/klippy.py {printer_cfg} -l {os.path.join(data.logs_path, "klippy.log")} -a /tmp/klippy_{data.printer_slug}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+    moonraker_unit = f"""[Unit]
+Description=Moonraker for {data.printer_slug}
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/moonraker-env/bin/python /opt/moonraker/moonraker/moonraker.py -c {moonraker_conf} -l {os.path.join(data.logs_path, "moonraker.log")}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+    try:
+        # We use a temp file and sudo mv to handle permissions safely if agent is not root
+        # though our installer runs agent as root for MVP simplicity.
+        with open(f"/tmp/{klipper_service}", "w") as f: f.write(klipper_unit)
+        with open(f"/tmp/{moonraker_service}", "w") as f: f.write(moonraker_unit)
+
+        subprocess.run(["sudo", "mv", f"/tmp/{klipper_service}", f"/etc/systemd/system/{klipper_service}"], check=True)
+        subprocess.run(["sudo", "mv", f"/tmp/{moonraker_service}", f"/etc/systemd/system/{moonraker_service}"], check=True)
+        subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
+        subprocess.run(["sudo", "systemctl", "enable", klipper_service], check=True)
+        subprocess.run(["sudo", "systemctl", "enable", moonraker_service], check=True)
+        subprocess.run(["sudo", "systemctl", "start", klipper_service], check=True)
+        subprocess.run(["sudo", "systemctl", "start", moonraker_service], check=True)
+    except Exception as e:
+        logger.error(f"Failed to install systemd units: {e}")
+        return {"status": "partial_success", "message": f"Configs created but systemd install failed: {e}"}
+
+    return {"status": "success", "message": f"Instance {data.printer_slug} created and started."}
 
 def validate_service_name(service: str):
     if not (service.startswith("klipper-") or service.startswith("moonraker-")):
@@ -215,6 +274,45 @@ async def restart_instance(service: str = Body(..., embed=True)):
     validate_service_name(service)
     subprocess.run(["sudo", "systemctl", "restart", service])
     return {"status": "restarted"}
+
+@app.get("/software/check")
+async def check_software():
+    results = {
+        "klipper_installed": os.path.exists("/opt/klipper/klippy/klippy.py"),
+        "moonraker_installed": os.path.exists("/opt/moonraker/moonraker/moonraker.py"),
+        "klipper_env": os.path.exists("/opt/klippy-env/bin/python"),
+        "moonraker_env": os.path.exists("/opt/moonraker-env/bin/python"),
+        "nfs_mounted": os.path.ismount("/mnt/klipper-farm") or os.path.exists("/mnt/klipper-farm/printers"),
+        "systemd": os.path.exists("/run/systemd/system")
+    }
+    return results
+
+@app.post("/software/install-klipper")
+async def install_klipper():
+    try:
+        # Simplistic install logic for MVP
+        subprocess.run(["sudo", "apt-get", "update"], check=True)
+        subprocess.run(["sudo", "apt-get", "install", "-y", "git", "python3-venv"], check=True)
+        if not os.path.exists("/opt/klipper"):
+            subprocess.run(["sudo", "git", "clone", "https://github.com/Klipper3d/klipper", "/opt/klipper"], check=True)
+        if not os.path.exists("/opt/klippy-env"):
+            subprocess.run(["sudo", "python3", "-m", "venv", "/opt/klippy-env"], check=True)
+            subprocess.run(["sudo", "/opt/klippy-env/bin/pip", "install", "-r", "/opt/klipper/scripts/klippy-requirements.txt"], check=True)
+        return {"success": True, "message": "Klipper installed successfully."}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+@app.post("/software/install-moonraker")
+async def install_moonraker():
+    try:
+        if not os.path.exists("/opt/moonraker"):
+            subprocess.run(["sudo", "git", "clone", "https://github.com/Arksine/moonraker", "/opt/moonraker"], check=True)
+        if not os.path.exists("/opt/moonraker-env"):
+            subprocess.run(["sudo", "python3", "-m", "venv", "/opt/moonraker-env"], check=True)
+            subprocess.run(["sudo", "/opt/moonraker-env/bin/pip", "install", "-r", "/opt/moonraker/requirements.txt"], check=True)
+        return {"success": True, "message": "Moonraker installed successfully."}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
 
 @app.get("/version")
 async def get_version():
