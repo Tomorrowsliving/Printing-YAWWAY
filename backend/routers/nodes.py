@@ -22,6 +22,11 @@ def is_local_ip(ip: str) -> bool:
     except ValueError:
         return False
 
+def clean_string(value):
+    if value is None:
+        return None
+    return str(value).replace("\x00", "").strip()
+
 def serialize_node(node):
     """Utility to serialize SQLAlchemy Node model to dict to avoid MissingGreenlet errors"""
     return {
@@ -136,17 +141,25 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
     if not is_local_ip(client_host) and not is_local_ip(hb.ip_address):
         raise HTTPException(status_code=403, detail="Non-local heartbeats rejected")
 
+    # Sanitise inputs
+    hb_node_uuid = clean_string(hb.node_uuid)
+    hb_hostname = clean_string(hb.hostname)
+    hb_ip_address = clean_string(hb.ip_address)
+    hb_model = clean_string(hb.pi_model or hb.model)
+    hb_uptime = clean_string(hb.uptime)
+    hb_version = clean_string(hb.version)
+
     # 1. Lookup by node_uuid first
     node = None
-    if hb.node_uuid and hb.node_uuid != "unknown":
-        result = await db.execute(select(Node).where(Node.node_uuid == hb.node_uuid))
+    if hb_node_uuid and hb_node_uuid != "unknown":
+        result = await db.execute(select(Node).where(Node.node_uuid == hb_node_uuid))
         node = result.scalar_one_or_none()
 
     # 2. Fallback to hostname + ip_address + agent_port
     if not node:
         result = await db.execute(select(Node).where(
-            Node.hostname == hb.hostname,
-            Node.ip_address == hb.ip_address,
+            Node.hostname == hb_hostname,
+            Node.ip_address == hb_ip_address,
             Node.agent_port == hb.agent_port
         ))
         node = result.scalar_one_or_none()
@@ -155,9 +168,9 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
     if not node:
         is_new = True
         node = Node(
-            node_uuid=hb.node_uuid,
-            hostname=hb.hostname,
-            ip_address=hb.ip_address,
+            node_uuid=hb_node_uuid,
+            hostname=hb_hostname,
+            ip_address=hb_ip_address,
             agent_port=hb.agent_port,
             approved=False,
             status="discovered"
@@ -165,15 +178,15 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
         db.add(node)
 
     # Update health fields
-    node.hostname = hb.hostname
-    node.ip_address = hb.ip_address
+    node.hostname = hb_hostname
+    node.ip_address = hb_ip_address
     node.agent_port = hb.agent_port
-    node.model = hb.pi_model or hb.model or node.model
+    node.model = hb_model or node.model
     node.cpu_usage = hb.cpu_usage if hb.cpu_usage is not None else node.cpu_usage
     node.ram_usage = hb.ram_usage if hb.ram_usage is not None else node.ram_usage
     node.temperature = hb.temperature if hb.temperature is not None else node.temperature
-    node.uptime = hb.uptime or node.uptime
-    node.agent_version = hb.version or node.agent_version
+    node.uptime = hb_uptime or node.uptime
+    node.agent_version = hb_version or node.agent_version
     node.online = True
     node.last_seen = datetime.datetime.now(datetime.timezone.utc)
     if node.approved:

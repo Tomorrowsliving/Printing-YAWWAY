@@ -37,6 +37,11 @@ class InstanceCreate(BaseModel):
     gcode_path: str
     logs_path: str
 
+def clean_string(value):
+    if value is None:
+        return None
+    return str(value).replace("\x00", "").strip()
+
 def get_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -56,6 +61,22 @@ def get_pi_model():
     except:
         return "Unknown"
 
+def get_cpu_temperature():
+    try:
+        temps = psutil.sensors_temperatures()
+        if not temps:
+            return 0.0
+        for key in ("cpu_thermal", "cpu-thermal", "soc_thermal"):
+            entries = temps.get(key)
+            if entries:
+                return float(entries[0].current)
+        for entries in temps.values():
+            if entries:
+                return float(entries[0].current)
+    except Exception:
+        pass
+    return 0.0
+
 @app.get("/health")
 async def health():
     usb_serial = []
@@ -64,14 +85,14 @@ async def health():
         usb_serial = os.listdir(base_path)
 
     return {
-        "hostname": socket.gethostname(),
-        "ip_address": get_ip(),
+        "hostname": clean_string(socket.gethostname()),
+        "ip_address": clean_string(get_ip()),
         "cpu_usage": psutil.cpu_percent(),
         "ram_usage": psutil.virtual_memory().percent,
-        "temperature": psutil.sensors_temperatures().get('cpu_thermal', [{}])[0].get('current', 0) if hasattr(psutil, "sensors_temperatures") else 0,
-        "uptime": f"{int(time.time() - psutil.boot_time())}s",
-        "model": get_pi_model(),
-        "pi_model": get_pi_model(),
+        "temperature": get_cpu_temperature(),
+        "uptime": clean_string(f"{int(time.time() - psutil.boot_time())}s"),
+        "model": clean_string(get_pi_model()),
+        "pi_model": clean_string(get_pi_model()),
         "version": "1.0.0",
         "online": True,
         "usb_serial_count": len(usb_serial),
@@ -189,7 +210,7 @@ async def heartbeat_task():
                 # Use health info for heartbeat
                 h = await health()
                 payload = {
-                    "node_uuid": os.getenv("NODE_UUID", "unknown"),
+                    "node_uuid": clean_string(os.getenv("NODE_UUID", "unknown")),
                     "hostname": h["hostname"],
                     "ip_address": h["ip_address"],
                     "agent_port": AGENT_PORT,
