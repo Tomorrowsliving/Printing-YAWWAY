@@ -1,6 +1,9 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from .routers import nodes, printers, files, assignments, events, backups, websocket, settings, notifications
+import logging
 import asyncio
 import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +12,19 @@ from .database import AsyncSessionLocal, engine, Base
 from .models import Node, Event, Printer, PrinterNote, Backup, NotificationSetting, FileRecord, Assignment
 
 app = FastAPI(title="Klipper Farm Control Plane API")
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("klipper-farm")
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.error(f"422 Validation Error: {exc.errors()}")
+    logger.error(f"Request body: {await request.body()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": str(await request.body())},
+    )
 
 app.add_middleware(
     CORSMiddleware,

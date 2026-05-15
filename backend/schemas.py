@@ -15,16 +15,19 @@ class NodeCreate(NodeBase):
     node_uuid: Optional[str] = None
 
 class NodeHeartbeat(BaseModel):
-    node_uuid: str
     hostname: str
     ip_address: str
     agent_port: int
-    model: str
-    cpu_usage: float
-    ram_usage: float
-    temperature: float
-    uptime: str
-    agent_version: Optional[str] = "1.0.0"
+    node_uuid: Optional[str] = None
+    model: Optional[str] = None
+    pi_model: Optional[str] = None
+    version: Optional[str] = None
+    cpu_usage: Optional[float] = None
+    ram_usage: Optional[float] = None
+    temperature: Optional[float] = None
+    uptime: Optional[str] = None
+    usb_serial_count: Optional[int] = 0
+    usb_device_count: Optional[int] = 0
     usb_devices: List[dict] = []
     service_instances: List[dict] = []
 

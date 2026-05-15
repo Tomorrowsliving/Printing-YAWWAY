@@ -136,37 +136,50 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
     if not is_local_ip(client_host) and not is_local_ip(hb.ip_address):
         raise HTTPException(status_code=403, detail="Non-local heartbeats rejected")
 
-    # Prevent duplicate discovery for same hostname or same UUID
-    result = await db.execute(select(Node).where(or_(Node.node_uuid == hb.node_uuid, Node.hostname == hb.hostname)))
-    node = result.scalar_one_or_none()
+    # 1. Lookup by node_uuid first
+    node = None
+    if hb.node_uuid and hb.node_uuid != "unknown":
+        result = await db.execute(select(Node).where(Node.node_uuid == hb.node_uuid))
+        node = result.scalar_one_or_none()
+
+    # 2. Fallback to hostname + ip_address + agent_port
+    if not node:
+        result = await db.execute(select(Node).where(
+            Node.hostname == hb.hostname,
+            Node.ip_address == hb.ip_address,
+            Node.agent_port == hb.agent_port
+        ))
+        node = result.scalar_one_or_none()
 
     is_new = False
     if not node:
         is_new = True
-        node = Node(node_uuid=hb.node_uuid, approved=False, status="discovered")
+        node = Node(
+            node_uuid=hb.node_uuid,
+            hostname=hb.hostname,
+            ip_address=hb.ip_address,
+            agent_port=hb.agent_port,
+            approved=False,
+            status="discovered"
+        )
         db.add(node)
-    elif node.node_uuid != hb.node_uuid and node.hostname == hb.hostname:
-        # Hostname matched but UUID changed (re-install), update UUID
-        node.node_uuid = hb.node_uuid
 
-    # Prefer wired IP (e.g. 10.1.* or 192.168.*)
-    current_is_wired = node.ip_address and node.ip_address.startswith(("10.1.", "192.168."))
-    new_is_wired = hb.ip_address.startswith(("10.1.", "192.168."))
-
-    if (not current_is_wired and new_is_wired) or not node.ip_address:
-        node.ip_address = hb.ip_address
-
+    # Update health fields
     node.hostname = hb.hostname
+    node.ip_address = hb.ip_address
     node.agent_port = hb.agent_port
-    node.model = hb.model
-    node.cpu_usage = hb.cpu_usage
-    node.ram_usage = hb.ram_usage
-    node.temperature = hb.temperature
-    node.uptime = hb.uptime
-    node.agent_version = hb.agent_version
+    node.model = hb.pi_model or hb.model or node.model
+    node.cpu_usage = hb.cpu_usage if hb.cpu_usage is not None else node.cpu_usage
+    node.ram_usage = hb.ram_usage if hb.ram_usage is not None else node.ram_usage
+    node.temperature = hb.temperature if hb.temperature is not None else node.temperature
+    node.uptime = hb.uptime or node.uptime
+    node.agent_version = hb.version or node.agent_version
     node.online = True
     node.last_seen = datetime.datetime.now(datetime.timezone.utc)
-    if node.approved: node.status = "online"
+    if node.approved:
+        node.status = "online"
+    else:
+        node.status = "discovered"
 
     if is_new:
         await db.flush() # Ensure node.id is populated
@@ -193,7 +206,8 @@ async def approve_node(node_id: int, db: AsyncSession = Depends(get_db)):
 async def refresh_node(node_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
-    if not node: raise HTTPException(status_code=404, detail="Node not found")
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
 
     url = f"http://{node.ip_address}:{node.agent_port}/health"
     logger.info(f"Refreshing node {node.id} ({node.hostname}) at {url}")
@@ -203,9 +217,9 @@ async def refresh_node(node_id: int, db: AsyncSession = Depends(get_db)):
             res = await client.get(url, timeout=5)
         if res.status_code == 200:
             data = res.json()
-            node.cpu_usage = data.get("cpu_usage", 0.0)
-            node.ram_usage = data.get("ram_usage", 0.0)
-            node.temperature = data.get("temperature", 0.0)
+            node.cpu_usage = data.get("cpu_usage", node.cpu_usage)
+            node.ram_usage = data.get("ram_usage", node.ram_usage)
+            node.temperature = data.get("temperature", node.temperature)
             node.uptime = data.get("uptime", node.uptime)
             node.model = data.get("pi_model", data.get("model", node.model))
             node.agent_version = data.get("version", node.agent_version)
@@ -217,13 +231,19 @@ async def refresh_node(node_id: int, db: AsyncSession = Depends(get_db)):
             await db.refresh(node)
             return serialize_node(node)
         else:
-            raise Exception(f"Received status code {res.status_code}")
+            logger.warning(f"Refresh failed for {node.hostname}: Status {res.status_code}")
+            node.online = False
+            node.status = "offline"
+            await db.commit()
+            await db.refresh(node)
+            return serialize_node(node)
     except Exception as e:
+        logger.error(f"Refresh error for {node.hostname} at {url}: {str(e)}")
         node.online = False
         node.status = "offline"
         await db.commit()
         await db.refresh(node)
-        raise HTTPException(status_code=400, detail=f"Failed to reach node at {url}: {str(e)}")
+        return serialize_node(node)
 
 @router.post("/{node_id}/detect-port", response_model=NodeSchema)
 async def detect_node_port(node_id: int, db: AsyncSession = Depends(get_db)):

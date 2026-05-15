@@ -58,15 +58,24 @@ def get_pi_model():
 
 @app.get("/health")
 async def health():
+    usb_serial = []
+    base_path = "/dev/serial/by-id"
+    if os.path.exists(base_path):
+        usb_serial = os.listdir(base_path)
+
     return {
         "hostname": socket.gethostname(),
         "ip_address": get_ip(),
         "cpu_usage": psutil.cpu_percent(),
         "ram_usage": psutil.virtual_memory().percent,
         "temperature": psutil.sensors_temperatures().get('cpu_thermal', [{}])[0].get('current', 0) if hasattr(psutil, "sensors_temperatures") else 0,
-        "uptime": time.time() - psutil.boot_time(),
+        "uptime": f"{int(time.time() - psutil.boot_time())}s",
         "model": get_pi_model(),
-        "online": True
+        "pi_model": get_pi_model(),
+        "version": "1.0.0",
+        "online": True,
+        "usb_serial_count": len(usb_serial),
+        "usb_device_count": len(psutil.disk_partitions()) # Placeholder for device count
     }
 
 @app.get("/usb")
@@ -177,11 +186,22 @@ async def heartbeat_task():
     async with httpx.AsyncClient() as client:
         while True:
             try:
+                # Use health info for heartbeat
+                h = await health()
                 payload = {
-                    "hostname": socket.gethostname(),
-                    "ip_address": get_ip(),
+                    "node_uuid": os.getenv("NODE_UUID", "unknown"),
+                    "hostname": h["hostname"],
+                    "ip_address": h["ip_address"],
                     "agent_port": AGENT_PORT,
-                    "model": get_pi_model()
+                    "model": h["model"],
+                    "pi_model": h["pi_model"],
+                    "version": h["version"],
+                    "cpu_usage": h["cpu_usage"],
+                    "ram_usage": h["ram_usage"],
+                    "temperature": h["temperature"],
+                    "uptime": h["uptime"],
+                    "usb_serial_count": h["usb_serial_count"],
+                    "usb_device_count": h["usb_device_count"]
                 }
                 await client.post(f"{CENTRAL_SERVER_URL}/api/nodes/heartbeat", json=payload, timeout=5.0)
             except Exception as e:
