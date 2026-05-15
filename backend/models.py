@@ -26,6 +26,9 @@ class Node(Base):
     agent_version = Column(String, default="1.0.0")
     update_available = Column(Boolean, default=False)
     last_update_check = Column(DateTime(timezone=True))
+    last_update_status = Column(String)
+    last_update_message = Column(Text)
+    last_update_at = Column(DateTime(timezone=True))
     status = Column(String, default="discovered") # discovered, approved, online, offline, updating, error
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -144,11 +144,21 @@ const NodeOverview = ({ addToast }) => {
     if (!window.confirm("Trigger remote update on this node?")) return;
     setActionNodeId(nodeId);
     try {
-      await axios.post(`/api/nodes/${nodeId}/update`);
-      addToast("Update sequence started", "success");
+      const res = await axios.post(`/api/nodes/${nodeId}/update`);
+      const updateData = res.data;
+
+      if (updateData.success) {
+         if (updateData.status === 'already_up_to_date') {
+            addToast("Node is already up to date", "info");
+         } else {
+            addToast("Update successful - restart required", "success");
+         }
+      } else {
+         addToast(`Update failed: ${updateData.message}`, "error");
+      }
       fetchNodes();
     } catch (err) {
-      addToast(err.response?.data?.detail || "Failed to trigger update", "error");
+      addToast(err.response?.data?.detail || "Communication failure during update", "error");
     } finally {
       setActionNodeId(null);
     }
@@ -187,6 +197,13 @@ const NodeOverview = ({ addToast }) => {
                <div className="bg-slate-900/50 p-2 rounded-lg text-center border border-slate-700/50"><p className="text-[10px] font-bold text-slate-500 uppercase mb-1">CPU</p><p className="font-bold text-sm text-slate-200">{node.cpu_usage || 0}%</p></div>
                <div className="bg-slate-900/50 p-2 rounded-lg text-center border border-slate-700/50"><p className="text-[10px] font-bold text-slate-500 uppercase mb-1">RAM</p><p className="font-bold text-sm text-slate-200">{node.ram_usage || 0}%</p></div>
             </div>
+
+            {node.last_update_status && (
+              <div className={`p-2 rounded-lg text-[10px] border ${node.last_update_status === 'failed' ? 'bg-red-500/5 border-red-500/20 text-red-400' : 'bg-blue-500/5 border-blue-500/20 text-blue-400'}`}>
+                <p className="font-bold uppercase mb-0.5">Last Update: {node.last_update_status}</p>
+                <p className="opacity-80 italic line-clamp-1">{node.last_update_message}</p>
+              </div>
+            )}
 
             <div className="flex space-x-2 pt-2">
               <button disabled={actionNodeId === node.id} onClick={() => handleRefresh(node)} className="flex-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 py-1.5 rounded-lg text-[10px] font-bold flex items-center justify-center transition-colors">

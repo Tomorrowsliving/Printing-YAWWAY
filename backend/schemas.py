@@ -42,6 +42,9 @@ class Node(NodeBase):
     status: str
     agent_version: Optional[str]
     update_available: bool
+    last_update_status: Optional[str] = None
+    last_update_message: Optional[str] = None
+    last_update_at: Optional[datetime] = None
     last_seen: Optional[datetime]
     created_at: datetime
     updated_at: Optional[datetime]

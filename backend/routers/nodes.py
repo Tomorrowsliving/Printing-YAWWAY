@@ -48,6 +48,9 @@ def serialize_node(node):
         "agent_version": node.agent_version,
         "update_available": node.update_available,
         "last_update_check": node.last_update_check,
+        "last_update_status": node.last_update_status,
+        "last_update_message": node.last_update_message,
+        "last_update_at": node.last_update_at,
         "status": node.status,
         "created_at": node.created_at,
         "updated_at": node.updated_at,
@@ -287,19 +290,41 @@ async def detect_node_port(node_id: int, db: AsyncSession = Depends(get_db)):
 async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
-    if not node: raise HTTPException(status_code=404, detail="Node not found")
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
     url = f"http://{node.ip_address}:{node.agent_port}/update"
     try:
         node.status = "updating"
         await db.commit()
+
         async with httpx.AsyncClient() as client:
-            res = await client.post(url, timeout=10)
-        res.raise_for_status()
-        return res.json()
-    except Exception as e:
-        node.status = "error"
+            res = await client.post(url, timeout=60) # Increase timeout for pip install
+
+        update_res = res.json()
+
+        node.last_update_status = update_res.get("status", "failed")
+        node.last_update_message = update_res.get("message", "No message provided")
+        node.last_update_at = datetime.datetime.now(datetime.timezone.utc)
+
+        if update_res.get("success"):
+            node.status = "online" # or "restart_required" if we add that state
+            db.add(Event(node_id=node.id, severity="info", event_type="node_update", message=f"Update successful: {node.last_update_message}"))
+        else:
+            node.status = "error"
+            db.add(Event(node_id=node.id, severity="error", event_type="node_update", message=f"Update failed: {node.last_update_message}"))
+
         await db.commit()
-        raise HTTPException(status_code=400, detail=f"Update failed at {url}: {str(e)}")
+        await db.refresh(node)
+        return update_res
+    except Exception as e:
+        logger.error(f"Dashboard update route error: {e}")
+        node.status = "error"
+        node.last_update_status = "failed"
+        node.last_update_message = str(e)
+        node.last_update_at = datetime.datetime.now(datetime.timezone.utc)
+        await db.commit()
+        raise HTTPException(status_code=400, detail=f"Update communication failed at {url}: {str(e)}")
 
 @router.get("/{node_id}/usb")
 async def get_node_usb(node_id: int, db: AsyncSession = Depends(get_db)):

@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 from pydantic import BaseModel
 import time
+import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -178,29 +179,92 @@ async def restart_instance(service: str = Body(..., embed=True)):
     subprocess.run(["sudo", "systemctl", "restart", service])
     return {"status": "restarted"}
 
+@app.get("/version")
+async def get_version():
+    commit = "unknown"
+    branch = "unknown"
+    if os.path.exists(NODE_AGENT_REPO_DIR):
+        try:
+            commit = subprocess.check_output(["git", "-C", NODE_AGENT_REPO_DIR, "rev-parse", "HEAD"], text=True).strip()
+            branch = subprocess.check_output(["git", "-C", NODE_AGENT_REPO_DIR, "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
+        except: pass
+
+    return {
+        "version": "1.0.0",
+        "commit": commit,
+        "branch": branch,
+        "repo_dir": NODE_AGENT_REPO_DIR,
+        "agent_dir": os.path.join(NODE_AGENT_REPO_DIR, "node-agent")
+    }
+
 @app.post("/update")
 async def update_agent():
     if not os.path.exists(NODE_AGENT_REPO_DIR):
         raise HTTPException(status_code=404, detail="Repo directory not found")
 
-    try:
-        # Pull latest code
-        subprocess.run(["git", "-C", NODE_AGENT_REPO_DIR, "pull"], check=True)
+    result = {
+        "success": False,
+        "status": "failed",
+        "message": "",
+        "before_commit": "",
+        "after_commit": "",
+        "remote_commit": "",
+        "git_fetch_output": "",
+        "git_pull_output": "",
+        "pip_output": "",
+        "restart_required": False,
+        "timestamp": datetime.datetime.now().isoformat()
+    }
 
-        # Update dependencies
+    try:
+        # 1. Get current commit
+        result["before_commit"] = subprocess.check_output(["git", "-C", NODE_AGENT_REPO_DIR, "rev-parse", "HEAD"], text=True).strip()
+
+        # 2. Fetch
+        fetch_res = subprocess.run(["git", "-C", NODE_AGENT_REPO_DIR, "fetch", "origin"], capture_output=True, text=True)
+        result["git_fetch_output"] = fetch_res.stdout + fetch_res.stderr
+
+        # 3. Get remote commit
+        branch = subprocess.check_output(["git", "-C", NODE_AGENT_REPO_DIR, "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
+        result["remote_commit"] = subprocess.check_output(["git", "-C", NODE_AGENT_REPO_DIR, "rev-parse", f"origin/{branch}"], text=True).strip()
+
+        if result["before_commit"] == result["remote_commit"]:
+            result["success"] = True
+            result["status"] = "already_up_to_date"
+            result["message"] = "Node-agent is already up to date."
+            result["after_commit"] = result["before_commit"]
+        else:
+            # 4. Pull
+            pull_res = subprocess.run(["git", "-C", NODE_AGENT_REPO_DIR, "pull", "--ff-only"], capture_output=True, text=True)
+            result["git_pull_output"] = pull_res.stdout + pull_res.stderr
+            if pull_res.returncode != 0:
+                result["message"] = f"Git pull failed: {pull_res.stderr}"
+                return result
+
+            result["after_commit"] = subprocess.check_output(["git", "-C", NODE_AGENT_REPO_DIR, "rev-parse", "HEAD"], text=True).strip()
+            result["status"] = "updated"
+            result["message"] = "Source code updated successfully."
+            result["restart_required"] = True
+            result["success"] = True
+
+        # 5. Always check dependencies if requirements changed or explicitly on update
         agent_dir = os.path.join(NODE_AGENT_REPO_DIR, "node-agent")
         venv_pip = os.path.join(agent_dir, "venv", "bin", "pip")
         requirements_txt = os.path.join(agent_dir, "requirements.txt")
 
         if os.path.exists(venv_pip) and os.path.exists(requirements_txt):
-            subprocess.run([venv_pip, "install", "-r", requirements_txt], check=True)
+            pip_res = subprocess.run([venv_pip, "install", "-r", requirements_txt], capture_output=True, text=True)
+            result["pip_output"] = pip_res.stdout + pip_res.stderr
+            if pip_res.returncode != 0:
+                result["success"] = False
+                result["status"] = "failed"
+                result["message"] = f"Pip install failed: {pip_res.stderr}"
 
-        # We don't restart ourselves here, systemd should handle the restart if we exit
-        # or we could use a separate script. In this MVP we expect a manual or external restart.
-        return {"status": "updated", "message": "Source code and dependencies updated. Service restart required."}
+        return result
     except Exception as e:
         logger.error(f"Update failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        result["message"] = str(e)
+        return result
 
 async def heartbeat_task():
     """Background task to notify central server we are online."""
