@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, delete, update
 from typing import List
@@ -300,3 +300,43 @@ async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
         node.status = "error"
         await db.commit()
         raise HTTPException(status_code=400, detail=f"Update failed at {url}: {str(e)}")
+
+@router.get("/{node_id}/usb")
+async def get_node_usb(node_id: int, db: AsyncSession = Depends(get_db)):
+    """Proxied endpoint to fetch USB devices from a node-agent"""
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    url = f"http://{node.ip_address}:{node.agent_port}/usb"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=5)
+        if res.status_code == 200:
+            return res.json()
+        else:
+            raise HTTPException(status_code=502, detail=f"Node agent returned {res.status_code}")
+    except Exception as e:
+        logger.error(f"Failed to fetch USB from node {node.hostname}: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")
+
+@router.post("/{node_id}/instances/create")
+async def proxy_create_instance(node_id: int, data: dict = Body(...), db: AsyncSession = Depends(get_db)):
+    """Proxied endpoint to create a printer instance on a node-agent"""
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    url = f"http://{node.ip_address}:{node.agent_port}/instances/create"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, json=data, timeout=10)
+        if res.status_code == 200:
+            return res.json()
+        else:
+            raise HTTPException(status_code=res.status_code, detail=res.text)
+    except Exception as e:
+        logger.error(f"Failed to create instance on node {node.hostname}: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")

@@ -63,16 +63,13 @@ const Fleet = ({ addToast }) => {
   const fetchMcus = async (nodeId) => {
     setMcuLoading(true);
     try {
-      const node = nodes.find(n => n.id === nodeId);
-      if (!node) return;
-
-      const res = await axios.get(`http://${node.ip_address}:${node.agent_port}/usb`);
+      const res = await nodeService.getNodeUsb(nodeId);
       const available = res.data;
 
       // In a real app, we'd cross-reference with existing printers
       setMcus({ available, used: [] });
     } catch (err) {
-      addToast("Failed to fetch USB devices from node", "error");
+      addToast(err.response?.data?.detail || "Failed to fetch USB devices from node", "error");
     } finally {
       setMcuLoading(false);
     }
@@ -109,8 +106,7 @@ const Fleet = ({ addToast }) => {
       });
 
       // 2. Instruct node agent to create instance
-      const node = nodes.find(n => n.id === formData.assigned_node_id);
-      await axios.post(`http://${node.ip_address}:${node.agent_port}/instances/create`, {
+      await nodeService.createNodeInstance(formData.assigned_node_id, {
         printer_slug: formData.slug,
         mcu_serial: formData.expected_mcu_serial,
         moonraker_port: formData.moonraker_port,
