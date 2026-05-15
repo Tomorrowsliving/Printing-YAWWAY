@@ -42,7 +42,6 @@ class Node(NodeBase):
     last_seen: Optional[datetime]
     created_at: datetime
     updated_at: Optional[datetime]
-    node: Optional[Node] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -69,6 +68,7 @@ class Printer(PrinterBase):
     last_seen: Optional[datetime]
     created_at: datetime
     updated_at: Optional[datetime]
+    node: Optional[Node] = None
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -25,8 +25,8 @@ app.add_middleware(
 )
 
 # Configuration from environment
-AGENT_PORT = int(os.getenv("AGENT_PORT", 8001))
-CENTRAL_SERVER_URL = os.getenv("CENTRAL_SERVER_URL", "http://server:8001")
+AGENT_PORT = int(os.getenv("NODE_AGENT_PORT", os.getenv("AGENT_PORT", 8001)))
+CENTRAL_SERVER_URL = os.getenv("BACKEND_URL", os.getenv("CENTRAL_SERVER_URL", "http://server:8001"))
 NODE_AGENT_REPO_DIR = os.getenv("NODE_AGENT_REPO_DIR", "/home/pi/klipper-farm-control-plane")
 
 class InstanceCreate(BaseModel):

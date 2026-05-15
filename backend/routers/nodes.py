@@ -7,7 +7,7 @@ from ..models import Node, Event, Printer
 from ..schemas import NodeCreate, NodeHeartbeat, Node as NodeSchema
 import datetime
 import ipaddress
-import requests
+import httpx
 import logging
 
 # Setup logger
@@ -169,6 +169,7 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
     if node.approved: node.status = "online"
 
     if is_new:
+        await db.flush() # Ensure node.id is populated
         db.add(Event(node_id=node.id, severity="info", event_type="node_discovered", message=f"New node discovered: {node.hostname}"))
 
     await db.commit()
@@ -198,7 +199,8 @@ async def refresh_node(node_id: int, db: AsyncSession = Depends(get_db)):
     logger.info(f"Refreshing node {node.id} ({node.hostname}) at {url}")
 
     try:
-        res = requests.get(url, timeout=5)
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=5)
         if res.status_code == 200:
             data = res.json()
             node.cpu_usage = data.get("cpu_usage", 0.0)
@@ -230,12 +232,13 @@ async def detect_node_port(node_id: int, db: AsyncSession = Depends(get_db)):
     if not node: raise HTTPException(status_code=404, detail="Node not found")
 
     common_ports = [8001, 8002, 8003, 7126, 7125]
-    for port in common_ports:
-        url = f"http://{node.ip_address}:{port}/health"
-        try:
-            res = requests.get(url, timeout=1)
-            if res.status_code == 200:
-                node.agent_port = port
+    async with httpx.AsyncClient() as client:
+        for port in common_ports:
+            url = f"http://{node.ip_address}:{port}/health"
+            try:
+                res = await client.get(url, timeout=1)
+                if res.status_code == 200:
+                    node.agent_port = port
                 node.online = True
                 node.status = "online" if node.approved else "discovered"
                 await db.commit()
@@ -254,7 +257,8 @@ async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
     try:
         node.status = "updating"
         await db.commit()
-        res = requests.post(url, timeout=10)
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, timeout=10)
         res.raise_for_status()
         return res.json()
     except Exception as e:
