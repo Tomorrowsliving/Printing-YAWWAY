@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Printer, Activity, Settings, FileText, Camera, ShieldAlert, RefreshCw, Power, Loader2 } from 'lucide-react';
 import { printerService, agentService } from '../services/api';
+import axios from 'axios';
 
 const PrinterDetail = ({ addToast }) => {
   const { id } = useParams();
@@ -24,8 +25,31 @@ const PrinterDetail = ({ addToast }) => {
     }
   };
 
-  const handleAction = (name) => {
-    addToast(`${name} not implemented yet`, "info");
+  const handleAction = async (name) => {
+    const targetMap = {
+        'Restart Klipper': 'klipper',
+        'Restart Moonraker': 'moonraker',
+        'Firmware Restart': 'all',
+        'Power Cycle': 'all'
+    };
+
+    const target = targetMap[name];
+    if (!target) {
+        addToast(`${name} not implemented yet`, "info");
+        return;
+    }
+
+    if (!window.confirm(`Initiate ${name}?`)) return;
+
+    setActionLoading(true);
+    try {
+        await axios.post(`/api/printers/${id}/restart`, { target });
+        addToast(`${name} initiated`, "success");
+    } catch (err) {
+        addToast(err.response?.data?.detail || "Action failed", "error");
+    } finally {
+        setActionLoading(false);
+    }
   };
 
   if (loading) {

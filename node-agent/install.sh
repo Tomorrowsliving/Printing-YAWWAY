@@ -96,11 +96,15 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF_SVC
 
-# 7. Create sudoers file for auto-updates
+# 7. Create sudoers file for auto-updates and remote actions
 echo "Configuring sudoers..."
 cat <<EOF_SUDO > "$SUDOERS_FILE"
 ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart klipper-farm-node-agent.service
+ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart klipper-farm-node-agent
 ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl status klipper-farm-node-agent.service
+ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart klipper*
+ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart moonraker*
+ALL ALL=(ALL) NOPASSWD: /usr/sbin/reboot
 EOF_SUDO
 chmod 440 "$SUDOERS_FILE"
 

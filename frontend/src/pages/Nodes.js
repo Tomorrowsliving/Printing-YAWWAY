@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Server, Activity, Thermometer, Cpu, HardDrive, CheckCircle, XCircle, RefreshCw, Plus, Loader2, Usb, Layers, ShieldCheck, Edit, Trash2, Save, ArrowUpCircle, Search } from 'lucide-react';
+import { Server, Activity, Thermometer, Cpu, HardDrive, CheckCircle, XCircle, RefreshCw, Plus, Loader2, Usb, Layers, ShieldCheck, Edit, Trash2, Save, ArrowUpCircle, Search, Power, Settings2 } from 'lucide-react';
 import { nodeService, agentService } from '../services/api';
 import { Modal } from '../components/UI';
 import axios from 'axios';
@@ -140,6 +140,28 @@ const NodeOverview = ({ addToast }) => {
     }
   };
 
+  const handleNodeAction = async (nodeId, action) => {
+    const actionMap = {
+        'restart-agent': { url: `/api/nodes/${nodeId}/restart-agent`, label: 'Agent restart' },
+        'reboot': { url: `/api/nodes/${nodeId}/reboot`, label: 'Node reboot' },
+        'restart-services': { url: `/api/nodes/${nodeId}/restart-services`, label: 'Service restart' }
+    };
+
+    const config = actionMap[action];
+    if (!window.confirm(`Initiate ${config.label} for this node?`)) return;
+
+    setActionNodeId(nodeId);
+    try {
+        await axios.post(config.url);
+        addToast(`${config.label} initiated`, "success");
+        fetchNodes();
+    } catch (err) {
+        addToast(err.response?.data?.detail || `Failed to initiate ${config.label}`, "error");
+    } finally {
+        setActionNodeId(null);
+    }
+  };
+
   const handleUpdateNodeAgent = async (nodeId) => {
     if (!window.confirm("Trigger remote update on this node?")) return;
     setActionNodeId(nodeId);
@@ -205,10 +227,15 @@ const NodeOverview = ({ addToast }) => {
               </div>
             )}
 
-            <div className="flex space-x-2 pt-2">
-              <button disabled={actionNodeId === node.id} onClick={() => handleRefresh(node)} className="flex-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 py-1.5 rounded-lg text-[10px] font-bold flex items-center justify-center transition-colors">
+            <div className="flex flex-wrap gap-2 pt-2">
+              <button disabled={actionNodeId === node.id} onClick={() => handleRefresh(node)} className="flex-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 py-1.5 rounded-lg text-[10px] font-bold flex items-center justify-center transition-colors min-w-[80px]">
                 {actionNodeId === node.id ? <Loader2 size={12} className="animate-spin" /> : <><RefreshCw size={12} className="mr-1" /> Refresh</>}
               </button>
+
+              <button disabled={actionNodeId === node.id} onClick={() => handleNodeAction(node.id, 'restart-agent')} className="p-1.5 bg-slate-700 hover:bg-blue-900/40 rounded-lg text-blue-400 transition-colors" title="Restart Agent"><Settings2 size={14} /></button>
+              <button disabled={actionNodeId === node.id} onClick={() => handleNodeAction(node.id, 'reboot')} className="p-1.5 bg-slate-700 hover:bg-red-900/40 rounded-lg text-red-400 transition-colors" title="Reboot Node"><Power size={14} /></button>
+              <button disabled={actionNodeId === node.id} onClick={() => handleNodeAction(node.id, 'restart-services')} className="p-1.5 bg-slate-700 hover:bg-green-900/40 rounded-lg text-green-400 transition-colors" title="Restart All Services"><Layers size={14} /></button>
+
               <button onClick={() => handleEditClick(node)} className="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-slate-400 transition-colors" title="Edit"><Edit size={14} /></button>
               {!node.approved && <button onClick={() => handleApprove(node.id)} className="px-3 bg-blue-600 hover:bg-blue-500 rounded-lg text-[10px] font-bold transition-colors">Approve</button>}
               {node.agent_version && <button onClick={() => handleUpdateNodeAgent(node.id)} className="p-1.5 bg-slate-700 hover:bg-blue-900/40 rounded-lg text-blue-400 transition-colors" title="Update Agent"><ArrowUpCircle size={14} /></button>}

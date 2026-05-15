@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Printer, Play, AlertTriangle, ExternalLink, Settings as SettingsIcon,
-  RefreshCw, Plus, Loader2, ChevronRight, ChevronLeft, Server, Usb, Check
+  RefreshCw, Plus, Loader2, ChevronRight, ChevronLeft, Server, Usb, Check, ShieldAlert
 } from 'lucide-react';
 import { printerService, nodeService } from '../services/api';
 import { Link } from 'react-router-dom';
@@ -90,6 +90,16 @@ const Fleet = ({ addToast }) => {
     setFormData(prev => ({ ...prev, assigned_node_id: nodeId }));
     setStep(3);
     fetchMcus(nodeId);
+  };
+
+  const handlePrinterRestart = async (printerId, target) => {
+    if (!window.confirm(`Restart ${target} for this printer?`)) return;
+    try {
+        await axios.post(`/api/printers/${printerId}/restart`, { target });
+        addToast(`${target} restart initiated`, "success");
+    } catch (err) {
+        addToast(err.response?.data?.detail || "Restart failed", "error");
+    }
   };
 
   const handleSubmit = async () => {
@@ -201,9 +211,20 @@ const Fleet = ({ addToast }) => {
                 </div>
               </div>
 
-              <div className="flex space-x-3">
-                <button className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-xs font-bold transition-colors text-slate-300">Emergency Stop</button>
-                <button className="px-4 bg-blue-600 hover:bg-blue-700 py-2 rounded-lg transition-colors text-white"><Play size={16} fill="currentColor" /></button>
+              <div className="flex space-x-2">
+                <button
+                  onClick={() => handlePrinterRestart(printer.id, 'all')}
+                  className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-[10px] font-bold transition-colors text-slate-300 flex items-center justify-center"
+                >
+                  <RefreshCw size={12} className="mr-1" /> RESTART
+                </button>
+                <button
+                  onClick={() => addToast("Emergency Stop placeholder", "info")}
+                  className="px-3 bg-red-900/20 hover:bg-red-900/40 py-2 rounded-lg text-red-500 transition-colors" title="Emergency Stop"
+                >
+                  <ShieldAlert size={16} />
+                </button>
+                <button className="px-4 bg-blue-600 hover:bg-blue-700 py-2 rounded-lg transition-colors text-white shadow-lg shadow-blue-900/20"><Play size={16} fill="currentColor" /></button>
               </div>
             </div>
           </div>

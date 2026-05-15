@@ -29,6 +29,43 @@ app.add_middleware(
 AGENT_PORT = int(os.getenv("NODE_AGENT_PORT", os.getenv("AGENT_PORT", 8001)))
 CENTRAL_SERVER_URL = os.getenv("BACKEND_URL", os.getenv("CENTRAL_SERVER_URL", "http://server:8001"))
 NODE_AGENT_REPO_DIR = os.getenv("NODE_AGENT_REPO_DIR", "/home/pi/klipper-farm-control-plane")
+UUID_FILE = "/etc/klipper-farm-node-agent.uuid"
+
+def get_node_uuid():
+    """Get persistent UUID or generate a new one."""
+    if os.path.exists(UUID_FILE):
+        try:
+            with open(UUID_FILE, "r") as f:
+                uuid_val = f.read().strip()
+                if uuid_val and len(uuid_val) > 10:
+                    return uuid_val
+        except Exception as e:
+            logger.error(f"Error reading UUID file: {e}")
+
+    # Generate new UUID
+    import uuid
+    new_uuid = str(uuid.uuid4())
+    try:
+        # Try to write to /etc (requires root/sudo)
+        # If we can't, fallback to local directory for MVP/dev
+        target_path = UUID_FILE
+        try:
+            with open(target_path, "w") as f:
+                f.write(new_uuid)
+            os.chmod(target_path, 0o644)
+        except PermissionError:
+            target_path = os.path.join(os.path.dirname(__file__), ".node_uuid")
+            with open(target_path, "w") as f:
+                f.write(new_uuid)
+
+        logger.info(f"Generated new persistent UUID: {new_uuid} at {target_path}")
+        return new_uuid
+    except Exception as e:
+        logger.error(f"Failed to generate persistent UUID: {e}")
+        return "unknown-" + socket.gethostname()
+
+NODE_UUID = get_node_uuid()
+logger.info(f"Node UUID: {NODE_UUID}")
 
 class InstanceCreate(BaseModel):
     printer_slug: str
@@ -197,6 +234,54 @@ async def get_version():
         "agent_dir": os.path.join(NODE_AGENT_REPO_DIR, "node-agent")
     }
 
+async def delayed_restart():
+    await asyncio.sleep(1)
+    subprocess.run(["sudo", "systemctl", "restart", "klipper-farm-node-agent"])
+
+async def delayed_reboot():
+    await asyncio.sleep(1)
+    subprocess.run(["sudo", "reboot"])
+
+@app.post("/restart-agent")
+async def restart_agent():
+    asyncio.create_task(delayed_restart())
+    return {
+        "success": True,
+        "message": "Node-agent restart initiated.",
+        "action": "restart_agent",
+        "timestamp": datetime.datetime.now().isoformat()
+    }
+
+@app.post("/reboot")
+async def reboot_node():
+    asyncio.create_task(delayed_reboot())
+    return {
+        "success": True,
+        "message": "Node reboot initiated.",
+        "action": "reboot",
+        "timestamp": datetime.datetime.now().isoformat()
+    }
+
+@app.post("/restart-printers")
+async def restart_printers():
+    try:
+        # Restart all klipper and moonraker services
+        subprocess.run("sudo systemctl restart klipper*", shell=True)
+        subprocess.run("sudo systemctl restart moonraker*", shell=True)
+        return {
+            "success": True,
+            "message": "All printer services restarted.",
+            "action": "restart_printers",
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Failed to restart services: {str(e)}",
+            "action": "restart_printers",
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+
 @app.post("/update")
 async def update_agent():
     if not os.path.exists(NODE_AGENT_REPO_DIR):
@@ -274,7 +359,7 @@ async def heartbeat_task():
                 # Use health info for heartbeat
                 h = await health()
                 payload = {
-                    "node_uuid": clean_string(os.getenv("NODE_UUID", "unknown")),
+                    "node_uuid": NODE_UUID,
                     "hostname": h["hostname"],
                     "ip_address": h["ip_address"],
                     "agent_port": AGENT_PORT,

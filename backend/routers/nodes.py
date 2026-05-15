@@ -146,6 +146,9 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
 
     # Sanitise inputs
     hb_node_uuid = clean_string(hb.node_uuid)
+    if hb_node_uuid in ("unknown", "null", "undefined", ""):
+        hb_node_uuid = None
+
     hb_hostname = clean_string(hb.hostname)
     hb_ip_address = clean_string(hb.ip_address)
     hb_model = clean_string(hb.pi_model or hb.model)
@@ -154,7 +157,7 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
 
     # 1. Lookup by node_uuid first
     node = None
-    if hb_node_uuid and hb_node_uuid != "unknown":
+    if hb_node_uuid:
         result = await db.execute(select(Node).where(Node.node_uuid == hb_node_uuid))
         node = result.scalar_one_or_none()
 
@@ -179,6 +182,9 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
             status="discovered"
         )
         db.add(node)
+    elif hb_node_uuid and not node.node_uuid:
+        # Update existing node with newly generated UUID
+        node.node_uuid = hb_node_uuid
 
     # Update health fields
     node.hostname = hb_hostname
@@ -325,6 +331,68 @@ async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
         node.last_update_at = datetime.datetime.now(datetime.timezone.utc)
         await db.commit()
         raise HTTPException(status_code=400, detail=f"Update communication failed at {url}: {str(e)}")
+
+@router.post("/{node_id}/restart-agent")
+async def restart_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node: raise HTTPException(status_code=404, detail="Node not found")
+
+    url = f"http://{node.ip_address}:{node.agent_port}/restart-agent"
+    try:
+        node.status = "restarting"
+        await db.commit()
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, timeout=5)
+        db.add(Event(node_id=node.id, severity="info", event_type="node_agent_restart", message=f"Restarted agent on {node.hostname}"))
+        await db.commit()
+        return res.json()
+    except Exception as e:
+        node.status = "error"
+        await db.commit()
+        raise HTTPException(status_code=400, detail=f"Restart agent failed: {str(e)}")
+
+@router.post("/{node_id}/reboot")
+async def reboot_node_proxy(node_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node: raise HTTPException(status_code=404, detail="Node not found")
+
+    url = f"http://{node.ip_address}:{node.agent_port}/reboot"
+    try:
+        node.status = "rebooting"
+        node.online = False
+        await db.commit()
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, timeout=5)
+        db.add(Event(node_id=node.id, severity="warning", event_type="node_reboot", message=f"Rebooted node {node.hostname}"))
+        await db.commit()
+        return res.json()
+    except Exception as e:
+        node.status = "error"
+        await db.commit()
+        raise HTTPException(status_code=400, detail=f"Reboot node failed: {str(e)}")
+
+@router.post("/{node_id}/restart-services")
+async def restart_node_services(node_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node: raise HTTPException(status_code=404, detail="Node not found")
+
+    url = f"http://{node.ip_address}:{node.agent_port}/restart-printers"
+    try:
+        node.status = "restarting_services"
+        await db.commit()
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, timeout=10)
+        db.add(Event(node_id=node.id, severity="info", event_type="printer_services_restart", message=f"Restarted all printer services on {node.hostname}"))
+        node.status = "online"
+        await db.commit()
+        return res.json()
+    except Exception as e:
+        node.status = "error"
+        await db.commit()
+        raise HTTPException(status_code=400, detail=f"Restart services failed: {str(e)}")
 
 @router.get("/{node_id}/usb")
 async def get_node_usb(node_id: int, db: AsyncSession = Depends(get_db)):

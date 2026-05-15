@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import List
+from typing import List, Optional
+import httpx
 from ..database import get_db
 from ..models import Printer, Node, PrinterNote, Event
 from ..schemas import PrinterCreate, Printer as PrinterSchema, PrinterDetail
@@ -91,3 +92,44 @@ async def get_printer_detail(printer_id: int, db: AsyncSession = Depends(get_db)
         data["node"] = serialize_node(printer.node)
 
     return data
+
+@router.post("/{printer_id}/restart")
+async def restart_printer_services(printer_id: int, target: str = Body(..., embed=True), db: AsyncSession = Depends(get_db)):
+    """Remote restart for specific printer services (klipper, moonraker, or both)"""
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer: raise HTTPException(status_code=404, detail="Printer not found")
+
+    if not printer.assigned_node_id:
+        raise HTTPException(status_code=400, detail="Printer not assigned to any node")
+
+    node_result = await db.execute(select(Node).where(Node.id == printer.assigned_node_id))
+    node = node_result.scalar_one_or_none()
+
+    services = []
+    if target == "klipper" or target == "all":
+        services.append(f"klipper-{printer.slug}")
+    if target == "moonraker" or target == "all":
+        services.append(f"moonraker-{printer.slug}")
+
+    url = f"http://{node.ip_address}:{node.agent_port}/instances/restart"
+
+    results = []
+    async with httpx.AsyncClient() as client:
+        for svc in services:
+            try:
+                res = await client.post(url, json={"service": svc}, timeout=10)
+                results.append(res.json())
+            except Exception as e:
+                results.append({"service": svc, "error": str(e)})
+
+    db.add(Event(
+        printer_id=printer.id,
+        node_id=node.id,
+        severity="info",
+        event_type="printer_restart",
+        message=f"Restarted {target} for printer {printer.name}"
+    ))
+    await db.commit()
+
+    return {"status": "success", "results": results}

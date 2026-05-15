@@ -60,6 +60,15 @@ async def startup_event():
         await conn.run_sync(Base.metadata.create_all)
     print("Database tables initialised.")
 
+    # Data Migration: Fix "unknown" UUIDs
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(update(Node).where(Node.node_uuid == "unknown").values(node_uuid=None))
+            await db.commit()
+            print("Cleaned up 'unknown' node UUIDs from database.")
+    except Exception as e:
+        print(f"Migration error: {e}")
+
     # Start background tasks
     asyncio.create_task(monitor_nodes())
 
