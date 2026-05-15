@@ -126,18 +126,25 @@ async def create_instance(data: InstanceCreate):
     # For now, we return success to simulate the flow.
     return {"status": "success", "message": f"Configs generated for {data.printer_slug}. Systemd units pending manual install or root implementation."}
 
+def validate_service_name(service: str):
+    if not (service.startswith("klipper-") or service.startswith("moonraker-")):
+        raise HTTPException(status_code=403, detail="Unauthorised service name")
+
 @app.post("/instances/start")
 async def start_instance(service: str = Body(..., embed=True)):
+    validate_service_name(service)
     subprocess.run(["sudo", "systemctl", "start", service])
     return {"status": "started"}
 
 @app.post("/instances/stop")
 async def stop_instance(service: str = Body(..., embed=True)):
+    validate_service_name(service)
     subprocess.run(["sudo", "systemctl", "stop", service])
     return {"status": "stopped"}
 
 @app.post("/instances/restart")
 async def restart_instance(service: str = Body(..., embed=True)):
+    validate_service_name(service)
     subprocess.run(["sudo", "systemctl", "restart", service])
     return {"status": "restarted"}
 

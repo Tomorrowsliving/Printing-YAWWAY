@@ -244,7 +244,9 @@ async def detect_node_port(node_id: int, db: AsyncSession = Depends(get_db)):
                 await db.commit()
                 await db.refresh(node)
                 return serialize_node(node)
-        except: continue
+            except Exception as e:
+                logger.debug(f"Port {port} not responsive on {node.ip_address}: {e}")
+                continue
 
     raise HTTPException(status_code=404, detail=f"No agent found on {node.ip_address} using common ports.")
 
