@@ -147,11 +147,22 @@ async def update_agent():
         raise HTTPException(status_code=404, detail="Repo directory not found")
 
     try:
+        # Pull latest code
         subprocess.run(["git", "-C", NODE_AGENT_REPO_DIR, "pull"], check=True)
+
+        # Update dependencies
+        agent_dir = os.path.join(NODE_AGENT_REPO_DIR, "node-agent")
+        venv_pip = os.path.join(agent_dir, "venv", "bin", "pip")
+        requirements_txt = os.path.join(agent_dir, "requirements.txt")
+
+        if os.path.exists(venv_pip) and os.path.exists(requirements_txt):
+            subprocess.run([venv_pip, "install", "-r", requirements_txt], check=True)
+
         # We don't restart ourselves here, systemd should handle the restart if we exit
-        # or we could use a separate script.
-        return {"status": "updated", "message": "Source code updated. Restarting service..."}
+        # or we could use a separate script. In this MVP we expect a manual or external restart.
+        return {"status": "updated", "message": "Source code and dependencies updated. Service restart required."}
     except Exception as e:
+        logger.error(f"Update failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 async def heartbeat_task():

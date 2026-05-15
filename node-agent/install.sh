@@ -58,9 +58,11 @@ python3 -m venv "$INSTALL_DIR/venv"
 "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
 "$INSTALL_DIR/venv/bin/pip" install -r "$INSTALL_DIR/requirements.txt"
 
-# 4. Verify uvicorn exists
-if [ ! -x "$INSTALL_DIR/venv/bin/uvicorn" ]; then
-    echo "Error: uvicorn was not installed correctly in the venv."
+# 4. Verify dependencies
+echo "Verifying dependencies..."
+"$INSTALL_DIR/venv/bin/python" -c "import fastapi, uvicorn, psutil, requests, httpx; print('All dependencies verified successfully.')"
+if [ $? -ne 0 ]; then
+    echo "Error: Dependency verification failed."
     exit 1
 fi
 
