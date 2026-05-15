@@ -22,6 +22,7 @@ export const nodeService = {
 export const printerService = {
   getPrinters: () => api.get('/printers'),
   getPrinter: (id) => api.get(`/printers/${id}`),
+  getPrinterDetail: (id) => api.get(`/printers/${id}/detail`),
   createPrinter: (data) => api.post('/printers', data),
   updatePrinter: (id, data) => api.put(`/printers/${id}`, data),
   deletePrinter: (id) => api.delete(`/printers/${id}`),

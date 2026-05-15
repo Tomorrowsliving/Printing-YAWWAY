@@ -4,10 +4,33 @@ from sqlalchemy import select
 from typing import List
 from ..database import get_db
 from ..models import Printer, Node, PrinterNote, Event
-from ..schemas import PrinterCreate, Printer as PrinterSchema
+from ..schemas import PrinterCreate, Printer as PrinterSchema, PrinterDetail
+from .nodes import serialize_node
 import datetime
 
 router = APIRouter(prefix="/printers", tags=["printers"])
+
+def serialize_printer(printer):
+    """Utility to serialize SQLAlchemy Printer model to dict to avoid MissingGreenlet errors"""
+    return {
+        "id": printer.id,
+        "name": printer.name,
+        "slug": printer.slug,
+        "mcu_serial": printer.mcu_serial,
+        "expected_mcu_serial": printer.expected_mcu_serial,
+        "klipper_service_name": printer.klipper_service_name,
+        "moonraker_service_name": printer.moonraker_service_name,
+        "moonraker_port": printer.moonraker_port,
+        "config_path": printer.config_path,
+        "gcode_path": printer.gcode_path,
+        "webcam_url": printer.webcam_url,
+        "embedded_ui_url": printer.embedded_ui_url,
+        "status": printer.status,
+        "last_seen": printer.last_seen,
+        "assigned_node_id": printer.assigned_node_id,
+        "created_at": printer.created_at,
+        "updated_at": printer.updated_at,
+    }
 
 @router.post("/", response_model=PrinterSchema)
 async def create_printer(printer_in: PrinterCreate, db: AsyncSession = Depends(get_db)):
@@ -23,13 +46,15 @@ async def create_printer(printer_in: PrinterCreate, db: AsyncSession = Depends(g
     )
     db.add(event)
 
-    await db.flush()
-    return printer
+    await db.commit()
+    await db.refresh(printer)
+    return serialize_printer(printer)
 
 @router.get("/", response_model=List[PrinterSchema])
 async def list_printers(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Printer))
-    return result.scalars().all()
+    printers = result.scalars().all()
+    return [serialize_printer(p) for p in printers]
 
 @router.get("/{printer_id}", response_model=PrinterSchema)
 async def get_printer(printer_id: int, db: AsyncSession = Depends(get_db)):
@@ -37,7 +62,7 @@ async def get_printer(printer_id: int, db: AsyncSession = Depends(get_db)):
     printer = result.scalar_one_or_none()
     if not printer:
         raise HTTPException(status_code=404, detail="Printer not found")
-    return printer
+    return serialize_printer(printer)
 
 @router.put("/{printer_id}", response_model=PrinterSchema)
 async def update_printer(printer_id: int, printer_in: PrinterCreate, db: AsyncSession = Depends(get_db)):
@@ -46,8 +71,23 @@ async def update_printer(printer_id: int, printer_in: PrinterCreate, db: AsyncSe
     if not printer:
         raise HTTPException(status_code=404, detail="Printer not found")
 
-    for field, value in printer_in.model_dump().items():
+    for field, value in printer_in.model_dump(exclude_unset=True).items():
         setattr(printer, field, value)
 
-    await db.flush()
-    return printer
+    await db.commit()
+    await db.refresh(printer)
+    return serialize_printer(printer)
+
+@router.get("/{printer_id}/detail", response_model=PrinterDetail)
+async def get_printer_detail(printer_id: int, db: AsyncSession = Depends(get_db)):
+    """Extended endpoint that explicitly loads the assigned node"""
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(status_code=404, detail="Printer not found")
+
+    data = serialize_printer(printer)
+    if printer.node:
+        data["node"] = serialize_node(printer.node)
+
+    return data

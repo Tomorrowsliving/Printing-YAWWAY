@@ -71,9 +71,11 @@ class Printer(PrinterBase):
     last_seen: Optional[datetime]
     created_at: datetime
     updated_at: Optional[datetime]
-    node: Optional[Node] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+class PrinterDetail(Printer):
+    node: Optional[Node] = None
 
 class EventBase(BaseModel):
     printer_id: Optional[int] = None

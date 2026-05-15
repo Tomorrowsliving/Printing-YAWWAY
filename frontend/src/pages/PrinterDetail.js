@@ -15,7 +15,7 @@ const PrinterDetail = ({ addToast }) => {
 
   const fetchPrinter = async () => {
     try {
-      const res = await printerService.getPrinter(id);
+      const res = await printerService.getPrinterDetail(id);
       setPrinter(res.data);
     } catch (err) {
       console.error("Error fetching printer:", err);
