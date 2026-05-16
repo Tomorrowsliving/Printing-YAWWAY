@@ -11,6 +11,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 import time
 import datetime
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -254,7 +255,7 @@ WantedBy=multi-user.target
     return {"status": "success", "message": f"Instance {data.printer_slug} created and started."}
 
 def validate_service_name(service: str):
-    if not (service.startswith("klipper-") or service.startswith("moonraker-")):
+    if not re.match(r'^(klipper|moonraker)-[a-zA-Z0-9_-]+$', service):
         raise HTTPException(status_code=403, detail="Unauthorised service name")
 
 @app.post("/instances/start")

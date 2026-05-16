@@ -45,7 +45,9 @@ async def list_files(printer_slug: str, file_type: str):
 @router.get("/read")
 async def read_file(path: str):
     # Security: Ensure path is within STORAGE_ROOT
-    if not os.path.abspath(path).startswith(os.path.abspath(STORAGE_ROOT)):
+    abs_path = os.path.abspath(path)
+    abs_root = os.path.abspath(STORAGE_ROOT)
+    if os.path.commonpath([abs_path, abs_root]) != abs_root:
         raise HTTPException(status_code=403, detail="Access denied")
 
     if not os.path.exists(path):
@@ -56,7 +58,9 @@ async def read_file(path: str):
 
 @router.post("/save")
 async def save_file(path: str, req: SaveFileRequest):
-    if not os.path.abspath(path).startswith(os.path.abspath(STORAGE_ROOT)):
+    abs_path = os.path.abspath(path)
+    abs_root = os.path.abspath(STORAGE_ROOT)
+    if os.path.commonpath([abs_path, abs_root]) != abs_root:
         raise HTTPException(status_code=403, detail="Access denied")
 
     # Create backup before save if it's a config file
@@ -83,7 +87,9 @@ async def upload_file(printer_slug: str, file_type: str, file: UploadFile = File
 
 @router.get("/download")
 async def download_file(path: str):
-    if not os.path.abspath(path).startswith(os.path.abspath(STORAGE_ROOT)):
+    abs_path = os.path.abspath(path)
+    abs_root = os.path.abspath(STORAGE_ROOT)
+    if os.path.commonpath([abs_path, abs_root]) != abs_root:
         raise HTTPException(status_code=403, detail="Access denied")
 
     if not os.path.exists(path):
@@ -93,7 +99,9 @@ async def download_file(path: str):
 
 @router.delete("/delete")
 async def delete_file(path: str):
-    if not os.path.abspath(path).startswith(os.path.abspath(STORAGE_ROOT)):
+    abs_path = os.path.abspath(path)
+    abs_root = os.path.abspath(STORAGE_ROOT)
+    if os.path.commonpath([abs_path, abs_root]) != abs_root:
         raise HTTPException(status_code=403, detail="Access denied")
 
     if os.path.exists(path):
