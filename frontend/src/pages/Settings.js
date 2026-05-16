@@ -1,9 +1,6 @@
-import React, { useState } from 'react';
-import { Mail, ShieldCheck, Save, Send, Loader2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Mail, ShieldCheck, Save, Send, Loader2, HardDrive, Check, X, Copy, Terminal } from 'lucide-react';
 import axios from 'axios';
-import api from '../services/api';
-
-
 
 const Settings = ({ addToast }) => {
   const [smtp, setSmtp] = useState({
@@ -16,6 +13,23 @@ const Settings = ({ addToast }) => {
   const [testEmail, setTestEmail] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  const [nfsStatus, setNfsStatus] = useState(null);
+  const [nfsLoading, setNfsLoading] = useState(true);
+
+  useEffect(() => {
+    fetchNfsStatus();
+  }, []);
+
+  const fetchNfsStatus = async () => {
+    try {
+      const res = await axios.get('/api/storage/nfs-status');
+      setNfsStatus(res.data);
+    } catch (err) {
+      console.error("NFS status error:", err);
+    } finally {
+      setNfsLoading(false);
+    }
+  };
 
   const handleSaveSettings = async () => {
     setIsSaving(true);
@@ -42,9 +56,80 @@ const Settings = ({ addToast }) => {
     }
   };
 
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text);
+    addToast("Command copied to clipboard", "success");
+  };
+
   return (
     <div className="space-y-6 max-w-4xl animate-in fade-in slide-in-from-bottom-4 duration-500">
       <h2 className="text-2xl font-bold">Settings</h2>
+
+      {/* NFS Status Section */}
+      <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 space-y-6 shadow-sm">
+        <div className="flex items-center justify-between border-b border-slate-700 pb-3">
+          <div className="flex items-center space-x-2">
+            <HardDrive size={20} className="text-purple-400" />
+            <h3 className="font-bold text-lg">Central Storage (NFS)</h3>
+          </div>
+          <button onClick={fetchNfsStatus} className="p-1.5 hover:bg-slate-700 rounded-lg transition-colors">
+            <RefreshCw size={16} className={nfsLoading ? "animate-spin" : ""} />
+          </button>
+        </div>
+
+        {nfsStatus && (
+          <div className="space-y-4">
+             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
+                   <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Export Path</p>
+                   <p className="font-mono text-xs">{nfsStatus.server_export_path}</p>
+                </div>
+                <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
+                   <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Permitted Subnet</p>
+                   <p className="font-mono text-xs">{nfsStatus.permitted_subnet}</p>
+                </div>
+                <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
+                   <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Local Root</p>
+                   <p className="font-mono text-xs text-slate-400">{nfsStatus.storage_root}</p>
+                </div>
+             </div>
+
+             <div className="space-y-2">
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Required Directories</p>
+                <div className="flex flex-wrap gap-2">
+                   {Object.entries(nfsStatus.required_directories).map(([dir, exists]) => (
+                     <div key={dir} className={`flex items-center space-x-1.5 px-3 py-1 rounded-full text-[10px] font-bold border ${exists ? 'bg-green-500/5 border-green-500/20 text-green-400' : 'bg-red-500/5 border-red-500/20 text-red-400'}`}>
+                        {exists ? <Check size={10} /> : <X size={10} />}
+                        <span className="capitalize">{dir}</span>
+                     </div>
+                   ))}
+                </div>
+             </div>
+
+             <div className="space-y-3 pt-2">
+                <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Pi Node Mount Commands</p>
+                <div className="space-y-2">
+                   <div className="group relative">
+                      <div className="bg-black/40 rounded-lg p-3 font-mono text-[11px] text-blue-300 break-all border border-slate-700 pr-12 italic">
+                         {nfsStatus.mount_command_nfs}
+                      </div>
+                      <button onClick={() => copyToClipboard(nfsStatus.mount_command_nfs)} className="absolute right-2 top-2 p-2 bg-slate-700 hover:bg-blue-600 rounded-md transition-colors opacity-0 group-hover:opacity-100 shadow-lg">
+                         <Copy size={14} />
+                      </button>
+                   </div>
+                   <div className="group relative">
+                      <div className="bg-black/40 rounded-lg p-3 font-mono text-[11px] text-purple-300 break-all border border-slate-700 pr-12 italic">
+                         {nfsStatus.mount_command_nfs4}
+                      </div>
+                      <button onClick={() => copyToClipboard(nfsStatus.mount_command_nfs4)} className="absolute right-2 top-2 p-2 bg-slate-700 hover:bg-purple-600 rounded-md transition-colors opacity-0 group-hover:opacity-100 shadow-lg">
+                         <Copy size={14} />
+                      </button>
+                   </div>
+                </div>
+             </div>
+          </div>
+        )}
+      </div>
 
       <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 space-y-6 shadow-sm">
         <div className="flex items-center space-x-2 border-b border-slate-700 pb-3">
@@ -145,5 +230,25 @@ const Settings = ({ addToast }) => {
     </div>
   );
 };
+
+const RefreshCw = ({ className, size }) => (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+      <path d="M21 3v5h-5" />
+      <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+      <path d="M3 21v-5h5" />
+    </svg>
+);
 
 export default Settings;

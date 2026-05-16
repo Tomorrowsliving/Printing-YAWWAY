@@ -22,6 +22,8 @@ const Fleet = ({ addToast }) => {
   const [mcuLoading, setMcuLoading] = useState(false);
   const [softwareStatus, setSoftwareStatus] = useState(null);
   const [softwareLoading, setSoftwareLoading] = useState(false);
+  const [storageCheck, setStorageCheck] = useState(null);
+  const [storageLoading, setStorageLoading] = useState(false);
   const [examples, setExamples] = useState([]);
   const [examplesLoading, setExamplesLoading] = useState(false);
   const [selectedExample, setSelectedNodeExample] = useState(null);
@@ -148,7 +150,20 @@ const Fleet = ({ addToast }) => {
     setFormData(prev => ({ ...prev, assigned_node_id: nodeId }));
     setStep(3);
     checkSoftware(nodeId);
+    checkStorage(nodeId);
     fetchMcus(nodeId);
+  };
+
+  const checkStorage = async (nodeId) => {
+    setStorageLoading(true);
+    try {
+      const res = await axios.get(`/api/nodes/${nodeId}/storage/check`);
+      setStorageCheck(res.data);
+    } catch (err) {
+      addToast("Failed to check storage status on node", "error");
+    } finally {
+      setStorageLoading(false);
+    }
   };
 
   const handlePrinterRestart = async (printerId, target) => {
@@ -331,24 +346,37 @@ const Fleet = ({ addToast }) => {
           <div className="space-y-4">
             <h3 className="font-bold text-slate-300">3. Node Software & MCU</h3>
 
-            <div className="bg-slate-900 p-4 rounded-xl border border-slate-700 space-y-3">
-               <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Software Check</p>
-               {softwareLoading ? <div className="flex items-center space-x-2 text-xs text-blue-400"><Loader2 className="animate-spin" size={14} /> <span>Checking Pi...</span></div> : (
-                  <div className="space-y-2">
-                     <div className="flex justify-between items-center text-xs">
-                        <span>Klipper:</span>
-                        {softwareStatus?.klipper_installed ? <span className="text-green-500 font-bold flex items-center"><Check size={14} className="mr-1" /> Installed</span> : <button onClick={() => installSoftware(formData.assigned_node_id, 'klipper')} className="text-blue-400 font-bold underline">Install</button>}
-                     </div>
-                     <div className="flex justify-between items-center text-xs">
-                        <span>Moonraker:</span>
-                        {softwareStatus?.moonraker_installed ? <span className="text-green-500 font-bold flex items-center"><Check size={14} className="mr-1" /> Installed</span> : <button onClick={() => installSoftware(formData.assigned_node_id, 'moonraker')} className="text-blue-400 font-bold underline">Install</button>}
-                     </div>
-                     <div className="flex justify-between items-center text-xs pt-2 border-t border-slate-800">
-                        <span>NFS Storage:</span>
-                        {softwareStatus?.nfs_mounted ? <span className="text-green-500 font-bold">Connected</span> : <span className="text-red-500 font-bold flex items-center"><AlertTriangle size={14} className="mr-1" /> Not Found</span>}
-                     </div>
-                  </div>
-               )}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-slate-900 p-4 rounded-xl border border-slate-700 space-y-3">
+                 <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Software Check</p>
+                 {softwareLoading ? <div className="flex items-center space-x-2 text-xs text-blue-400"><Loader2 className="animate-spin" size={14} /> <span>Checking Pi...</span></div> : (
+                    <div className="space-y-2">
+                       <div className="flex justify-between items-center text-xs">
+                          <span>Klipper:</span>
+                          {softwareStatus?.klipper_installed ? <span className="text-green-500 font-bold flex items-center"><Check size={14} className="mr-1" /> Installed</span> : <button onClick={() => installSoftware(formData.assigned_node_id, 'klipper')} className="text-blue-400 font-bold underline text-[10px]">Install</button>}
+                       </div>
+                       <div className="flex justify-between items-center text-xs">
+                          <span>Moonraker:</span>
+                          {softwareStatus?.moonraker_installed ? <span className="text-green-500 font-bold flex items-center"><Check size={14} className="mr-1" /> Installed</span> : <button onClick={() => installSoftware(formData.assigned_node_id, 'moonraker')} className="text-blue-400 font-bold underline text-[10px]">Install</button>}
+                       </div>
+                    </div>
+                 )}
+              </div>
+              <div className="bg-slate-900 p-4 rounded-xl border border-slate-700 space-y-3">
+                 <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Storage Check</p>
+                 {storageLoading ? <div className="flex items-center space-x-2 text-xs text-blue-400"><Loader2 className="animate-spin" size={14} /> <span>Checking NFS...</span></div> : (
+                    <div className="space-y-2">
+                       <div className="flex justify-between items-center text-xs">
+                          <span>Mounted:</span>
+                          {storageCheck?.is_mount ? <span className="text-green-500 font-bold">Yes</span> : <span className="text-red-500 font-bold">No</span>}
+                       </div>
+                       <div className="flex justify-between items-center text-xs">
+                          <span>Writable:</span>
+                          {storageCheck?.writable ? <span className="text-green-500 font-bold">Yes</span> : <span className="text-red-500 font-bold">No</span>}
+                       </div>
+                    </div>
+                 )}
+              </div>
             </div>
 
             <div className="space-y-2">
@@ -366,11 +394,22 @@ const Fleet = ({ addToast }) => {
                )}
             </div>
 
+            {storageCheck && !storageCheck.nfs_available && (
+               <div className="bg-red-900/10 border border-red-900/30 p-3 rounded-lg flex items-start space-x-3">
+                  <AlertTriangle className="text-red-500 mt-0.5" size={16} />
+                  <div>
+                     <p className="text-[10px] text-red-200 font-bold uppercase">NFS Storage Required</p>
+                     <p className="text-[10px] text-red-200/70 leading-tight mt-1">Please ensure central storage is mounted at {storageCheck.mount_path} and writable.</p>
+                     <p className="text-[9px] text-slate-500 font-mono mt-2 bg-black/40 p-2 rounded">sudo mount -t nfs SERVER_IP:/exports {storageCheck.mount_path}</p>
+                  </div>
+               </div>
+            )}
+
             <div className="flex justify-between pt-4">
                <button onClick={() => setStep(2)} className="text-slate-500 font-bold flex items-center hover:text-white transition-colors"><ChevronLeft size={18} /> Back</button>
                <div className="flex space-x-2">
-                  <button onClick={() => { checkSoftware(formData.assigned_node_id); fetchMcus(formData.assigned_node_id); }} className="p-2 bg-slate-700 rounded-lg text-slate-300 hover:text-white transition-colors"><RefreshCw size={16} /></button>
-                  <button disabled={!softwareStatus?.klipper_installed || !softwareStatus?.moonraker_installed} onClick={() => setStep(4)} className="bg-blue-600 disabled:bg-slate-700 px-6 py-2 rounded-lg font-bold flex items-center">Next <ChevronRight size={18} /></button>
+                  <button onClick={() => { checkSoftware(formData.assigned_node_id); checkStorage(formData.assigned_node_id); fetchMcus(formData.assigned_node_id); }} className="p-2 bg-slate-700 rounded-lg text-slate-300 hover:text-white transition-colors"><RefreshCw size={16} /></button>
+                  <button disabled={!softwareStatus?.klipper_installed || !softwareStatus?.moonraker_installed || !storageCheck?.nfs_available} onClick={() => setStep(4)} className="bg-blue-600 disabled:bg-slate-700 px-6 py-2 rounded-lg font-bold flex items-center">Next <ChevronRight size={18} /></button>
                </div>
             </div>
           </div>

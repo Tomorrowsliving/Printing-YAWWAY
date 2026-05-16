@@ -314,6 +314,35 @@ async def install_moonraker():
     except Exception as e:
         return {"success": False, "message": str(e)}
 
+@app.get("/storage/check")
+async def check_storage():
+    mount_path = os.getenv("NFS_CLIENT_MOUNT", "/mnt/klipper-farm")
+    is_mount = os.path.ismount(mount_path)
+
+    writable = False
+    if os.path.exists(mount_path):
+        test_file = os.path.join(mount_path, ".write_test")
+        try:
+            with open(test_file, "w") as f:
+                f.write("test")
+            os.remove(test_file)
+            writable = True
+        except: pass
+
+    required = ["printers", "gcodes", "configs", "backups", "uploads", "logs"]
+    missing_dirs = []
+    for d in required:
+        if not os.path.exists(os.path.join(mount_path, d)):
+            missing_dirs.append(d)
+
+    return {
+        "nfs_available": is_mount and writable and not missing_dirs,
+        "mount_path": mount_path,
+        "is_mount": is_mount,
+        "writable": writable,
+        "missing_dirs": missing_dirs
+    }
+
 @app.get("/version")
 async def get_version():
     commit = "unknown"

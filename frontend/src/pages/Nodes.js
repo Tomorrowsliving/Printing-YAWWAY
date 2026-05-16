@@ -6,6 +6,7 @@ import axios from 'axios';
 
 const NodeOverview = ({ addToast }) => {
   const [nodes, setNodes] = useState([]);
+  const [storageStatus, setStorageStatus] = useState({});
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
@@ -23,10 +24,23 @@ const NodeOverview = ({ addToast }) => {
     return () => clearInterval(interval);
   }, []);
 
+  const fetchNodeStorage = async (node) => {
+      try {
+          const res = await axios.get(`/api/nodes/${node.id}/storage/check`);
+          setStorageStatus(prev => ({ ...prev, [node.id]: res.data }));
+      } catch (err) {}
+  };
+
   const fetchNodes = async () => {
     try {
       const res = await nodeService.getNodes();
-      setNodes(Array.isArray(res.data) ? res.data : []);
+      const nodeData = Array.isArray(res.data) ? res.data : [];
+      setNodes(nodeData);
+
+      // Fetch storage status for each online node
+      nodeData.filter(n => n.online).forEach(node => {
+          fetchNodeStorage(node);
+      });
     } catch (err) {
       console.error("Error fetching nodes:", err);
     } finally {
@@ -219,6 +233,21 @@ const NodeOverview = ({ addToast }) => {
                <div className="bg-slate-900/50 p-2 rounded-lg text-center border border-slate-700/50"><p className="text-[10px] font-bold text-slate-500 uppercase mb-1">CPU</p><p className="font-bold text-sm text-slate-200">{node.cpu_usage || 0}%</p></div>
                <div className="bg-slate-900/50 p-2 rounded-lg text-center border border-slate-700/50"><p className="text-[10px] font-bold text-slate-500 uppercase mb-1">RAM</p><p className="font-bold text-sm text-slate-200">{node.ram_usage || 0}%</p></div>
             </div>
+
+            {node.online && (
+               <div className={`p-3 rounded-lg border flex items-center justify-between ${storageStatus[node.id]?.nfs_available ? 'bg-green-500/5 border-green-500/20' : 'bg-orange-500/5 border-orange-500/20'}`}>
+                  <div className="flex items-center space-x-2">
+                     <HardDrive size={16} className={storageStatus[node.id]?.nfs_available ? 'text-green-500' : 'text-orange-500'} />
+                     <div>
+                        <p className="text-[10px] font-bold uppercase text-slate-400">NFS Storage</p>
+                        <p className="text-[9px] text-slate-500 truncate max-w-[120px]">{storageStatus[node.id]?.mount_path || '/mnt/klipper-farm'}</p>
+                     </div>
+                  </div>
+                  <div className={`text-[10px] font-bold ${storageStatus[node.id]?.nfs_available ? 'text-green-500' : 'text-orange-500'}`}>
+                     {storageStatus[node.id]?.nfs_available ? 'Available' : (storageStatus[node.id]?.is_mount ? 'Issues' : 'Not Mounted')}
+                  </div>
+               </div>
+            )}
 
             {node.last_update_status && (
               <div className={`p-2 rounded-lg text-[10px] border ${node.last_update_status === 'failed' ? 'bg-red-500/5 border-red-500/20 text-red-400' : 'bg-blue-500/5 border-blue-500/20 text-blue-400'}`}>

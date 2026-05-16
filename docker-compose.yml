@@ -17,13 +17,15 @@ services:
     image: itsthenetwork/nfs-server-alpine:latest
     container_name: klipper-farm-nfs
     privileged: true
+    network_mode: host
+    restart: unless-stopped
     environment:
       SHARED_DIRECTORY: /exports
+      PERMITTED: ${NFS_PERMITTED:-10.1.8.0/22}
+      READ_ONLY: "false"
+      SYNC: "true"
     volumes:
       - ./storage:/exports
-    ports:
-      - "2049:2049"
-    restart: unless-stopped
 
   backend:
     build:
