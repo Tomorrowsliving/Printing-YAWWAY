@@ -472,3 +472,31 @@ async def proxy_install_moonraker(node_id: int, db: AsyncSession = Depends(get_d
         return res.json()
     except:
         raise HTTPException(status_code=502, detail="Node unreachable or timeout")
+
+@router.get("/{node_id}/storage/check")
+async def proxy_storage_check(node_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node: raise HTTPException(status_code=404, detail="Node not found")
+    url = f"http://{node.ip_address}:{node.agent_port}/storage/check"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=5)
+        return res.json()
+    except Exception as e:
+        logger.error(f"Failed to check storage on node {node.hostname}: {e}")
+        raise HTTPException(status_code=502, detail="Node unreachable")
+
+@router.post("/{node_id}/storage/mount")
+async def proxy_storage_mount(node_id: int, data: dict = Body(...), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node: raise HTTPException(status_code=404, detail="Node not found")
+    url = f"http://{node.ip_address}:{node.agent_port}/storage/mount"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, json=data, timeout=60)
+        return res.json()
+    except Exception as e:
+        logger.error(f"Failed to mount storage on node {node.hostname}: {e}")
+        raise HTTPException(status_code=502, detail="Node unreachable or timeout")

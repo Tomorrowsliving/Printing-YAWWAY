@@ -31,6 +31,33 @@ const NodeOverview = ({ addToast }) => {
       } catch (err) {}
   };
 
+
+  const handleMountNfs = async (node) => {
+    setActionNodeId(node.id);
+    try {
+      const res = await axios.get('/api/storage/nfs-status');
+      const serverIp = res.data.mount_command_nfs.split(" ")[4].split(":")[0] || window.location.hostname;
+
+      const payload = {
+        server: serverIp,
+        export: res.data.server_export_path || "/exports",
+        mount_point: res.data.expected_client_mount || "/mnt/klipper-farm"
+      };
+
+      const result = await axios.post(`/api/nodes/${node.id}/storage/mount`, payload);
+      if (result.data.success) {
+        addToast("success", "Storage Mounted", `NFS mounted successfully on ${node.hostname}`);
+      } else {
+        addToast("error", "Mount Failed", result.data.message || "Unknown error");
+      }
+    } catch (err) {
+      addToast("error", "Mount Failed", err.response?.data?.detail || err.message);
+    } finally {
+      setActionNodeId(null);
+      fetchNodeStorage(node);
+    }
+  };
+
   const fetchNodes = async () => {
     try {
       const res = await nodeService.getNodes();
@@ -235,17 +262,29 @@ const NodeOverview = ({ addToast }) => {
             </div>
 
             {node.online && (
-               <div className={`p-3 rounded-lg border flex items-center justify-between ${storageStatus[node.id]?.nfs_available ? 'bg-green-500/5 border-green-500/20' : 'bg-orange-500/5 border-orange-500/20'}`}>
-                  <div className="flex items-center space-x-2">
-                     <HardDrive size={16} className={storageStatus[node.id]?.nfs_available ? 'text-green-500' : 'text-orange-500'} />
-                     <div>
-                        <p className="text-[10px] font-bold uppercase text-slate-400">NFS Storage</p>
-                        <p className="text-[9px] text-slate-500 truncate max-w-[120px]">{storageStatus[node.id]?.mount_path || '/mnt/klipper-farm'}</p>
-                     </div>
+               <div className={`p-3 rounded-lg border flex flex-col space-y-2 ${storageStatus[node.id]?.mounted ? 'bg-green-500/5 border-green-500/20' : 'bg-orange-500/5 border-orange-500/20'}`}>
+                  <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                         <HardDrive size={16} className={storageStatus[node.id]?.mounted ? 'text-green-500' : 'text-orange-500'} />
+                         <div>
+                            <p className="text-[10px] font-bold uppercase text-slate-400">NFS Storage</p>
+                            <p className="text-[9px] text-slate-500 truncate max-w-[120px]">{storageStatus[node.id]?.mount_source || 'Not Mounted'}</p>
+                         </div>
+                      </div>
+                      <div className={`text-[10px] font-bold flex flex-col items-end ${storageStatus[node.id]?.mounted ? 'text-green-500' : 'text-orange-500'}`}>
+                         <span>{storageStatus[node.id]?.mounted ? (storageStatus[node.id]?.writable ? 'Mounted (RW)' : 'Mounted (RO)') : 'Not Mounted'}</span>
+                         {storageStatus[node.id]?.filesystem_type && <span className="opacity-70 text-[8px]">({storageStatus[node.id].filesystem_type})</span>}
+                      </div>
                   </div>
-                  <div className={`text-[10px] font-bold ${storageStatus[node.id]?.nfs_available ? 'text-green-500' : 'text-orange-500'}`}>
-                     {storageStatus[node.id]?.nfs_available ? 'Available' : (storageStatus[node.id]?.is_mount ? 'Issues' : 'Not Mounted')}
-                  </div>
+                  {!storageStatus[node.id]?.mounted && (
+                      <button
+                         disabled={actionNodeId === node.id}
+                         onClick={() => handleMountNfs(node)}
+                         className="mt-2 w-full py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-[10px] font-bold rounded-lg transition-colors flex items-center justify-center">
+                         {actionNodeId === node.id ? <Loader2 size={12} className="animate-spin mr-1" /> : <HardDrive size={12} className="mr-1" />}
+                         Mount NFS
+                      </button>
+                  )}
                </div>
             )}
 

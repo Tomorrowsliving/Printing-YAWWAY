@@ -317,30 +317,104 @@ async def install_moonraker():
 @app.get("/storage/check")
 async def check_storage():
     mount_path = os.getenv("NFS_CLIENT_MOUNT", "/mnt/klipper-farm")
-    is_mount = os.path.ismount(mount_path)
+
+    mounted = False
+    mount_source = None
+    filesystem_type = None
+
+    if os.path.exists("/proc/mounts"):
+        try:
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[1] == mount_path:
+                        mounted = True
+                        mount_source = parts[0]
+                        filesystem_type = parts[2]
+                        break
+        except Exception:
+            pass
 
     writable = False
-    if os.path.exists(mount_path):
+    if mounted or os.path.exists(mount_path):
         test_file = os.path.join(mount_path, ".write_test")
         try:
             with open(test_file, "w") as f:
                 f.write("test")
             os.remove(test_file)
             writable = True
-        except: pass
-
-    required = ["printers", "gcodes", "configs", "backups", "uploads", "logs"]
-    missing_dirs = []
-    for d in required:
-        if not os.path.exists(os.path.join(mount_path, d)):
-            missing_dirs.append(d)
+        except:
+            pass
 
     return {
-        "nfs_available": is_mount and writable and not missing_dirs,
-        "mount_path": mount_path,
-        "is_mount": is_mount,
+        "mounted": mounted,
         "writable": writable,
-        "missing_dirs": missing_dirs
+        "mount_source": mount_source,
+        "filesystem_type": filesystem_type,
+        "mount_path": mount_path
+    }
+
+class MountRequest(BaseModel):
+    server: str
+    export: str
+    mount_point: str
+
+@app.post("/storage/mount")
+async def mount_storage(req: MountRequest):
+    import re
+    import subprocess
+    if not re.match(r"^[a-zA-Z0-9.-]+$", req.server):
+        return {"success": False, "message": "Invalid server"}
+    if not re.match(r"^/[a-zA-Z0-9_/-]+$", req.export):
+        return {"success": False, "message": "Invalid export path"}
+    if not re.match(r"^/mnt/[a-zA-Z0-9_/-]+$", req.mount_point):
+        return {"success": False, "message": "Mount point must be under /mnt/"}
+
+
+    try:
+        subprocess.run(["dpkg", "-s", "nfs-common"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        try:
+            subprocess.run(["sudo", "apt-get", "update"], check=True)
+            subprocess.run(["sudo", "apt-get", "install", "-y", "nfs-common"], check=True)
+        except Exception as e:
+            return {"success": False, "message": f"Failed to install nfs-common: {e}"}
+
+    try:
+        os.makedirs(req.mount_point, exist_ok=True)
+    except Exception:
+        subprocess.run(["sudo", "mkdir", "-p", req.mount_point])
+
+    try:
+        res = subprocess.run(["sudo", "mount", "-t", "nfs", f"{req.server}:{req.export}", req.mount_point], capture_output=True, text=True)
+        if res.returncode != 0:
+            return {"success": False, "message": f"Mount failed: {res.stderr}"}
+    except Exception as e:
+        return {"success": False, "message": f"Mount error: {e}"}
+
+    writable = False
+    test_file = os.path.join(req.mount_point, ".write_test")
+    try:
+        res = subprocess.run(["sudo", "touch", test_file], capture_output=True)
+        if res.returncode == 0:
+            subprocess.run(["sudo", "rm", "-f", test_file])
+            writable = True
+    except:
+        pass
+
+    fstab_entry = f"{req.server}:{req.export} {req.mount_point} nfs defaults,auto,_netdev 0 0\n"
+    try:
+        with open("/etc/fstab", "r") as f:
+            fstab_content = f.read()
+        if fstab_entry.strip() not in fstab_content:
+            subprocess.run(["sudo", "tee", "-a", "/etc/fstab"], input=fstab_entry.encode(), stdout=subprocess.DEVNULL)
+    except:
+        pass
+
+    return {
+        "success": True,
+        "message": "Mounted successfully",
+        "writable": writable
     }
 
 @app.get("/version")
