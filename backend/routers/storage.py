@@ -9,11 +9,18 @@ NFS_CLIENT_MOUNT = os.getenv("NFS_CLIENT_MOUNT", "/mnt/klipper-farm")
 STORAGE_ROOT = os.getenv("STORAGE_ROOT", "/mnt/klipper-farm") # Mapping in container
 
 def get_server_ip():
+    # prioritise explicit host from ENV, then auto-detect
+    server_ip = os.getenv("NFS_SERVER_HOST")
+    if server_ip: return server_ip
+
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('10.255.255.255', 1))
+        s.connect(('8.8.8.8', 80))
         IP = s.getsockname()[0]
         s.close()
+        # Filter out docker internal IPs
+        if IP.startswith(("172.", "127.")):
+            return "MANUAL_IP_REQUIRED"
         return IP
     except:
         return "SERVER_IP"

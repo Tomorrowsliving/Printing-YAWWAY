@@ -7,6 +7,7 @@ import axios from 'axios';
 const NodeOverview = ({ addToast }) => {
   const [nodes, setNodes] = useState([]);
   const [storageStatus, setStorageStatus] = useState({});
+  const [nfsInfo, setNfsInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
@@ -20,9 +21,17 @@ const NodeOverview = ({ addToast }) => {
 
   useEffect(() => {
     fetchNodes();
+    fetchNfsInfo();
     const interval = setInterval(fetchNodes, 10000);
     return () => clearInterval(interval);
   }, []);
+
+  const fetchNfsInfo = async () => {
+    try {
+        const res = await axios.get('/api/storage/nfs-status');
+        setNfsInfo(res.data);
+    } catch (err) {}
+  };
 
   const fetchNodeStorage = async (node) => {
       try {
@@ -163,7 +172,14 @@ const NodeOverview = ({ addToast }) => {
     };
 
     const config = actionMap[action];
-    if (!window.confirm(`Initiate ${config.label} for this node?`)) return;
+
+    let confirmMsg = `Initiate ${config.label} for this node?`;
+    if (action === 'mount-nfs') {
+        const serverIp = nfsInfo?.mount_command_nfs4?.split(' ')[3]?.split(':')[0] || 'the server';
+        confirmMsg = `Initiate NFS mount? This will attempt to mount central storage from ${serverIp} on this Pi node.`;
+    }
+
+    if (!window.confirm(confirmMsg)) return;
 
     setActionNodeId(nodeId);
     try {

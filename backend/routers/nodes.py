@@ -429,12 +429,20 @@ async def proxy_storage_mount(node_id: int, db: AsyncSession = Depends(get_db)):
         import socket
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
-            s.connect(('10.255.255.255', 1))
+            # We try to find a LAN IP by connecting to a public address (not used)
+            s.connect(('8.8.8.8', 80))
             server_ip = s.getsockname()[0]
+            # Ensure it is not a Docker internal IP (usually 172.x or 127.x)
+            if server_ip.startswith(("172.", "127.")):
+                 # Fallback to hostname -I if possible or leave for manual config
+                 server_ip = "MANUAL_IP_REQUIRED"
         except:
             server_ip = "SERVER_IP"
         finally:
             s.close()
+
+    if server_ip == "MANUAL_IP_REQUIRED":
+         raise HTTPException(status_code=400, detail="Could not auto-detect LAN IP. Please set NFS_SERVER_HOST in .env")
 
     payload = {
         "server": server_ip,
