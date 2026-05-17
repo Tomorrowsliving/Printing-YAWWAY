@@ -414,6 +414,36 @@ async def get_node_usb(node_id: int, db: AsyncSession = Depends(get_db)):
         logger.error(f"Failed to fetch USB from node {node.hostname}: {e}")
         raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")
 
+@router.post("/{node_id}/storage/mount")
+async def proxy_storage_mount(node_id: int, db: AsyncSession = Depends(get_db)):
+    """Proxied endpoint to initiate NFS mount on a node"""
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    # Get server IP (the dashboard server)
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(('10.255.255.255', 1))
+    server_ip = s.getsockname()[0]
+    s.close()
+
+    payload = {
+        "server": server_ip,
+        "export": os.getenv("NFS_EXPORT_PATH", "/exports"),
+        "mount_point": os.getenv("NFS_CLIENT_MOUNT", "/mnt/klipper-farm")
+    }
+
+    url = f"http://{node.ip_address}:{node.agent_port}/storage/mount"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, json=payload, timeout=60) # High timeout for apt-get
+        return res.json()
+    except Exception as e:
+        logger.error(f"Failed to initiate mount on node {node.hostname}: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")
+
 @router.post("/{node_id}/instances/create")
 async def proxy_create_instance(node_id: int, data: dict = Body(...), db: AsyncSession = Depends(get_db)):
     """Proxied endpoint to create a printer instance on a node-agent"""
@@ -443,9 +473,11 @@ async def proxy_software_check(node_id: int, db: AsyncSession = Depends(get_db))
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(url, timeout=5)
-        return res.json()
+        if res.status_code == 200:
+            return res.json()
+        return {"nfs_available": False, "is_mount": False, "error": f"Agent returned {res.status_code}"}
     except:
-        raise HTTPException(status_code=502, detail="Node unreachable")
+        return {"nfs_available": False, "is_mount": False, "error": "Node unreachable"}
 
 @router.post("/{node_id}/software/install-klipper")
 async def proxy_install_klipper(node_id: int, db: AsyncSession = Depends(get_db)):

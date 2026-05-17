@@ -158,7 +158,8 @@ const NodeOverview = ({ addToast }) => {
     const actionMap = {
         'restart-agent': { url: `/api/nodes/${nodeId}/restart-agent`, label: 'Agent restart' },
         'reboot': { url: `/api/nodes/${nodeId}/reboot`, label: 'Node reboot' },
-        'restart-services': { url: `/api/nodes/${nodeId}/restart-services`, label: 'Service restart' }
+        'restart-services': { url: `/api/nodes/${nodeId}/restart-services`, label: 'Service restart' },
+        'mount-nfs': { url: `/api/nodes/${nodeId}/storage/mount`, label: 'NFS mount' }
     };
 
     const config = actionMap[action];
@@ -235,17 +236,33 @@ const NodeOverview = ({ addToast }) => {
             </div>
 
             {node.online && (
-               <div className={`p-3 rounded-lg border flex items-center justify-between ${storageStatus[node.id]?.nfs_available ? 'bg-green-500/5 border-green-500/20' : 'bg-orange-500/5 border-orange-500/20'}`}>
-                  <div className="flex items-center space-x-2">
-                     <HardDrive size={16} className={storageStatus[node.id]?.nfs_available ? 'text-green-500' : 'text-orange-500'} />
-                     <div>
-                        <p className="text-[10px] font-bold uppercase text-slate-400">NFS Storage</p>
-                        <p className="text-[9px] text-slate-500 truncate max-w-[120px]">{storageStatus[node.id]?.mount_path || '/mnt/klipper-farm'}</p>
-                     </div>
+               <div className={`p-3 rounded-lg border flex flex-col space-y-2 ${storageStatus[node.id]?.nfs_available ? 'bg-green-500/5 border-green-500/20' : 'bg-orange-500/5 border-orange-500/20'}`}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                       <HardDrive size={16} className={storageStatus[node.id]?.nfs_available ? 'text-green-500' : 'text-orange-500'} />
+                       <div>
+                          <p className="text-[10px] font-bold uppercase text-slate-400">NFS Storage</p>
+                          <p className="text-[9px] text-slate-500 truncate max-w-[120px]">{storageStatus[node.id]?.mount_path || '/mnt/klipper-farm'}</p>
+                       </div>
+                    </div>
+                    <div className={`text-[10px] font-bold ${storageStatus[node.id]?.nfs_available ? 'text-green-500' : 'text-orange-500'}`}>
+                       {storageStatus[node.id]?.nfs_available ? 'Available' : (storageStatus[node.id]?.is_mount ? 'Issues' : 'Not Mounted')}
+                    </div>
                   </div>
-                  <div className={`text-[10px] font-bold ${storageStatus[node.id]?.nfs_available ? 'text-green-500' : 'text-orange-500'}`}>
-                     {storageStatus[node.id]?.nfs_available ? 'Available' : (storageStatus[node.id]?.is_mount ? 'Issues' : 'Not Mounted')}
-                  </div>
+
+                  {(!storageStatus[node.id]?.nfs_available && node.approved) && (
+                    <button
+                      onClick={() => handleNodeAction(node.id, 'mount-nfs')}
+                      disabled={actionNodeId === node.id}
+                      className="w-full py-1 bg-orange-600/20 hover:bg-orange-600/40 text-orange-400 text-[10px] font-bold rounded border border-orange-500/30 transition-colors flex items-center justify-center space-x-1"
+                    >
+                      {actionNodeId === node.id ? <Loader2 size={10} className="animate-spin" /> : <><HardDrive size={10} /> <span>Attempt Auto-Mount</span></>}
+                    </button>
+                  )}
+
+                  {storageStatus[node.id]?.mount_source && (
+                    <p className="text-[8px] text-slate-600 font-mono italic truncate">Source: {storageStatus[node.id].mount_source} ({storageStatus[node.id].filesystem_type})</p>
+                  )}
                </div>
             )}
 

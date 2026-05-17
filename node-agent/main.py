@@ -11,7 +11,6 @@ from typing import List, Optional
 from pydantic import BaseModel
 import time
 import datetime
-import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -77,6 +76,11 @@ class InstanceCreate(BaseModel):
     logs_path: str
     printer_cfg_content: Optional[str] = None
     moonraker_conf_content: Optional[str] = None
+
+class MountRequest(BaseModel):
+    server: str
+    export: str
+    mount_point: str
 
 def clean_string(value):
     if value is None:
@@ -255,7 +259,7 @@ WantedBy=multi-user.target
     return {"status": "success", "message": f"Instance {data.printer_slug} created and started."}
 
 def validate_service_name(service: str):
-    if not re.match(r'^(klipper|moonraker)-[a-zA-Z0-9_-]+$', service):
+    if not (service.startswith("klipper-") or service.startswith("moonraker-")):
         raise HTTPException(status_code=403, detail="Unauthorised service name")
 
 @app.post("/instances/start")
@@ -321,7 +325,21 @@ async def check_storage():
     is_mount = os.path.ismount(mount_path)
 
     writable = False
+    mount_source = ""
+    filesystem_type = ""
+
     if os.path.exists(mount_path):
+        # Try to get mount info
+        try:
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if parts[1] == mount_path:
+                        mount_source = parts[0]
+                        filesystem_type = parts[2]
+                        break
+        except: pass
+
         test_file = os.path.join(mount_path, ".write_test")
         try:
             with open(test_file, "w") as f:
@@ -332,17 +350,57 @@ async def check_storage():
 
     required = ["printers", "gcodes", "configs", "backups", "uploads", "logs"]
     missing_dirs = []
-    for d in required:
-        if not os.path.exists(os.path.join(mount_path, d)):
-            missing_dirs.append(d)
+    if os.path.exists(mount_path):
+        for d in required:
+            if not os.path.exists(os.path.join(mount_path, d)):
+                missing_dirs.append(d)
 
     return {
         "nfs_available": is_mount and writable and not missing_dirs,
         "mount_path": mount_path,
         "is_mount": is_mount,
+        "mounted": is_mount,
         "writable": writable,
+        "mount_source": mount_source,
+        "filesystem_type": filesystem_type,
         "missing_dirs": missing_dirs
     }
+
+@app.post("/storage/mount")
+async def mount_storage(req: MountRequest):
+    if not req.mount_point.startswith("/mnt/"):
+        raise HTTPException(status_code=403, detail="Only mounting under /mnt/ is allowed")
+
+    try:
+        # 1. Install dependencies
+        subprocess.run(["sudo", "apt-get", "update"], check=True)
+        subprocess.run(["sudo", "apt-get", "install", "-y", "nfs-common"], check=True)
+
+        # 2. Create mount point
+        subprocess.run(["sudo", "mkdir", "-p", req.mount_point], check=True)
+
+        # 3. Attempt mount (Try NFSv4 first, then fallback)
+        mount_cmd = ["sudo", "mount", "-t", "nfs", f"{req.server}:{req.export}", req.mount_point]
+        res = subprocess.run(mount_cmd, capture_output=True, text=True)
+
+        if res.returncode != 0:
+            # Try NFSv4 root
+            mount_cmd = ["sudo", "mount", "-t", "nfs4", f"{req.server}:/", req.mount_point]
+            res = subprocess.run(mount_cmd, capture_output=True, text=True)
+
+        if res.returncode != 0:
+            return {"success": False, "message": f"Mount failed: {res.stderr}"}
+
+        # 4. Add to fstab for persistence
+        fstab_entry = f"{req.server}:{req.export} {req.mount_point} nfs defaults,_netdev 0 0\n"
+        # Check if already in fstab
+        with open("/etc/fstab", "r") as f:
+            if fstab_entry not in f.read():
+                subprocess.run(f"echo '{fstab_entry}' | sudo tee -a /etc/fstab", shell=True, check=True)
+
+        return {"success": True, "message": "NFS storage mounted and added to fstab."}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
 
 @app.get("/version")
 async def get_version():
