@@ -25,6 +25,12 @@ async def list_files(printer_slug: str, file_type: str):
     # file_type could be: config, gcode, logs
     target_path = os.path.join(STORAGE_ROOT, printer_slug, file_type)
 
+    # Security: Ensure target path is within STORAGE_ROOT
+    abs_path = os.path.abspath(target_path)
+    abs_root = os.path.abspath(STORAGE_ROOT)
+    if os.path.commonpath([abs_path, abs_root]) != abs_root:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     if not os.path.exists(target_path):
         # Create directory if it doesn't exist to make it easier for user
         os.makedirs(target_path, exist_ok=True)
@@ -77,13 +83,28 @@ async def save_file(path: str, req: SaveFileRequest):
 @router.post("/upload")
 async def upload_file(printer_slug: str, file_type: str, file: UploadFile = File(...)):
     target_dir = os.path.join(STORAGE_ROOT, printer_slug, file_type)
+
+    # Security: Ensure target directory is within STORAGE_ROOT before creating it
+    abs_dir = os.path.abspath(target_dir)
+    abs_root = os.path.abspath(STORAGE_ROOT)
+    if os.path.commonpath([abs_dir, abs_root]) != abs_root:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     os.makedirs(target_dir, exist_ok=True)
 
-    file_path = os.path.join(target_dir, file.filename)
+    # Sanitize filename to prevent absolute path or directory traversal via filename
+    safe_filename = os.path.basename(file.filename)
+    file_path = os.path.join(target_dir, safe_filename)
+
+    # Security: Ensure upload path is within STORAGE_ROOT
+    abs_path = os.path.abspath(file_path)
+    if os.path.commonpath([abs_path, abs_root]) != abs_root:
+        raise HTTPException(status_code=403, detail="Access denied")
+
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    return {"filename": file.filename, "status": "success"}
+    return {"filename": safe_filename, "status": "success"}
 
 @router.get("/download")
 async def download_file(path: str):
