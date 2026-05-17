@@ -322,45 +322,66 @@ async def install_moonraker():
 
 @app.get("/storage/check")
 async def check_storage():
+    """
+    Non-blocking storage check.
+    Uses /proc/mounts to avoid hanging on stale NFS mounts.
+    """
     mount_path = os.getenv("NFS_CLIENT_MOUNT", "/mnt/klipper-farm")
-    is_mount = os.path.ismount(mount_path)
 
-    writable = False
+    mounted = False
     mount_source = ""
     filesystem_type = ""
-
-    if os.path.exists(mount_path):
-        # Try to get mount info
-        try:
-            with open("/proc/mounts", "r") as f:
-                for line in f:
-                    parts = line.split()
-                    if parts[1] == mount_path:
-                        mount_source = parts[0]
-                        filesystem_type = parts[2]
-                        break
-        except: pass
-
-        test_file = os.path.join(mount_path, ".write_test")
-        try:
-            with open(test_file, "w") as f:
-                f.write("test")
-            os.remove(test_file)
-            writable = True
-        except: pass
-
-    required = ["printers", "gcodes", "configs", "backups", "uploads", "logs"]
+    writable = False
     missing_dirs = []
-    if os.path.exists(mount_path):
-        for d in required:
-            if not os.path.exists(os.path.join(mount_path, d)):
-                missing_dirs.append(d)
+
+    # 1. Read /proc/mounts to detect mount status without blocking
+    try:
+        with open("/proc/mounts", "r") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == mount_path:
+                    mounted = True
+                    mount_source = parts[0]
+                    filesystem_type = parts[2]
+                    break
+    except Exception as e:
+        logger.error(f"Error reading /proc/mounts: {e}")
+
+    # 2. Only perform IO tests if /proc/mounts confirms it is mounted
+    if mounted:
+        # Use subprocess with timeout for any IO operation on the mount
+        try:
+            # Check writability
+            test_file = os.path.join(mount_path, ".agent_write_test")
+            proc = subprocess.run(
+                ["sudo", "touch", test_file],
+                capture_output=True, timeout=2.0
+            )
+            if proc.returncode == 0:
+                writable = True
+                subprocess.run(["sudo", "rm", "-f", test_file], timeout=1.0)
+
+            # Check required directories
+            required = ["printers", "gcodes", "configs", "backups", "uploads", "logs"]
+            for d in required:
+                d_path = os.path.join(mount_path, d)
+                proc = subprocess.run(["test", "-d", d_path], timeout=1.0)
+                if proc.returncode != 0:
+                    missing_dirs.append(d)
+
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Storage IO check timed out on {mount_path} - stale mount?")
+            mounted = False # Treat as unavailable if it hangs
+            writable = False
+        except Exception as e:
+            logger.error(f"Storage IO check error: {e}")
+            writable = False
 
     return {
-        "nfs_available": is_mount and writable and not missing_dirs,
+        "nfs_available": mounted and writable and not missing_dirs,
         "mount_path": mount_path,
-        "is_mount": is_mount,
-        "mounted": is_mount,
+        "mounted": mounted,
+        "is_mount": mounted,
         "writable": writable,
         "mount_source": mount_source,
         "filesystem_type": filesystem_type,
@@ -372,43 +393,53 @@ async def mount_storage(req: MountRequest):
     if not req.mount_point.startswith("/mnt/"):
         raise HTTPException(status_code=403, detail="Only mounting under /mnt/ is allowed")
 
+    attempts = []
+
     try:
         # 1. Install dependencies
-        subprocess.run(["sudo", "apt-get", "update"], check=True)
-        subprocess.run(["sudo", "apt-get", "install", "-y", "nfs-common"], check=True)
+        logger.info("Ensuring nfs-common is installed...")
+        subprocess.run(["sudo", "apt-get", "update"], check=True, timeout=60)
+        subprocess.run(["sudo", "apt-get", "install", "-y", "nfs-common"], check=True, timeout=60)
 
         # 2. Create mount point
-        subprocess.run(["sudo", "mkdir", "-p", req.mount_point], check=True)
+        subprocess.run(["sudo", "mkdir", "-p", req.mount_point], check=True, timeout=5)
 
-        # 3. Attempt mount (Try NFS, then fallback to NFSv4 root)
-        mount_cmd = ["sudo", "mount", "-t", "nfs", f"{req.server}:{req.export}", req.mount_point]
-        res = subprocess.run(mount_cmd, capture_output=True, text=True)
+        # 3. Attempt mount - Try NFSv4 root first (modern)
+        mount_opts = "timeo=50,retrans=2"
 
-        if res.returncode != 0:
-            # Try NFSv4 root
-            mount_cmd = ["sudo", "mount", "-t", "nfs4", f"{req.server}:/", req.mount_point]
-            res = subprocess.run(mount_cmd, capture_output=True, text=True)
+        # Attempt 1: NFSv4 root
+        cmd1 = ["sudo", "mount", "-t", "nfs4", "-o", mount_opts, f"{req.server}:/", req.mount_point]
+        res1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=10)
+        attempts.append({"cmd": " ".join(cmd1), "success": res1.returncode == 0, "stderr": res1.stderr})
 
-        if res.returncode != 0:
-            return {"success": False, "message": f"Mount failed: {res.stderr}"}
+        if res1.returncode != 0:
+            # Attempt 2: Traditional NFS export path
+            cmd2 = ["sudo", "mount", "-t", "nfs", "-o", mount_opts, f"{req.server}:{req.export}", req.mount_point]
+            res2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=10)
+            attempts.append({"cmd": " ".join(cmd2), "success": res2.returncode == 0, "stderr": res2.stderr})
+
+            if res2.returncode != 0:
+                msg = f"All mount attempts failed. Last error: {res2.stderr}"
+                if "Permission denied" in res2.stderr:
+                    msg = "NFS server denied access. Check PERMITTED settings on the dashboard server."
+                return {"success": False, "message": msg, "attempts": attempts}
 
         # 4. Add to fstab for persistence if requested
         if req.persistent:
-            # Basic validation to prevent malicious fstab entries
             if any(c in req.server + req.export + req.mount_point for c in ";|&><$()\"'"):
                  return {"success": False, "message": "Invalid characters in mount parameters"}
 
             fstab_entry = f"{req.server}:{req.export} {req.mount_point} nfs defaults,_netdev 0 0"
-
-            # Check if already in fstab
             with open("/etc/fstab", "r") as f:
                 if fstab_entry not in f.read():
-                    # Safely append to fstab
                     subprocess.run(["sudo", "bash", "-c", f"echo '{fstab_entry}' >> /etc/fstab"], check=True)
 
-        return {"success": True, "message": "NFS storage mounted successfully."}
+        return {"success": True, "message": "NFS storage mounted successfully.", "attempts": attempts}
+    except subprocess.TimeoutExpired as e:
+        return {"success": False, "message": f"Mount operation timed out: {str(e)}", "attempts": attempts}
     except Exception as e:
-        return {"success": False, "message": str(e)}
+        logger.error(f"Mount error: {e}")
+        return {"success": False, "message": str(e), "attempts": attempts}
 
 @app.get("/version")
 async def get_version():

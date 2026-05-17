@@ -272,6 +272,10 @@ const NodeOverview = ({ addToast }) => {
                     </button>
                   )}
 
+                  {storageStatus[node.id]?.error && !storageStatus[node.id]?.mounted && (
+                    <p className="text-[9px] text-red-400 italic leading-tight">{storageStatus[node.id].error}</p>
+                  )}
+
                   {storageStatus[node.id]?.mount_source && (
                     <p className="text-[8px] text-slate-600 font-mono italic truncate">Source: {storageStatus[node.id].mount_source} ({storageStatus[node.id].filesystem_type})</p>
                   )}

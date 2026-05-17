@@ -21,7 +21,7 @@ services:
     restart: unless-stopped
     environment:
       SHARED_DIRECTORY: /exports
-      PERMITTED: ${NFS_PERMITTED:-10.1.8.0/22}
+      PERMITTED: "*"
       READ_ONLY: "false"
       SYNC: "true"
     volumes:
