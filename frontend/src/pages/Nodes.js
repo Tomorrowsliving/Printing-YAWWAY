@@ -167,11 +167,23 @@ const NodeOverview = ({ addToast }) => {
 
     setActionNodeId(nodeId);
     try {
-        await axios.post(config.url);
-        addToast(`${config.label} initiated`, "success");
+        const res = await axios.post(config.url);
+        if (action === 'mount-nfs' && res.data.success === false) {
+             addToast(res.data.message || "Mount failed", "error");
+        } else {
+             addToast(`${config.label} initiated`, "success");
+        }
+
+        // Immediate refresh for storage actions
+        if (action === 'mount-nfs') {
+            const node = nodes.find(n => n.id === nodeId);
+            if (node) fetchNodeStorage(node);
+        }
+
         fetchNodes();
     } catch (err) {
-        addToast(err.response?.data?.detail || `Failed to initiate ${config.label}`, "error");
+        const msg = err.response?.data?.detail || err.response?.data?.message || `Failed to initiate ${config.label}`;
+        addToast(msg, "error");
     } finally {
         setActionNodeId(null);
     }
@@ -246,7 +258,7 @@ const NodeOverview = ({ addToast }) => {
                        </div>
                     </div>
                     <div className={`text-[10px] font-bold ${storageStatus[node.id]?.nfs_available ? 'text-green-500' : 'text-orange-500'}`}>
-                       {storageStatus[node.id]?.nfs_available ? 'Available' : (storageStatus[node.id]?.is_mount ? 'Issues' : 'Not Mounted')}
+                     {storageStatus[node.id]?.nfs_available ? 'Available' : (storageStatus[node.id]?.mounted ? 'Issues' : 'Not Mounted')}
                     </div>
                   </div>
 

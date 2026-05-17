@@ -81,6 +81,7 @@ class MountRequest(BaseModel):
     server: str
     export: str
     mount_point: str
+    persistent: Optional[bool] = True
 
 def clean_string(value):
     if value is None:
@@ -379,7 +380,7 @@ async def mount_storage(req: MountRequest):
         # 2. Create mount point
         subprocess.run(["sudo", "mkdir", "-p", req.mount_point], check=True)
 
-        # 3. Attempt mount (Try NFSv4 first, then fallback)
+        # 3. Attempt mount (Try NFS, then fallback to NFSv4 root)
         mount_cmd = ["sudo", "mount", "-t", "nfs", f"{req.server}:{req.export}", req.mount_point]
         res = subprocess.run(mount_cmd, capture_output=True, text=True)
 
@@ -391,14 +392,21 @@ async def mount_storage(req: MountRequest):
         if res.returncode != 0:
             return {"success": False, "message": f"Mount failed: {res.stderr}"}
 
-        # 4. Add to fstab for persistence
-        fstab_entry = f"{req.server}:{req.export} {req.mount_point} nfs defaults,_netdev 0 0\n"
-        # Check if already in fstab
-        with open("/etc/fstab", "r") as f:
-            if fstab_entry not in f.read():
-                subprocess.run(f"echo '{fstab_entry}' | sudo tee -a /etc/fstab", shell=True, check=True)
+        # 4. Add to fstab for persistence if requested
+        if req.persistent:
+            # Basic validation to prevent malicious fstab entries
+            if any(c in req.server + req.export + req.mount_point for c in ";|&><$()\"'"):
+                 return {"success": False, "message": "Invalid characters in mount parameters"}
 
-        return {"success": True, "message": "NFS storage mounted and added to fstab."}
+            fstab_entry = f"{req.server}:{req.export} {req.mount_point} nfs defaults,_netdev 0 0"
+
+            # Check if already in fstab
+            with open("/etc/fstab", "r") as f:
+                if fstab_entry not in f.read():
+                    # Safely append to fstab
+                    subprocess.run(["sudo", "bash", "-c", f"echo '{fstab_entry}' >> /etc/fstab"], check=True)
+
+        return {"success": True, "message": "NFS storage mounted successfully."}
     except Exception as e:
         return {"success": False, "message": str(e)}
 
