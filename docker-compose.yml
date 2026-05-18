@@ -22,7 +22,6 @@ services:
     environment:
       SHARED_DIRECTORY: /exports
       PERMITTED: "*"
-      READ_ONLY: ""
       SYNC: "true"
     volumes:
       - ./storage:/exports
