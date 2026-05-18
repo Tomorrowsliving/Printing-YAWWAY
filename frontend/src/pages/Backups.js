@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { RotateCcw, Plus, Loader2, DatabaseBackup } from 'lucide-react';
+import { RotateCcw, Plus, Loader2, DatabaseBackup, Save, SlidersHorizontal } from 'lucide-react';
 import axios from 'axios';
 
 
@@ -8,9 +8,12 @@ const Backups = ({ addToast }) => {
   const [backups, setBackups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
+  const [settings, setSettings] = useState({ file_backup_limit: 5 });
+  const [settingsLoading, setSettingsLoading] = useState(false);
 
   useEffect(() => {
     fetchBackups();
+    fetchSettings();
   }, []);
 
   const fetchBackups = async () => {
@@ -21,6 +24,29 @@ const Backups = ({ addToast }) => {
       console.error("Error fetching backups:", err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchSettings = async () => {
+    try {
+      const res = await axios.get(`/api/backups/settings`);
+      setSettings(res.data);
+    } catch (err) {
+      console.error("Error fetching backup settings:", err);
+    }
+  };
+
+  const handleSaveSettings = async () => {
+    setSettingsLoading(true);
+    try {
+      const res = await axios.post(`/api/backups/settings`, settings);
+      setSettings(res.data);
+      addToast('Backup settings saved', 'success');
+      fetchBackups();
+    } catch (err) {
+      addToast('Failed to save backup settings', 'error');
+    } finally {
+      setSettingsLoading(false);
     }
   };
 
@@ -38,7 +64,8 @@ const Backups = ({ addToast }) => {
   };
 
   const handleRestore = async (backup) => {
-    if (!window.confirm(`Are you sure you want to restore from ${backup.filename}? Current data may be overwritten.`)) return;
+    const target = backup.backup_type === 'file-edit' ? 'this file' : 'the full printer store';
+    if (!window.confirm(`Restore ${target} from ${backup.filename}? Current data may be overwritten.`)) return;
 
     setActionLoading(true);
     try {
@@ -49,6 +76,12 @@ const Backups = ({ addToast }) => {
     } finally {
       setActionLoading(false);
     }
+  };
+
+  const formatBackupType = (type) => {
+    if (type === 'file-edit') return 'File Edit';
+    if (type === 'manual') return 'Manual';
+    return type || 'Backup';
   };
 
   return (
@@ -65,11 +98,37 @@ const Backups = ({ addToast }) => {
         </button>
       </div>
 
+      <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 flex flex-wrap gap-4 items-end">
+        <div className="space-y-1">
+          <label className="text-[10px] font-bold text-slate-500 uppercase flex items-center gap-1.5">
+            <SlidersHorizontal size={12} />
+            <span>Edit Backups Per File</span>
+          </label>
+          <input
+            type="number"
+            min="0"
+            max="100"
+            value={settings.file_backup_limit}
+            onChange={(e) => setSettings({ ...settings, file_backup_limit: parseInt(e.target.value, 10) || 0 })}
+            className="w-36 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500"
+          />
+        </div>
+        <button
+          onClick={handleSaveSettings}
+          disabled={settingsLoading}
+          className="flex items-center space-x-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-4 py-2 rounded-lg text-sm font-bold transition-colors"
+        >
+          {settingsLoading ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
+          <span>Save</span>
+        </button>
+      </div>
+
       <div className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
         <table className="w-full text-left text-sm">
           <thead>
             <tr className="border-b border-slate-700 bg-slate-900/50">
               <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase">Backup Name</th>
+              <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase">Type</th>
               <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase">Date</th>
               <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase">Status</th>
               <th className="px-6 py-3 text-xs font-bold text-slate-500 uppercase text-right">Actions</th>
@@ -81,6 +140,9 @@ const Backups = ({ addToast }) => {
                 <td className="px-6 py-4 flex items-center space-x-3">
                   <DatabaseBackup size={18} className="text-purple-400" />
                   <span className="font-medium">{backup.filename}</span>
+                </td>
+                <td className="px-6 py-4 text-slate-400">
+                  {formatBackupType(backup.backup_type)}
                 </td>
                 <td className="px-6 py-4 text-slate-400">
                   {new Date(backup.created_at).toLocaleString()}
@@ -103,7 +165,7 @@ const Backups = ({ addToast }) => {
             ))}
             {backups.length === 0 && !loading && (
               <tr>
-                <td colSpan="4" className="px-6 py-12 text-center text-slate-500 italic">No backups found.</td>
+                <td colSpan="5" className="px-6 py-12 text-center text-slate-500 italic">No backups found.</td>
               </tr>
             )}
           </tbody>

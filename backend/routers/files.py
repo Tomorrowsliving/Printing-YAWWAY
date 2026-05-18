@@ -1,14 +1,26 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 import os
 import shutil
 import httpx
 from typing import List, Optional
 from pydantic import BaseModel
 from fastapi.responses import FileResponse
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncSession
+from ..database import get_db
+from ..models import Backup, Event
+from ..utils.file_backups import (
+    BACKUP_ROOT,
+    FILE_EDIT_BACKUP_TYPE,
+    create_file_edit_backup,
+    is_backup_filename,
+    is_path_within,
+)
 
 router = APIRouter(prefix="/files", tags=["files"])
 
 STORAGE_ROOT = os.getenv("PRINTERS_PATH", "/mnt/klipper-farm/printers")
+ALLOWED_FILE_TYPES = {"config", "gcode", "logs"}
 
 class FileInfo(BaseModel):
     name: str
@@ -23,7 +35,12 @@ class SaveFileRequest(BaseModel):
 @router.get("/{printer_slug}/{file_type}", response_model=List[FileInfo])
 async def list_files(printer_slug: str, file_type: str):
     # file_type could be: config, gcode, logs
+    if file_type not in ALLOWED_FILE_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid file type")
+
     target_path = os.path.join(STORAGE_ROOT, printer_slug, file_type)
+    if not is_path_within(target_path, STORAGE_ROOT):
+        raise HTTPException(status_code=403, detail="Access denied")
 
     if not os.path.exists(target_path):
         # Create directory if it doesn't exist to make it easier for user
@@ -31,6 +48,9 @@ async def list_files(printer_slug: str, file_type: str):
 
     files = []
     for item in os.listdir(target_path):
+        if is_backup_filename(item):
+            continue
+
         item_path = os.path.join(target_path, item)
         stats = os.stat(item_path)
         files.append(FileInfo(
@@ -45,8 +65,10 @@ async def list_files(printer_slug: str, file_type: str):
 @router.get("/read")
 async def read_file(path: str):
     # Security: Ensure path is within STORAGE_ROOT
-    if not os.path.abspath(path).startswith(os.path.abspath(STORAGE_ROOT)):
+    if not is_path_within(path, STORAGE_ROOT):
         raise HTTPException(status_code=403, detail="Access denied")
+    if is_backup_filename(os.path.basename(path)):
+        raise HTTPException(status_code=400, detail="Backup files are managed from the Backups section")
 
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -55,27 +77,51 @@ async def read_file(path: str):
         return {"content": f.read()}
 
 @router.post("/save")
-async def save_file(path: str, req: SaveFileRequest):
-    if not os.path.abspath(path).startswith(os.path.abspath(STORAGE_ROOT)):
+async def save_file(path: str, req: SaveFileRequest, db: AsyncSession = Depends(get_db)):
+    if not is_path_within(path, STORAGE_ROOT):
         raise HTTPException(status_code=403, detail="Access denied")
+    if is_backup_filename(os.path.basename(path)):
+        raise HTTPException(status_code=400, detail="Backup files are managed from the Backups section")
 
-    # Create backup before save if it's a config file
-    if ".cfg" in path or ".conf" in path:
-        backup_path = path + ".bak"
-        if os.path.exists(path):
-            shutil.copy2(path, backup_path)
+    backup_path, pruned_paths = create_file_edit_backup(path)
+    if backup_path:
+        backup_name = os.path.relpath(backup_path, BACKUP_ROOT).replace(os.sep, "/")
+        db.add(Backup(
+            filename=backup_name,
+            file_path=backup_path,
+            backup_type=FILE_EDIT_BACKUP_TYPE,
+            status="success",
+        ))
+        db.add(Event(
+            severity="info",
+            event_type="backup",
+            message=f"File edit backup created: {backup_name}",
+        ))
+
+    if pruned_paths:
+        await db.execute(delete(Backup).where(Backup.file_path.in_(pruned_paths)))
 
     with open(path, "w") as f:
         f.write(req.content)
 
-    return {"status": "success"}
+    await db.flush()
+    return {"status": "success", "backup_created": bool(backup_path)}
 
 @router.post("/upload")
 async def upload_file(printer_slug: str, file_type: str, file: UploadFile = File(...)):
+    if file_type not in ALLOWED_FILE_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid file type")
+
     target_dir = os.path.join(STORAGE_ROOT, printer_slug, file_type)
+    if not is_path_within(target_dir, STORAGE_ROOT):
+        raise HTTPException(status_code=403, detail="Access denied")
+
     os.makedirs(target_dir, exist_ok=True)
 
     file_path = os.path.join(target_dir, file.filename)
+    if not is_path_within(file_path, target_dir) or is_backup_filename(file.filename):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
@@ -83,8 +129,10 @@ async def upload_file(printer_slug: str, file_type: str, file: UploadFile = File
 
 @router.get("/download")
 async def download_file(path: str):
-    if not os.path.abspath(path).startswith(os.path.abspath(STORAGE_ROOT)):
+    if not is_path_within(path, STORAGE_ROOT):
         raise HTTPException(status_code=403, detail="Access denied")
+    if is_backup_filename(os.path.basename(path)):
+        raise HTTPException(status_code=400, detail="Backup files are managed from the Backups section")
 
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -93,8 +141,10 @@ async def download_file(path: str):
 
 @router.delete("/delete")
 async def delete_file(path: str):
-    if not os.path.abspath(path).startswith(os.path.abspath(STORAGE_ROOT)):
+    if not is_path_within(path, STORAGE_ROOT):
         raise HTTPException(status_code=403, detail="Access denied")
+    if is_backup_filename(os.path.basename(path)):
+        raise HTTPException(status_code=400, detail="Backup files are managed from the Backups section")
 
     if os.path.exists(path):
         if os.path.isdir(path):

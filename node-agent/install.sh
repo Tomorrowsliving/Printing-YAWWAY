@@ -114,6 +114,12 @@ ALL ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload
 ALL ALL=(ALL) NOPASSWD: /usr/sbin/reboot
 ALL ALL=(ALL) NOPASSWD: /usr/bin/apt-get update
 ALL ALL=(ALL) NOPASSWD: /usr/bin/apt-get install *
+ALL ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /mnt/*
+ALL ALL=(ALL) NOPASSWD: /usr/bin/mount -t nfs4 -o * * /mnt/*
+ALL ALL=(ALL) NOPASSWD: /usr/bin/mount -t nfs -o * * /mnt/*
+ALL ALL=(ALL) NOPASSWD: /usr/bin/touch /mnt/*/.agent_write_test
+ALL ALL=(ALL) NOPASSWD: /usr/bin/rm -f /mnt/*/.agent_write_test
+ALL ALL=(ALL) NOPASSWD: /usr/bin/tee -a /etc/fstab
 ALL ALL=(ALL) NOPASSWD: /usr/bin/mv /tmp/klipper-*.service /etc/systemd/system/
 ALL ALL=(ALL) NOPASSWD: /usr/bin/mv /tmp/moonraker-*.service /etc/systemd/system/
 EOF_SUDO

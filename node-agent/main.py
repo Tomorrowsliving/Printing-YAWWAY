@@ -135,6 +135,19 @@ def run_best_effort(command, timeout=None):
         timeout=timeout,
     )
 
+def has_root_privileges():
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+def privileged_command(command):
+    if has_root_privileges():
+        return list(command)
+    return ["sudo", "-n", *command]
+
+def run_privileged(command, timeout=None, **kwargs):
+    cmd = privileged_command(command)
+    logger.info("Running privileged command: %s", " ".join(cmd))
+    return subprocess.run(cmd, timeout=timeout, **kwargs)
+
 def describe_process_error(error):
     output = (getattr(error, "stderr", "") or getattr(error, "stdout", "") or str(error)).strip()
     cmd = " ".join(getattr(error, "cmd", []) or [])
@@ -652,13 +665,13 @@ async def check_storage():
         try:
             # Check writability
             test_file = os.path.join(mount_path, ".agent_write_test")
-            proc = subprocess.run(
-                ["sudo", "touch", test_file],
+            proc = run_privileged(
+                ["touch", test_file],
                 capture_output=True, timeout=2.0
             )
             if proc.returncode == 0:
                 writable = True
-                subprocess.run(["sudo", "rm", "-f", test_file], timeout=1.0)
+                run_privileged(["rm", "-f", test_file], timeout=1.0)
 
             # Check required directories
             required = ["printers", "gcodes", "configs", "backups", "uploads", "logs"]
@@ -697,23 +710,23 @@ async def mount_storage(req: MountRequest):
     try:
         # 1. Install dependencies
         logger.info("Ensuring nfs-common is installed...")
-        subprocess.run(["sudo", "apt-get", "update"], check=True, timeout=60)
-        subprocess.run(["sudo", "apt-get", "install", "-y", "nfs-common"], check=True, timeout=60)
+        run_privileged(["apt-get", "update"], check=True, capture_output=True, text=True, timeout=120)
+        run_privileged(["apt-get", "install", "-y", "nfs-common"], check=True, capture_output=True, text=True, timeout=180)
 
         # 2. Create mount point
-        subprocess.run(["sudo", "mkdir", "-p", req.mount_point], check=True, timeout=5)
+        run_privileged(["mkdir", "-p", req.mount_point], check=True, capture_output=True, text=True, timeout=30)
 
         # 3. Attempt mount - Try NFSv4 root first (modern)
         mount_opts = "timeo=50,retrans=2"
 
         # Attempt 1: NFSv4 root
-        cmd1 = ["sudo", "mount", "-t", "nfs4", "-o", mount_opts, f"{req.server}:/", req.mount_point]
+        cmd1 = privileged_command(["mount", "-t", "nfs4", "-o", mount_opts, f"{req.server}:/", req.mount_point])
         res1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=10)
         attempts.append({"cmd": " ".join(cmd1), "success": res1.returncode == 0, "stderr": res1.stderr})
 
         if res1.returncode != 0:
             # Attempt 2: Traditional NFS export path
-            cmd2 = ["sudo", "mount", "-t", "nfs", "-o", mount_opts, f"{req.server}:{req.export}", req.mount_point]
+            cmd2 = privileged_command(["mount", "-t", "nfs", "-o", mount_opts, f"{req.server}:{req.export}", req.mount_point])
             res2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=10)
             attempts.append({"cmd": " ".join(cmd2), "success": res2.returncode == 0, "stderr": res2.stderr})
 
@@ -731,11 +744,21 @@ async def mount_storage(req: MountRequest):
             fstab_entry = f"{req.server}:{req.export} {req.mount_point} nfs defaults,_netdev 0 0"
             with open("/etc/fstab", "r") as f:
                 if fstab_entry not in f.read():
-                    subprocess.run(["sudo", "bash", "-c", f"echo '{fstab_entry}' >> /etc/fstab"], check=True)
+                    run_privileged(
+                        ["tee", "-a", "/etc/fstab"],
+                        input=fstab_entry + "\n",
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
 
         return {"success": True, "message": "NFS storage mounted successfully.", "attempts": attempts}
     except subprocess.TimeoutExpired as e:
-        return {"success": False, "message": f"Mount operation timed out: {str(e)}", "attempts": attempts}
+        cmd = " ".join(getattr(e, "cmd", []) or [])
+        return {"success": False, "message": f"Mount operation timed out while running '{cmd}' after {e.timeout} seconds.", "attempts": attempts}
+    except subprocess.CalledProcessError as e:
+        return {"success": False, "message": describe_process_error(e), "attempts": attempts}
     except Exception as e:
         logger.error(f"Mount error: {e}")
         return {"success": False, "message": str(e), "attempts": attempts}

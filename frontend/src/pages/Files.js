@@ -54,10 +54,10 @@ const FileManager = ({ addToast }) => {
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      await axios.post(`/api/files/save`, { content: editContent }, {
+      const res = await axios.post(`/api/files/save`, { content: editContent }, {
         params: { path: editingFile.path }
       });
-      addToast("File saved successfully (backup created)", "success");
+      addToast(res.data?.backup_created ? "File saved successfully (backup created)" : "File saved successfully", "success");
       setEditingFile(null);
       fetchFiles();
     } catch (err) {

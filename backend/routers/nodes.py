@@ -535,7 +535,7 @@ async def proxy_storage_mount(node_id: int, db: AsyncSession = Depends(get_db)):
     url = f"http://{node.ip_address}:{node.agent_port}/storage/mount"
     try:
         async with httpx.AsyncClient() as client:
-            res = await client.post(url, json=payload, timeout=60) # High timeout for apt-get
+            res = await client.post(url, json=payload, timeout=360)
 
         if res.status_code == 200:
             return res.json()
