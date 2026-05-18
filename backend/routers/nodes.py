@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, delete, update
-from typing import List
+from typing import List, Optional
 from ..database import get_db
 from ..models import Node, Event, Printer
 from ..schemas import NodeCreate, NodeHeartbeat, Node as NodeSchema
@@ -10,6 +10,7 @@ import ipaddress
 import httpx
 import logging
 import os
+from urllib.parse import urlparse
 
 # Setup logger
 logger = logging.getLogger("klipper-farm")
@@ -27,6 +28,86 @@ def clean_string(value):
     if value is None:
         return None
     return str(value).replace("\x00", "").strip()
+
+def host_from_url(value: Optional[str]):
+    if not value:
+        return None
+    parsed = urlparse(value if "://" in value else f"http://{value}")
+    return parsed.hostname or value.split(":", 1)[0].strip("/")
+
+def unique_non_empty(values):
+    seen = set()
+    result = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+def get_backend_public_host(request: Request):
+    configured_url = os.getenv("BACKEND_PUBLIC_URL") or os.getenv("BACKEND_URL")
+    client_host = request.client.host if request.client else None
+    return host_from_url(configured_url) or request.url.hostname or client_host
+
+def render_moonraker_config(printer_slug, moonraker_port, config_path, logs_path, backend_ip, node_ip):
+    trusted_clients = unique_non_empty([
+        "127.0.0.1",
+        host_from_url(backend_ip),
+        host_from_url(node_ip),
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+    ])
+    cors_domains = unique_non_empty([
+        f"http://{host_from_url(backend_ip)}" if backend_ip else None,
+        f"http://{host_from_url(node_ip)}" if node_ip else None,
+        f"http://{host_from_url(node_ip)}:{moonraker_port}" if node_ip else None,
+    ])
+
+    lines = [
+        "[server]",
+        "host: 0.0.0.0",
+        f"port: {moonraker_port}",
+        f"klippy_uds_address: /tmp/klippy_{printer_slug}",
+        "",
+        "[file_manager]",
+        f"config_path: {config_path}",
+        f"log_path: {logs_path}",
+        "",
+        "[authorization]",
+        "trusted_clients:",
+    ]
+    lines.extend(f"    {client}" for client in trusted_clients)
+    lines.extend(["", "cors_domains:"])
+    lines.extend(f"    {domain}" for domain in cors_domains)
+    return "\n".join(lines) + "\n"
+
+def ensure_moonraker_config_payload(data: dict, node: Node, request: Request):
+    if data.get("moonraker_conf_content"):
+        return data
+
+    required_fields = ["printer_slug", "moonraker_port", "config_path", "logs_path"]
+    missing_fields = [field for field in required_fields if not data.get(field)]
+    if missing_fields:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Cannot generate moonraker.conf, missing fields: {', '.join(missing_fields)}",
+        )
+
+    backend_ip = get_backend_public_host(request)
+    node_ip = node.ip_address
+    data["backend_ip"] = backend_ip
+    data["node_ip"] = node_ip
+    data["moonraker_conf_content"] = render_moonraker_config(
+        printer_slug=data["printer_slug"],
+        moonraker_port=data["moonraker_port"],
+        config_path=data["config_path"],
+        logs_path=data["logs_path"],
+        backend_ip=backend_ip,
+        node_ip=node_ip,
+    )
+    return data
 
 def serialize_node(node):
     """Utility to serialize SQLAlchemy Node model to dict to avoid MissingGreenlet errors"""
@@ -469,13 +550,14 @@ async def proxy_storage_mount(node_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")
 
 @router.post("/{node_id}/instances/create")
-async def proxy_create_instance(node_id: int, data: dict = Body(...), db: AsyncSession = Depends(get_db)):
+async def proxy_create_instance(node_id: int, request: Request, data: dict = Body(...), db: AsyncSession = Depends(get_db)):
     """Proxied endpoint to create a printer instance on a node-agent"""
     result = await db.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
 
+    data = ensure_moonraker_config_payload(dict(data), node, request)
     url = f"http://{node.ip_address}:{node.agent_port}/instances/create"
     try:
         async with httpx.AsyncClient() as client:

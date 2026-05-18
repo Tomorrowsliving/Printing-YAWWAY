@@ -11,6 +11,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 import time
 import datetime
+from urllib.parse import urlparse
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -76,12 +77,156 @@ class InstanceCreate(BaseModel):
     logs_path: str
     printer_cfg_content: Optional[str] = None
     moonraker_conf_content: Optional[str] = None
+    backend_ip: Optional[str] = None
+    node_ip: Optional[str] = None
 
 class MountRequest(BaseModel):
     server: str
     export: str
     mount_point: str
     persistent: Optional[bool] = True
+
+MOONRAKER_SYSTEM_PACKAGES = [
+    "git",
+    "python3",
+    "python3-venv",
+    "python3-pip",
+    "python3-virtualenv",
+    "python3-dev",
+    "libopenjp2-7",
+    "libsodium-dev",
+    "zlib1g-dev",
+    "libjpeg-dev",
+    "packagekit",
+    "wireless-tools",
+    "curl",
+    "build-essential",
+]
+
+MOONRAKER_OPTIONAL_SYSTEM_PACKAGES = [
+    "python3-libcamera",
+]
+
+def run_checked(command, timeout=None):
+    logger.info("Running command: %s", " ".join(command))
+    return subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+def run_best_effort(command, timeout=None):
+    logger.info("Running command: %s", " ".join(command))
+    return subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+def describe_process_error(error):
+    output = (getattr(error, "stderr", "") or getattr(error, "stdout", "") or str(error)).strip()
+    cmd = " ".join(getattr(error, "cmd", []) or [])
+    if cmd:
+        return f"{cmd} failed with exit code {error.returncode}: {output}"
+    return output
+
+def get_os_major_version():
+    try:
+        with open("/etc/os-release", "r") as f:
+            for line in f:
+                if line.startswith("VERSION_ID="):
+                    raw_version = line.split("=", 1)[1].strip().strip('"')
+                    return int(raw_version.split(".", 1)[0])
+    except Exception:
+        pass
+    return None
+
+def is_raspberry_pi_os():
+    if os.path.exists("/etc/rpi-issue"):
+        return True
+    try:
+        with open("/proc/device-tree/model", "r") as f:
+            return "raspberry pi" in f.read().lower()
+    except Exception:
+        return False
+
+def install_moonraker_system_dependencies():
+    run_checked(["sudo", "apt-get", "update", "--allow-releaseinfo-change"], timeout=180)
+    run_checked(["sudo", "apt-get", "install", "-y", *MOONRAKER_SYSTEM_PACKAGES], timeout=600)
+
+    if is_raspberry_pi_os() and (get_os_major_version() or 0) >= 11:
+        for package in MOONRAKER_OPTIONAL_SYSTEM_PACKAGES:
+            result = run_best_effort(["apt-cache", "show", package], timeout=30)
+            if result.returncode == 0:
+                install_result = run_best_effort(["sudo", "apt-get", "install", "-y", package], timeout=180)
+                if install_result.returncode != 0:
+                    logger.warning("Optional Moonraker package %s failed to install: %s", package, install_result.stderr)
+
+def find_moonraker_requirements():
+    candidates = [
+        "/opt/moonraker/scripts/moonraker-requirements.txt",
+        "/opt/moonraker/requirements.txt",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError("Moonraker requirements file not found under /opt/moonraker")
+
+def host_from_url(value: Optional[str]):
+    if not value:
+        return None
+    parsed = urlparse(value if "://" in value else f"http://{value}")
+    return parsed.hostname or value.split(":", 1)[0].strip("/")
+
+def unique_non_empty(values):
+    seen = set()
+    result = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+def render_moonraker_config(printer_slug, moonraker_port, config_path, logs_path, backend_ip=None, node_ip=None):
+    backend_host = host_from_url(backend_ip) or host_from_url(CENTRAL_SERVER_URL)
+    node_host = host_from_url(node_ip) or get_ip()
+
+    trusted_clients = unique_non_empty([
+        "127.0.0.1",
+        backend_host,
+        node_host,
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+    ])
+    cors_domains = unique_non_empty([
+        f"http://{backend_host}" if backend_host else None,
+        f"http://{node_host}" if node_host else None,
+        f"http://{node_host}:{moonraker_port}" if node_host else None,
+    ])
+
+    lines = [
+        "[server]",
+        "host: 0.0.0.0",
+        f"port: {moonraker_port}",
+        f"klippy_uds_address: /tmp/klippy_{printer_slug}",
+        "",
+        "[file_manager]",
+        f"config_path: {config_path}",
+        f"log_path: {logs_path}",
+        "",
+        "[authorization]",
+        "trusted_clients:",
+    ]
+    lines.extend(f"    {client}" for client in trusted_clients)
+    lines.extend(["", "cors_domains:"])
+    lines.extend(f"    {domain}" for domain in cors_domains)
+    return "\n".join(lines) + "\n"
 
 def clean_string(value):
     if value is None:
@@ -204,7 +349,14 @@ async def create_instance(data: InstanceCreate):
             f.write(data.moonraker_conf_content)
     elif not os.path.exists(moonraker_conf):
         with open(moonraker_conf, "w") as f:
-            f.write(f"[server]\nhost: 0.0.0.0\nport: {data.moonraker_port}\n\n[file_manager]\nconfig_path: {data.config_path}\nlog_path: {data.logs_path}\n\n[authorization]\ntrusted_clients:\n  127.0.0.1\n  192.168.0.0/16\n  10.0.0.0/8\n  172.16.0.0/12\n")
+            f.write(render_moonraker_config(
+                printer_slug=data.printer_slug,
+                moonraker_port=data.moonraker_port,
+                config_path=data.config_path,
+                logs_path=data.logs_path,
+                backend_ip=data.backend_ip,
+                node_ip=data.node_ip,
+            ))
 
     # Install Systemd Units
     klipper_service = f"klipper-{data.printer_slug}.service"
@@ -311,12 +463,33 @@ async def install_klipper():
 @app.post("/software/install-moonraker")
 async def install_moonraker():
     try:
+        install_moonraker_system_dependencies()
         if not os.path.exists("/opt/moonraker"):
-            subprocess.run(["sudo", "git", "clone", "https://github.com/Arksine/moonraker", "/opt/moonraker"], check=True)
+            run_checked(["sudo", "git", "clone", "https://github.com/Arksine/moonraker", "/opt/moonraker"], timeout=300)
+        else:
+            update_result = run_best_effort(["sudo", "git", "-C", "/opt/moonraker", "pull", "--ff-only"], timeout=180)
+            if update_result.returncode != 0:
+                logger.warning("Moonraker source update skipped/failed: %s", update_result.stderr)
+
         if not os.path.exists("/opt/moonraker-env"):
-            subprocess.run(["sudo", "python3", "-m", "venv", "/opt/moonraker-env"], check=True)
-            subprocess.run(["sudo", "/opt/moonraker-env/bin/pip", "install", "-r", "/opt/moonraker/requirements.txt"], check=True)
-        return {"success": True, "message": "Moonraker installed successfully."}
+            run_checked(["sudo", "python3", "-m", "venv", "/opt/moonraker-env"], timeout=180)
+
+        requirements_path = find_moonraker_requirements()
+        run_checked(["sudo", "/opt/moonraker-env/bin/pip", "install", "--upgrade", "pip", "wheel"], timeout=300)
+        run_checked(["sudo", "/opt/moonraker-env/bin/pip", "install", "-r", requirements_path], timeout=900)
+
+        return {
+            "success": True,
+            "message": f"Moonraker installed successfully using {requirements_path}.",
+            "requirements_path": requirements_path,
+        }
+    except subprocess.CalledProcessError as e:
+        logger.error("Moonraker install command failed: %s", describe_process_error(e))
+        return {"success": False, "message": describe_process_error(e)}
+    except subprocess.TimeoutExpired as e:
+        logger.error("Moonraker install command timed out: %s", e)
+        cmd = " ".join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
+        return {"success": False, "message": f"Moonraker install timed out while running: {cmd}"}
     except Exception as e:
         return {"success": False, "message": str(e)}
 

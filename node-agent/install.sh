@@ -12,7 +12,7 @@ fi
 
 BACKEND_URL=""
 AGENT_PORT="8001"
-REPO_URL="https://github.com/Tomorrowsliving/Printing-YAWWAY-.git"
+REPO_URL="https://github.com/Tomorrowsliving/Printing-YAWWAY.git"
 REPO_DIR="/opt/klipper-farm-control"
 ENV_FILE="/etc/klipper-farm-node-agent.env"
 SERVICE_FILE="/etc/systemd/system/klipper-farm-node-agent.service"

@@ -94,8 +94,8 @@ The easiest way to install the node-agent on a Raspberry Pi is using the provide
 ### Automatic Installation (Recommended)
 
 ```bash
-git clone https://github.com/Tomorrowsliving/Printing-YAWWAY-.git
-cd Printing-YAWWAY-/node-agent
+git clone https://github.com/Tomorrowsliving/Printing-YAWWAY.git
+cd Printing-YAWWAY/node-agent
 sudo ./install.sh --backend-url http://YOUR_SERVER_IP:8001 --port 8001
 ```
 
@@ -105,6 +105,8 @@ This script will:
 - Set up a virtual environment and install requirements.
 - Create a systemd service and start the agent automatically.
 - Configure narrow sudoers rules for automatic updates.
+
+When provisioning a printer from the dashboard, the backend generates `moonraker.conf` for the selected node. It uses `BACKEND_PUBLIC_URL` for the trusted backend host, the selected node's `ip_address`, the assigned Moonraker port, and the printer slug for the Klippy Unix socket.
 
 ### Manual Installation
 
