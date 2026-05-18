@@ -21,7 +21,7 @@ services:
     restart: unless-stopped
     environment:
       SHARED_DIRECTORY: /exports
-      PERMITTED: "*"
+      PERMITTED: "10.1.8.0/22"
       READ_ONLY: "false"
       SYNC: "true"
     volumes:
@@ -33,8 +33,17 @@ services:
       dockerfile: ./backend/Dockerfile
     environment:
       DATABASE_URL: postgresql+asyncpg://user:password@db/klipper_farm
+      STORAGE_ROOT: /mnt/klipper-farm
       PRINTERS_PATH: /mnt/klipper-farm/printers
       BACKUP_PATH: /mnt/klipper-farm/backups
+      NFS_SERVER_HOST: 10.1.8.133
+      NFS_EXPORT_PATH: /exports
+      NFS_CLIENT_MOUNT: /mnt/klipper-farm
+      NFS_PERMITTED: 10.1.8.0/22
+      NFS_READ_ONLY: "false"
+      NFS_SYNC: "true"
+      AGENT_PORT: "8001"
+      BACKEND_PUBLIC_URL: http://10.1.8.133
     volumes:
       - ./storage:/mnt/klipper-farm
     depends_on:
