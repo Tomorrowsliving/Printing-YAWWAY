@@ -1,7 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import { History, Info, AlertTriangle, XCircle, RefreshCw, Filter, Loader2, History as HistoryIcon } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Info, AlertTriangle, XCircle, RefreshCw, Filter, Loader2, History as HistoryIcon } from 'lucide-react';
 import axios from 'axios';
-import api from '../services/api';
 
 
 
@@ -11,11 +10,7 @@ const Events = ({ addToast }) => {
   const [filterType, setFilterType] = useState('');
   const [filterSeverity, setFilterSeverity] = useState('');
 
-  useEffect(() => {
-    fetchEvents();
-  }, [filterType, filterSeverity]);
-
-  const fetchEvents = async () => {
+  const fetchEvents = useCallback(async () => {
     setLoading(true);
     try {
       const params = {};
@@ -29,7 +24,11 @@ const Events = ({ addToast }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [filterType, filterSeverity]);
+
+  useEffect(() => {
+    fetchEvents();
+  }, [fetchEvents]);
 
   const getSeverityIcon = (severity) => {
     if (!severity) return <Info className="text-slate-500" size={18} />;

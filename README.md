@@ -108,6 +108,15 @@ This script will:
 
 When provisioning a printer from the dashboard, the backend generates `moonraker.conf` for the selected node. It uses `BACKEND_PUBLIC_URL` for the trusted backend host, the selected node's `ip_address`, the assigned Moonraker port, and the printer slug for the Klippy Unix socket.
 
+Node software setup is exposed through:
+- `GET /software/status`
+- `POST /software/install/runtime`
+- `POST /software/install/klipper`
+- `POST /software/install/moonraker`
+- `POST /software/install/mainsail`
+
+The runtime installer runs Klipper, Moonraker, then Mainsail. Mainsail is served by nginx at `http://NODE_IP`, while each printer keeps its own Moonraker API port such as `http://NODE_IP:7125/server/info`.
+
 ### Manual Installation
 
 If you prefer to install manually:

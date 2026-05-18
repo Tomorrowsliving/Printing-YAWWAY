@@ -31,6 +31,14 @@ AGENT_PORT = int(os.getenv("NODE_AGENT_PORT", os.getenv("AGENT_PORT", 8001)))
 CENTRAL_SERVER_URL = os.getenv("BACKEND_URL", os.getenv("CENTRAL_SERVER_URL", "http://server:8001"))
 NODE_AGENT_REPO_DIR = os.getenv("NODE_AGENT_REPO_DIR", "/home/pi/klipper-farm-control-plane")
 UUID_FILE = "/etc/klipper-farm-node-agent.uuid"
+KLIPPER_PATH = "/opt/klipper"
+MOONRAKER_PATH = "/opt/moonraker"
+MAINSAIL_PATH = "/var/www/mainsail"
+KLIPPY_ENV_PATH = "/opt/klippy-env"
+MOONRAKER_ENV_PATH = "/opt/moonraker-env"
+MAINSAIL_RELEASE_URL = "https://github.com/mainsail-crew/mainsail/releases/latest/download/mainsail.zip"
+MAINSAIL_NGINX_SITE = "/etc/nginx/sites-available/mainsail"
+MAINSAIL_NGINX_ENABLED_SITE = "/etc/nginx/sites-enabled/mainsail"
 
 def get_node_uuid():
     """Get persistent UUID or generate a new one."""
@@ -168,13 +176,13 @@ def install_moonraker_system_dependencies():
 
 def find_moonraker_requirements():
     candidates = [
-        "/opt/moonraker/scripts/moonraker-requirements.txt",
-        "/opt/moonraker/requirements.txt",
+        os.path.join(MOONRAKER_PATH, "scripts", "moonraker-requirements.txt"),
+        os.path.join(MOONRAKER_PATH, "requirements.txt"),
     ]
     for path in candidates:
         if os.path.exists(path):
             return path
-    raise FileNotFoundError("Moonraker requirements file not found under /opt/moonraker")
+    raise FileNotFoundError(f"Moonraker requirements file not found under {MOONRAKER_PATH}")
 
 def host_from_url(value: Optional[str]):
     if not value:
@@ -227,6 +235,44 @@ def render_moonraker_config(printer_slug, moonraker_port, config_path, logs_path
     lines.extend(["", "cors_domains:"])
     lines.extend(f"    {domain}" for domain in cors_domains)
     return "\n".join(lines) + "\n"
+
+def get_software_status():
+    klippy_python = os.path.join(KLIPPY_ENV_PATH, "bin", "python")
+    moonraker_python = os.path.join(MOONRAKER_ENV_PATH, "bin", "python")
+    nginx_installed = os.path.exists("/usr/sbin/nginx") or os.path.exists("/usr/bin/nginx")
+
+    return {
+        "klipper_installed": os.path.exists(os.path.join(KLIPPER_PATH, "klippy", "klippy.py")),
+        "moonraker_installed": os.path.exists(os.path.join(MOONRAKER_PATH, "moonraker", "moonraker.py")),
+        "mainsail_installed": os.path.exists(os.path.join(MAINSAIL_PATH, "index.html")),
+        "nginx_installed": nginx_installed,
+        "klipper_path": KLIPPER_PATH,
+        "moonraker_path": MOONRAKER_PATH,
+        "mainsail_path": MAINSAIL_PATH,
+        "klippy_env": KLIPPY_ENV_PATH,
+        "moonraker_env": MOONRAKER_ENV_PATH,
+        "klipper_env": os.path.exists(klippy_python),
+        "klipper_env_installed": os.path.exists(klippy_python),
+        "moonraker_env_installed": os.path.exists(moonraker_python),
+        "nfs_mounted": os.path.ismount("/mnt/klipper-farm") or os.path.exists("/mnt/klipper-farm/printers"),
+        "systemd": os.path.exists("/run/systemd/system"),
+    }
+
+def nginx_mainsail_config():
+    return """server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+
+    root /var/www/mainsail;
+    index index.html;
+
+    server_name _;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+"""
 
 def clean_string(value):
     if value is None:
@@ -433,65 +479,145 @@ async def restart_instance(service: str = Body(..., embed=True)):
     subprocess.run(["sudo", "systemctl", "restart", service])
     return {"status": "restarted"}
 
+@app.get("/software/status")
 @app.get("/software/check")
 async def check_software():
-    results = {
-        "klipper_installed": os.path.exists("/opt/klipper/klippy/klippy.py"),
-        "moonraker_installed": os.path.exists("/opt/moonraker/moonraker/moonraker.py"),
-        "klipper_env": os.path.exists("/opt/klippy-env/bin/python"),
-        "moonraker_env": os.path.exists("/opt/moonraker-env/bin/python"),
-        "nfs_mounted": os.path.ismount("/mnt/klipper-farm") or os.path.exists("/mnt/klipper-farm/printers"),
-        "systemd": os.path.exists("/run/systemd/system")
-    }
-    return results
+    return get_software_status()
 
+@app.post("/software/install/klipper")
 @app.post("/software/install-klipper")
 async def install_klipper():
     try:
-        # Simplistic install logic for MVP
-        subprocess.run(["sudo", "apt-get", "update"], check=True)
-        subprocess.run(["sudo", "apt-get", "install", "-y", "git", "python3-venv"], check=True)
-        if not os.path.exists("/opt/klipper"):
-            subprocess.run(["sudo", "git", "clone", "https://github.com/Klipper3d/klipper", "/opt/klipper"], check=True)
-        if not os.path.exists("/opt/klippy-env"):
-            subprocess.run(["sudo", "python3", "-m", "venv", "/opt/klippy-env"], check=True)
-            subprocess.run(["sudo", "/opt/klippy-env/bin/pip", "install", "-r", "/opt/klipper/scripts/klippy-requirements.txt"], check=True)
-        return {"success": True, "message": "Klipper installed successfully."}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
+        run_checked(["sudo", "apt-get", "update", "--allow-releaseinfo-change"], timeout=180)
+        run_checked(["sudo", "apt-get", "install", "-y", "git", "python3", "python3-venv", "python3-pip", "build-essential"], timeout=600)
 
+        if not os.path.exists(KLIPPER_PATH):
+            run_checked(["sudo", "git", "clone", "https://github.com/Klipper3d/klipper", KLIPPER_PATH], timeout=300)
+        else:
+            update_result = run_best_effort(["sudo", "git", "-C", KLIPPER_PATH, "pull", "--ff-only"], timeout=180)
+            if update_result.returncode != 0:
+                logger.warning("Klipper source update skipped/failed: %s", update_result.stderr)
+
+        if not os.path.exists(KLIPPY_ENV_PATH):
+            run_checked(["sudo", "python3", "-m", "venv", KLIPPY_ENV_PATH], timeout=180)
+
+        requirements_path = os.path.join(KLIPPER_PATH, "scripts", "klippy-requirements.txt")
+        run_checked(["sudo", os.path.join(KLIPPY_ENV_PATH, "bin", "pip"), "install", "--upgrade", "pip", "wheel"], timeout=300)
+        run_checked(["sudo", os.path.join(KLIPPY_ENV_PATH, "bin", "pip"), "install", "-r", requirements_path], timeout=900)
+
+        return {"success": True, "message": "Klipper installed successfully.", "status": get_software_status()}
+    except subprocess.CalledProcessError as e:
+        logger.error("Klipper install command failed: %s", describe_process_error(e))
+        return {"success": False, "message": describe_process_error(e), "status": get_software_status()}
+    except subprocess.TimeoutExpired as e:
+        logger.error("Klipper install command timed out: %s", e)
+        cmd = " ".join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
+        return {"success": False, "message": f"Klipper install timed out while running: {cmd}", "status": get_software_status()}
+    except Exception as e:
+        return {"success": False, "message": str(e), "status": get_software_status()}
+
+@app.post("/software/install/moonraker")
 @app.post("/software/install-moonraker")
 async def install_moonraker():
     try:
         install_moonraker_system_dependencies()
-        if not os.path.exists("/opt/moonraker"):
-            run_checked(["sudo", "git", "clone", "https://github.com/Arksine/moonraker", "/opt/moonraker"], timeout=300)
+        if not os.path.exists(MOONRAKER_PATH):
+            run_checked(["sudo", "git", "clone", "https://github.com/Arksine/moonraker", MOONRAKER_PATH], timeout=300)
         else:
-            update_result = run_best_effort(["sudo", "git", "-C", "/opt/moonraker", "pull", "--ff-only"], timeout=180)
+            update_result = run_best_effort(["sudo", "git", "-C", MOONRAKER_PATH, "pull", "--ff-only"], timeout=180)
             if update_result.returncode != 0:
                 logger.warning("Moonraker source update skipped/failed: %s", update_result.stderr)
 
-        if not os.path.exists("/opt/moonraker-env"):
-            run_checked(["sudo", "python3", "-m", "venv", "/opt/moonraker-env"], timeout=180)
+        if not os.path.exists(MOONRAKER_ENV_PATH):
+            run_checked(["sudo", "python3", "-m", "venv", MOONRAKER_ENV_PATH], timeout=180)
 
         requirements_path = find_moonraker_requirements()
-        run_checked(["sudo", "/opt/moonraker-env/bin/pip", "install", "--upgrade", "pip", "wheel"], timeout=300)
-        run_checked(["sudo", "/opt/moonraker-env/bin/pip", "install", "-r", requirements_path], timeout=900)
+        run_checked(["sudo", os.path.join(MOONRAKER_ENV_PATH, "bin", "pip"), "install", "--upgrade", "pip", "wheel"], timeout=300)
+        run_checked(["sudo", os.path.join(MOONRAKER_ENV_PATH, "bin", "pip"), "install", "-r", requirements_path], timeout=900)
 
         return {
             "success": True,
             "message": f"Moonraker installed successfully using {requirements_path}.",
             "requirements_path": requirements_path,
+            "status": get_software_status(),
         }
     except subprocess.CalledProcessError as e:
         logger.error("Moonraker install command failed: %s", describe_process_error(e))
-        return {"success": False, "message": describe_process_error(e)}
+        return {"success": False, "message": describe_process_error(e), "status": get_software_status()}
     except subprocess.TimeoutExpired as e:
         logger.error("Moonraker install command timed out: %s", e)
         cmd = " ".join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
-        return {"success": False, "message": f"Moonraker install timed out while running: {cmd}"}
+        return {"success": False, "message": f"Moonraker install timed out while running: {cmd}", "status": get_software_status()}
     except Exception as e:
-        return {"success": False, "message": str(e)}
+        return {"success": False, "message": str(e), "status": get_software_status()}
+
+@app.post("/software/install/mainsail")
+async def install_mainsail():
+    try:
+        run_checked(["sudo", "apt-get", "update", "--allow-releaseinfo-change"], timeout=180)
+        run_checked(["sudo", "apt-get", "install", "-y", "nginx", "unzip", "wget", "curl", "ca-certificates"], timeout=600)
+
+        archive_path = "/tmp/mainsail.zip"
+        run_checked(["sudo", "mkdir", "-p", MAINSAIL_PATH], timeout=60)
+        run_checked(["sudo", "find", MAINSAIL_PATH, "-mindepth", "1", "-delete"], timeout=120)
+        run_checked(["sudo", "rm", "-f", archive_path], timeout=30)
+        run_checked(["sudo", "curl", "-L", "--fail", "-o", archive_path, MAINSAIL_RELEASE_URL], timeout=300)
+        run_checked(["sudo", "unzip", "-oq", archive_path, "-d", MAINSAIL_PATH], timeout=180)
+        run_checked(["sudo", "rm", "-f", archive_path], timeout=30)
+
+        tmp_site = "/tmp/mainsail-nginx.conf"
+        with open(tmp_site, "w") as f:
+            f.write(nginx_mainsail_config())
+
+        run_checked(["sudo", "mkdir", "-p", "/etc/nginx/sites-available", "/etc/nginx/sites-enabled"], timeout=60)
+        run_checked(["sudo", "mv", tmp_site, MAINSAIL_NGINX_SITE], timeout=30)
+        run_best_effort(["sudo", "rm", "-f", "/etc/nginx/sites-enabled/default", "/etc/nginx/sites-available/default"], timeout=30)
+        run_checked(["sudo", "ln", "-sf", MAINSAIL_NGINX_SITE, MAINSAIL_NGINX_ENABLED_SITE], timeout=30)
+        run_checked(["sudo", "nginx", "-t"], timeout=30)
+        run_checked(["sudo", "systemctl", "enable", "nginx"], timeout=60)
+        run_checked(["sudo", "systemctl", "restart", "nginx"], timeout=60)
+
+        return {
+            "success": True,
+            "message": "Mainsail installed successfully.",
+            "mainsail_url": f"http://{get_ip()}",
+            "status": get_software_status(),
+        }
+    except subprocess.CalledProcessError as e:
+        logger.error("Mainsail install command failed: %s", describe_process_error(e))
+        return {"success": False, "message": describe_process_error(e), "status": get_software_status()}
+    except subprocess.TimeoutExpired as e:
+        logger.error("Mainsail install command timed out: %s", e)
+        cmd = " ".join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
+        return {"success": False, "message": f"Mainsail install timed out while running: {cmd}", "status": get_software_status()}
+    except Exception as e:
+        return {"success": False, "message": str(e), "status": get_software_status()}
+
+@app.post("/software/install/runtime")
+async def install_printer_runtime():
+    steps = []
+    for component, installer in (
+        ("klipper", install_klipper),
+        ("moonraker", install_moonraker),
+        ("mainsail", install_mainsail),
+    ):
+        result = await installer()
+        steps.append({"component": component, **result})
+        if not result.get("success"):
+            return {
+                "success": False,
+                "message": f"Printer runtime install stopped while installing {component}: {result.get('message', 'Unknown error')}",
+                "steps": steps,
+                "status": get_software_status(),
+            }
+
+    return {
+        "success": True,
+        "message": "Printer runtime installed successfully.",
+        "mainsail_url": f"http://{get_ip()}",
+        "steps": steps,
+        "status": get_software_status(),
+    }
 
 @app.get("/storage/check")
 async def check_storage():

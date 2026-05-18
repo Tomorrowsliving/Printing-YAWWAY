@@ -12,7 +12,6 @@ const Fleet = ({ addToast }) => {
   const [printers, setPrinters] = useState([]);
   const [nodes, setNodes] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -22,6 +21,7 @@ const Fleet = ({ addToast }) => {
   const [mcuLoading, setMcuLoading] = useState(false);
   const [softwareStatus, setSoftwareStatus] = useState(null);
   const [softwareLoading, setSoftwareLoading] = useState(false);
+  const [advancedInstallOpen, setAdvancedInstallOpen] = useState(false);
   const [storageCheck, setStorageCheck] = useState(null);
   const [storageLoading, setStorageLoading] = useState(false);
   const [examples, setExamples] = useState([]);
@@ -51,6 +51,46 @@ const Fleet = ({ addToast }) => {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    if (printers.length === 0 || nodes.length === 0) return;
+
+    let cancelled = false;
+
+    const hydrateRuntimeStatuses = async () => {
+      const updatedPrinters = await Promise.all(printers.map(async (printer) => {
+        if (printer.status && printer.status !== 'offline') return printer;
+
+        const node = printer.node || nodes.find(n => n.id === printer.assigned_node_id);
+        if (!node?.ip_address || !node?.agent_port || !printer.slug) return printer;
+
+        try {
+          const res = await axios.get(`http://${node.ip_address}:${node.agent_port}/instances`, { timeout: 4000 });
+          const instances = Array.isArray(res.data) ? res.data : [];
+          const moonrakerService = instances.find(instance => instance.name === `moonraker-${printer.slug}.service`);
+          const klipperService = instances.find(instance => instance.name === `klipper-${printer.slug}.service`);
+          const moonrakerRunning = moonrakerService?.active === 'active' || moonrakerService?.status === 'running';
+          const klipperRunning = klipperService?.active === 'active' || klipperService?.status === 'running';
+
+          if (moonrakerRunning && klipperRunning) {
+            return { ...printer, status: 'online' };
+          }
+        } catch (err) {}
+
+        return printer;
+      }));
+
+      if (cancelled) return;
+      const changed = updatedPrinters.some((printer, index) => printer.status !== printers[index]?.status);
+      if (changed) setPrinters(updatedPrinters);
+    };
+
+    hydrateRuntimeStatuses();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [printers, nodes]);
+
   const fetchPrinters = async () => {
     try {
       const res = await printerService.getPrinters();
@@ -65,14 +105,14 @@ const Fleet = ({ addToast }) => {
   const fetchNodes = async () => {
     try {
       const res = await nodeService.getNodes();
-      setNodes(res.data.filter(n => n.online));
+      setNodes(Array.isArray(res.data) ? res.data : []);
     } catch (err) {}
   };
 
   const checkSoftware = async (nodeId) => {
     setSoftwareLoading(true);
     try {
-      const res = await axios.get(`/api/nodes/${nodeId}/software/check`);
+      const res = await axios.get(`/api/nodes/${nodeId}/software/status`);
       setSoftwareStatus(res.data);
     } catch (err) {
       addToast("Failed to check software status on node", "error");
@@ -82,13 +122,30 @@ const Fleet = ({ addToast }) => {
   };
 
   const installSoftware = async (nodeId, type) => {
+    if (!nodeId) return;
     setSoftwareLoading(true);
+    const labels = {
+      runtime: 'Printer runtime',
+      klipper: 'Klipper',
+      moonraker: 'Moonraker',
+      mainsail: 'Mainsail'
+    };
     try {
-      await axios.post(`/api/nodes/${nodeId}/software/install-${type}`);
-      addToast(`${type} installed successfully`, "success");
-      checkSoftware(nodeId);
+      const res = await axios.post(`/api/nodes/${nodeId}/software/install/${type}`);
+      if (res.data?.status) {
+        setSoftwareStatus(res.data.status);
+      } else {
+        await checkSoftware(nodeId);
+      }
+      if (res.data?.success === false) {
+        addToast(res.data.message || `${labels[type]} install failed`, "error");
+      } else {
+        addToast(`${labels[type]} installed successfully`, "success");
+      }
     } catch (err) {
-      addToast(`Failed to install ${type}`, "error");
+      addToast(err.response?.data?.detail || `Failed to install ${labels[type]}`, "error");
+      setSoftwareLoading(false);
+    } finally {
       setSoftwareLoading(false);
     }
   };
@@ -148,6 +205,7 @@ const Fleet = ({ addToast }) => {
 
   const handleNodeSelect = (nodeId) => {
     setFormData(prev => ({ ...prev, assigned_node_id: nodeId }));
+    setAdvancedInstallOpen(false);
     setStep(3);
     checkSoftware(nodeId);
     checkStorage(nodeId);
@@ -179,14 +237,17 @@ const Fleet = ({ addToast }) => {
   const handleSubmit = async () => {
     setIsSubmitting(true);
     try {
+      const selectedNode = nodes.find(n => n.id === formData.assigned_node_id);
+      const mainsailUrl = selectedNode?.ip_address ? `http://${selectedNode.ip_address}` : formData.embedded_ui_url;
       // 1. Create printer record in central DB
-      const res = await printerService.createPrinter({
+      await printerService.createPrinter({
         ...formData,
         status: 'offline',
         klipper_service_name: `klipper-${formData.slug}`,
         moonraker_service_name: `moonraker-${formData.slug}`,
         config_path: `/mnt/klipper-farm/printers/${formData.slug}/config`,
         gcode_path: `/mnt/klipper-farm/printers/${formData.slug}/gcodes`,
+        embedded_ui_url: formData.embedded_ui_url || mainsailUrl,
       });
 
       // 2. Instruct node agent to create instance
@@ -216,11 +277,30 @@ const Fleet = ({ addToast }) => {
     switch (status.toLowerCase()) {
       case 'printing': return 'bg-blue-500';
       case 'idle': return 'bg-green-500';
+      case 'online': return 'bg-green-500';
+      case 'starting': return 'bg-orange-500';
       case 'error': return 'bg-red-500';
       case 'offline': return 'bg-slate-500';
       default: return 'bg-slate-400';
     }
   };
+
+  const getPrinterNode = (printer) => printer.node || nodes.find(n => n.id === printer.assigned_node_id);
+  const getPrinterMainsailUrl = (printer) => {
+    const node = getPrinterNode(printer);
+    return node?.ip_address ? `http://${node.ip_address}` : printer.embedded_ui_url;
+  };
+
+  const onlineNodes = nodes.filter(n => n.online);
+  const selectedNode = nodes.find(n => n.id === formData.assigned_node_id);
+  const mainsailUrl = selectedNode?.ip_address ? `http://${selectedNode.ip_address}` : null;
+  const runtimeInstalledCount = ['klipper_installed', 'moonraker_installed', 'mainsail_installed']
+    .filter(key => softwareStatus?.[key]).length;
+  const runtimeLabel = runtimeInstalledCount === 3 ? 'Installed' : runtimeInstalledCount === 0 ? 'Not Installed' : 'Partial';
+  const runtimeReady = Boolean(softwareStatus?.klipper_installed && softwareStatus?.moonraker_installed);
+  const nfsReady = Boolean(storageCheck?.nfs_available || (storageCheck?.mounted && storageCheck?.writable));
+  const statusClass = (ok) => ok ? 'text-green-500' : 'text-red-400';
+  const runtimeClass = runtimeLabel === 'Installed' ? 'text-green-500' : runtimeLabel === 'Partial' ? 'text-orange-400' : 'text-red-400';
 
   if (loading && printers.length === 0) {
     return (
@@ -245,65 +325,73 @@ const Fleet = ({ addToast }) => {
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        {printers.map((printer) => (
-          <div key={printer.id} className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden flex flex-col sm:row hover:border-slate-600 transition-colors shadow-sm">
-            <div className="sm:w-48 h-48 bg-slate-900 flex items-center justify-center border-b sm:border-b-0 sm:border-r border-slate-700">
-              {printer.webcam_url ? (
-                <img src={printer.webcam_url} alt={printer.name} className="w-full h-full object-cover" />
-              ) : (
-                <Printer size={64} className="text-slate-700" />
-              )}
-            </div>
+        {printers.map((printer) => {
+          const assignedNode = getPrinterNode(printer);
+          const printerMainsailUrl = getPrinterMainsailUrl(printer);
 
-            <div className="flex-1 p-5 flex flex-col justify-between">
-              <div className="flex justify-between items-start">
-                <div>
-                  <div className="flex items-center space-x-2">
-                    <h3 className="font-bold text-lg">{printer.name}</h3>
-                    <div className={`w-3 h-3 rounded-full ${getStatusColor(printer.status)} shadow-sm`}></div>
+          return (
+            <div key={printer.id} className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden flex flex-col sm:row hover:border-slate-600 transition-colors shadow-sm">
+              <div className="sm:w-48 h-48 bg-slate-900 flex items-center justify-center border-b sm:border-b-0 sm:border-r border-slate-700">
+                {printer.webcam_url ? (
+                  <img src={printer.webcam_url} alt={printer.name} className="w-full h-full object-cover" />
+                ) : (
+                  <Printer size={64} className="text-slate-700" />
+                )}
+              </div>
+
+              <div className="flex-1 p-5 flex flex-col justify-between">
+                <div className="flex justify-between items-start">
+                  <div>
+                    <div className="flex items-center space-x-2">
+                      <h3 className="font-bold text-lg">{printer.name}</h3>
+                      <div className={`w-3 h-3 rounded-full ${getStatusColor(printer.status)} shadow-sm`}></div>
+                    </div>
+                    <p className="text-xs text-slate-400">Node: {assignedNode?.hostname || assignedNode?.name || 'Unassigned'}</p>
+                    {assignedNode?.ip_address && <p className="text-[10px] text-slate-500 font-mono">{assignedNode.ip_address}</p>}
                   </div>
-                  <p className="text-xs text-slate-400">Node: {printer.node?.hostname || 'Unassigned'}</p>
+                  <div className="flex space-x-2">
+                    <Link to={`/printers/${printer.id}`} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors text-slate-300">
+                      <SettingsIcon size={16} />
+                    </Link>
+                    {printerMainsailUrl && (
+                      <a href={printerMainsailUrl} target="_blank" rel="noopener noreferrer" className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors text-slate-300">
+                        <ExternalLink size={16} />
+                      </a>
+                    )}
+                  </div>
                 </div>
+
+                <div className="py-4">
+                  <div className="flex justify-between items-end mb-1">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{printer.status || 'offline'}</span>
+                  </div>
+                  <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full ${getStatusColor(printer.status)} transition-all duration-500`}
+                      style={{ width: printer.status === 'printing' ? '45%' : printer.status === 'offline' ? '0%' : '100%' }}
+                    ></div>
+                  </div>
+                </div>
+
                 <div className="flex space-x-2">
-                  <Link to={`/printers/${printer.id}`} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors text-slate-300">
-                    <SettingsIcon size={16} />
-                  </Link>
-                  <a href={printer.embedded_ui_url} target="_blank" rel="noopener noreferrer" className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors text-slate-300">
-                    <ExternalLink size={16} />
-                  </a>
+                  <button
+                    onClick={() => handlePrinterRestart(printer.id, 'all')}
+                    className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-[10px] font-bold transition-colors text-slate-300 flex items-center justify-center"
+                  >
+                    <RefreshCw size={12} className="mr-1" /> RESTART
+                  </button>
+                  <button
+                    onClick={() => addToast("Emergency Stop placeholder", "info")}
+                    className="px-3 bg-red-900/20 hover:bg-red-900/40 py-2 rounded-lg text-red-500 transition-colors" title="Emergency Stop"
+                  >
+                    <ShieldAlert size={16} />
+                  </button>
+                  <button className="px-4 bg-blue-600 hover:bg-blue-700 py-2 rounded-lg transition-colors text-white shadow-lg shadow-blue-900/20"><Play size={16} fill="currentColor" /></button>
                 </div>
-              </div>
-
-              <div className="py-4">
-                <div className="flex justify-between items-end mb-1">
-                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{printer.status || 'offline'}</span>
-                </div>
-                <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full ${getStatusColor(printer.status)} transition-all duration-500`}
-                    style={{ width: printer.status === 'printing' ? '45%' : '0%' }}
-                  ></div>
-                </div>
-              </div>
-
-              <div className="flex space-x-2">
-                <button
-                  onClick={() => handlePrinterRestart(printer.id, 'all')}
-                  className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-[10px] font-bold transition-colors text-slate-300 flex items-center justify-center"
-                >
-                  <RefreshCw size={12} className="mr-1" /> RESTART
-                </button>
-                <button
-                  onClick={() => addToast("Emergency Stop placeholder", "info")}
-                  className="px-3 bg-red-900/20 hover:bg-red-900/40 py-2 rounded-lg text-red-500 transition-colors" title="Emergency Stop"
-                >
-                  <ShieldAlert size={16} />
-                </button>
-                <button className="px-4 bg-blue-600 hover:bg-blue-700 py-2 rounded-lg transition-colors text-white shadow-lg shadow-blue-900/20"><Play size={16} fill="currentColor" /></button>
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
         {printers.length === 0 && <div className="col-span-full py-16 text-center text-slate-500 italic border border-dashed border-slate-700 rounded-xl">No printers found. Click Add Printer to begin.</div>}
       </div>
 
@@ -324,7 +412,7 @@ const Fleet = ({ addToast }) => {
           <div className="space-y-4 text-left">
             <h3 className="font-bold text-slate-300">2. Select Target Node</h3>
             <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-               {nodes.map(node => (
+               {onlineNodes.map(node => (
                  <button key={node.id} onClick={() => handleNodeSelect(node.id)} className="w-full flex items-center justify-between p-4 bg-slate-900 border border-slate-700 rounded-xl hover:border-blue-500 group transition-all text-left">
                     <div className="flex items-center space-x-3">
                        <Server className="text-blue-500" size={20} />
@@ -336,7 +424,7 @@ const Fleet = ({ addToast }) => {
                     <ChevronRight size={16} className="text-slate-600 group-hover:text-blue-500" />
                  </button>
                ))}
-               {nodes.length === 0 && <p className="text-center py-8 text-slate-500 italic">No online nodes available.</p>}
+               {onlineNodes.length === 0 && <p className="text-center py-8 text-slate-500 italic">No online nodes available.</p>}
             </div>
             <div className="flex justify-start pt-4"><button onClick={() => setStep(1)} className="text-slate-500 font-bold flex items-center hover:text-white transition-colors"><ChevronLeft size={18} /> Back</button></div>
           </div>
@@ -346,37 +434,76 @@ const Fleet = ({ addToast }) => {
           <div className="space-y-4">
             <h3 className="font-bold text-slate-300">3. Node Software & MCU</h3>
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-slate-900 p-4 rounded-xl border border-slate-700 space-y-3">
-                 <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Software Check</p>
-                 {softwareLoading ? <div className="flex items-center space-x-2 text-xs text-blue-400"><Loader2 className="animate-spin" size={14} /> <span>Checking Pi...</span></div> : (
-                    <div className="space-y-2">
-                       <div className="flex justify-between items-center text-xs">
-                          <span>Klipper:</span>
-                          {softwareStatus?.klipper_installed ? <span className="text-green-500 font-bold flex items-center"><Check size={14} className="mr-1" /> Installed</span> : <button onClick={() => installSoftware(formData.assigned_node_id, 'klipper')} className="text-blue-400 font-bold underline text-[10px]">Install</button>}
-                       </div>
-                       <div className="flex justify-between items-center text-xs">
-                          <span>Moonraker:</span>
-                          {softwareStatus?.moonraker_installed ? <span className="text-green-500 font-bold flex items-center"><Check size={14} className="mr-1" /> Installed</span> : <button onClick={() => installSoftware(formData.assigned_node_id, 'moonraker')} className="text-blue-400 font-bold underline text-[10px]">Install</button>}
-                       </div>
-                    </div>
-                 )}
+            <div className="bg-slate-900 p-4 rounded-xl border border-slate-700 space-y-4">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Node Runtime Status</p>
+                {mainsailUrl && softwareStatus?.mainsail_installed && (
+                  <a href={mainsailUrl} target="_blank" rel="noopener noreferrer" className="text-[10px] font-bold text-blue-400 hover:text-blue-300">
+                    {mainsailUrl}
+                  </a>
+                )}
               </div>
-              <div className="bg-slate-900 p-4 rounded-xl border border-slate-700 space-y-3">
-                 <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Storage Check</p>
-                 {storageLoading ? <div className="flex items-center space-x-2 text-xs text-blue-400"><Loader2 className="animate-spin" size={14} /> <span>Checking NFS...</span></div> : (
-                    <div className="space-y-2">
-                       <div className="flex justify-between items-center text-xs">
-                          <span>Mounted:</span>
-                          {storageCheck?.is_mount ? <span className="text-green-500 font-bold">Yes</span> : <span className="text-red-500 font-bold">No</span>}
-                       </div>
-                       <div className="flex justify-between items-center text-xs">
-                          <span>Writable:</span>
-                          {storageCheck?.writable ? <span className="text-green-500 font-bold">Yes</span> : <span className="text-red-500 font-bold">No</span>}
-                       </div>
-                    </div>
-                 )}
-              </div>
+
+              {(softwareLoading && !softwareStatus) || storageLoading ? (
+                <div className="flex items-center space-x-2 text-xs text-blue-400">
+                  <Loader2 className="animate-spin" size={14} />
+                  <span>Checking node...</span>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                  <div className="flex justify-between items-center bg-slate-950/50 border border-slate-800 rounded-lg px-3 py-2">
+                    <span>Printer Runtime:</span>
+                    <span className={`${runtimeClass} font-bold`}>{runtimeLabel}</span>
+                  </div>
+                  <div className="flex justify-between items-center bg-slate-950/50 border border-slate-800 rounded-lg px-3 py-2">
+                    <span>NFS:</span>
+                    <span className={`${statusClass(nfsReady)} font-bold`}>{nfsReady ? 'Mounted + Writable' : 'Needs Attention'}</span>
+                  </div>
+                  <div className="flex justify-between items-center bg-slate-950/50 border border-slate-800 rounded-lg px-3 py-2">
+                    <span>Klipper:</span>
+                    <span className={`${statusClass(softwareStatus?.klipper_installed)} font-bold`}>{softwareStatus?.klipper_installed ? 'Installed' : 'Missing'}</span>
+                  </div>
+                  <div className="flex justify-between items-center bg-slate-950/50 border border-slate-800 rounded-lg px-3 py-2">
+                    <span>Moonraker:</span>
+                    <span className={`${statusClass(softwareStatus?.moonraker_installed)} font-bold`}>{softwareStatus?.moonraker_installed ? 'Installed' : 'Missing'}</span>
+                  </div>
+                  <div className="flex justify-between items-center bg-slate-950/50 border border-slate-800 rounded-lg px-3 py-2">
+                    <span>Mainsail:</span>
+                    <span className={`${statusClass(softwareStatus?.mainsail_installed)} font-bold`}>{softwareStatus?.mainsail_installed ? 'Installed' : 'Missing'}</span>
+                  </div>
+                  <div className="flex justify-between items-center bg-slate-950/50 border border-slate-800 rounded-lg px-3 py-2">
+                    <span>nginx:</span>
+                    <span className={`${statusClass(softwareStatus?.nginx_installed)} font-bold`}>{softwareStatus?.nginx_installed ? 'Installed' : 'Missing'}</span>
+                  </div>
+                </div>
+              )}
+
+              {softwareStatus && runtimeInstalledCount < 3 && (
+                <button
+                  onClick={() => installSoftware(formData.assigned_node_id, 'runtime')}
+                  disabled={softwareLoading}
+                  className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 px-4 py-2 rounded-lg font-bold text-sm flex items-center justify-center space-x-2"
+                >
+                  {softwareLoading ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
+                  <span>Install Printer Runtime</span>
+                </button>
+              )}
+
+              <button
+                onClick={() => setAdvancedInstallOpen(prev => !prev)}
+                className="text-[10px] font-bold text-slate-500 hover:text-slate-300 uppercase tracking-widest"
+              >
+                Advanced install options
+              </button>
+
+              {advancedInstallOpen && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button disabled={softwareLoading} onClick={() => installSoftware(formData.assigned_node_id, 'klipper')} className="bg-slate-800 hover:bg-slate-700 disabled:opacity-60 border border-slate-700 px-3 py-2 rounded-lg text-[10px] font-bold text-slate-300">Install Klipper only</button>
+                  <button disabled={softwareLoading} onClick={() => installSoftware(formData.assigned_node_id, 'moonraker')} className="bg-slate-800 hover:bg-slate-700 disabled:opacity-60 border border-slate-700 px-3 py-2 rounded-lg text-[10px] font-bold text-slate-300">Install Moonraker only</button>
+                  <button disabled={softwareLoading} onClick={() => installSoftware(formData.assigned_node_id, 'mainsail')} className="bg-slate-800 hover:bg-slate-700 disabled:opacity-60 border border-slate-700 px-3 py-2 rounded-lg text-[10px] font-bold text-slate-300">Install Mainsail only</button>
+                  <button disabled={softwareLoading} onClick={() => installSoftware(formData.assigned_node_id, 'runtime')} className="bg-slate-800 hover:bg-slate-700 disabled:opacity-60 border border-slate-700 px-3 py-2 rounded-lg text-[10px] font-bold text-slate-300">Reinstall/Repair runtime</button>
+                </div>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -409,7 +536,7 @@ const Fleet = ({ addToast }) => {
                <button onClick={() => setStep(2)} className="text-slate-500 font-bold flex items-center hover:text-white transition-colors"><ChevronLeft size={18} /> Back</button>
                <div className="flex space-x-2">
                   <button onClick={() => { checkSoftware(formData.assigned_node_id); checkStorage(formData.assigned_node_id); fetchMcus(formData.assigned_node_id); }} className="p-2 bg-slate-700 rounded-lg text-slate-300 hover:text-white transition-colors"><RefreshCw size={16} /></button>
-                  <button disabled={!softwareStatus?.klipper_installed || !softwareStatus?.moonraker_installed || !storageCheck?.nfs_available} onClick={() => setStep(4)} className="bg-blue-600 disabled:bg-slate-700 px-6 py-2 rounded-lg font-bold flex items-center">Next <ChevronRight size={18} /></button>
+                  <button disabled={!runtimeReady || !nfsReady} onClick={() => setStep(4)} className="bg-blue-600 disabled:bg-slate-700 px-6 py-2 rounded-lg font-bold flex items-center">Next <ChevronRight size={18} /></button>
                </div>
             </div>
           </div>
@@ -478,7 +605,7 @@ const Fleet = ({ addToast }) => {
 
               <div className="bg-blue-900/10 border border-blue-900/30 p-3 rounded-lg flex items-center space-x-3">
                  <Check size={18} className="text-blue-500" />
-                 <p className="text-[10px] text-blue-200/70 italic">Klipper and Moonraker services will be automatically installed and started.</p>
+                 <p className="text-[10px] text-blue-200/70 italic">Klipper and Moonraker services will be created on the selected node. Mainsail is served from the node on port 80.</p>
               </div>
 
               <div className="flex justify-between pt-4">

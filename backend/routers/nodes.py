@@ -570,19 +570,56 @@ async def proxy_create_instance(node_id: int, request: Request, data: dict = Bod
         logger.error(f"Failed to create instance on node {node.hostname}: {e}")
         raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")
 
-@router.get("/{node_id}/software/check")
-async def proxy_software_check(node_id: int, db: AsyncSession = Depends(get_db)):
-    """Proxied endpoint to check Klipper/Moonraker software on a node"""
+async def get_node_for_proxy(node_id: int, db: AsyncSession):
     result = await db.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
-    if not node: raise HTTPException(status_code=404, detail="Node not found")
-    url = f"http://{node.ip_address}:{node.agent_port}/software/check"
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+    return node
+
+async def proxy_node_get(node: Node, path: str, timeout: int = 5):
+    url = f"http://{node.ip_address}:{node.agent_port}{path}"
     try:
         async with httpx.AsyncClient() as client:
-            res = await client.get(url, timeout=5)
+            res = await client.get(url, timeout=timeout)
+        if res.status_code == 404:
+            raise HTTPException(status_code=404, detail="Node-agent does not support this endpoint. Update node-agent.")
         return res.json()
-    except:
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to reach node {node.hostname} at {url}: {e}")
         raise HTTPException(status_code=502, detail="Node unreachable")
+
+async def proxy_node_post(node: Node, path: str, timeout: int = 900):
+    url = f"http://{node.ip_address}:{node.agent_port}{path}"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, timeout=timeout)
+        if res.status_code == 404:
+            raise HTTPException(status_code=404, detail="Node-agent does not support this endpoint. Update node-agent.")
+        return res.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to reach node {node.hostname} at {url}: {e}")
+        raise HTTPException(status_code=502, detail="Node unreachable or timeout")
+
+@router.get("/{node_id}/software/status")
+async def proxy_software_status(node_id: int, db: AsyncSession = Depends(get_db)):
+    """Proxied endpoint to check Klipper, Moonraker, Mainsail, and nginx status on a node"""
+    node = await get_node_for_proxy(node_id, db)
+    try:
+        return await proxy_node_get(node, "/software/status", timeout=5)
+    except HTTPException as e:
+        if e.status_code == 404:
+            return await proxy_node_get(node, "/software/check", timeout=5)
+        raise
+
+@router.get("/{node_id}/software/check")
+async def proxy_software_check(node_id: int, db: AsyncSession = Depends(get_db)):
+    """Compatibility alias for the newer software status endpoint"""
+    return await proxy_software_status(node_id, db)
 
 @router.get("/{node_id}/storage/check")
 async def proxy_storage_check(node_id: int, db: AsyncSession = Depends(get_db)):
@@ -611,28 +648,40 @@ async def proxy_storage_check(node_id: int, db: AsyncSession = Depends(get_db)):
         logger.error(f"Failed to check storage for node {node.hostname}: {e}")
         return {"nfs_available": False, "mounted": False, "error": "Node unreachable"}
 
-@router.post("/{node_id}/software/install-klipper")
+@router.post("/{node_id}/software/install/runtime")
+async def proxy_install_runtime(node_id: int, db: AsyncSession = Depends(get_db)):
+    node = await get_node_for_proxy(node_id, db)
+    return await proxy_node_post(node, "/software/install/runtime", timeout=1800)
+
+@router.post("/{node_id}/software/install/klipper")
 async def proxy_install_klipper(node_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node: raise HTTPException(status_code=404, detail="Node not found")
-    url = f"http://{node.ip_address}:{node.agent_port}/software/install-klipper"
+    node = await get_node_for_proxy(node_id, db)
     try:
-        async with httpx.AsyncClient() as client:
-            res = await client.post(url, timeout=300)
-        return res.json()
-    except:
-        raise HTTPException(status_code=502, detail="Node unreachable or timeout")
+        return await proxy_node_post(node, "/software/install/klipper", timeout=900)
+    except HTTPException as e:
+        if e.status_code == 404:
+            return await proxy_node_post(node, "/software/install-klipper", timeout=900)
+        raise
+
+@router.post("/{node_id}/software/install/moonraker")
+async def proxy_install_moonraker(node_id: int, db: AsyncSession = Depends(get_db)):
+    node = await get_node_for_proxy(node_id, db)
+    try:
+        return await proxy_node_post(node, "/software/install/moonraker", timeout=900)
+    except HTTPException as e:
+        if e.status_code == 404:
+            return await proxy_node_post(node, "/software/install-moonraker", timeout=900)
+        raise
+
+@router.post("/{node_id}/software/install/mainsail")
+async def proxy_install_mainsail(node_id: int, db: AsyncSession = Depends(get_db)):
+    node = await get_node_for_proxy(node_id, db)
+    return await proxy_node_post(node, "/software/install/mainsail", timeout=900)
+
+@router.post("/{node_id}/software/install-klipper")
+async def proxy_install_klipper_legacy(node_id: int, db: AsyncSession = Depends(get_db)):
+    return await proxy_install_klipper(node_id, db)
 
 @router.post("/{node_id}/software/install-moonraker")
-async def proxy_install_moonraker(node_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node: raise HTTPException(status_code=404, detail="Node not found")
-    url = f"http://{node.ip_address}:{node.agent_port}/software/install-moonraker"
-    try:
-        async with httpx.AsyncClient() as client:
-            res = await client.post(url, timeout=300)
-        return res.json()
-    except:
-        raise HTTPException(status_code=502, detail="Node unreachable or timeout")
+async def proxy_install_moonraker_legacy(node_id: int, db: AsyncSession = Depends(get_db)):
+    return await proxy_install_moonraker(node_id, db)

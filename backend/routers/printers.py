@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import List, Optional
+import asyncio
 import httpx
 from ..database import get_db
 from ..models import Printer, Node, PrinterNote, Event
@@ -11,9 +12,37 @@ import datetime
 
 router = APIRouter(prefix="/printers", tags=["printers"])
 
-def serialize_printer(printer):
+async def probe_printer_status(printer):
+    if not printer.assigned_node_id or not printer.node or not printer.moonraker_port:
+        return printer.status or "offline"
+
+    url = f"http://{printer.node.ip_address}:{printer.moonraker_port}/server/info"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=1.5)
+        if res.status_code != 200:
+            return "offline"
+
+        payload = res.json()
+        info = payload.get("result", payload)
+        klippy_state = str(info.get("klippy_state") or "").lower()
+        klippy_connected = info.get("klippy_connected")
+
+        if klippy_state == "ready":
+            return "idle"
+        if klippy_state in ("error", "shutdown"):
+            return "error"
+        if klippy_state in ("startup", "connecting"):
+            return "starting"
+        if klippy_connected is True:
+            return "online"
+        return "offline"
+    except Exception:
+        return "offline"
+
+def serialize_printer(printer, include_node=False, status_override=None):
     """Utility to serialize SQLAlchemy Printer model to dict to avoid MissingGreenlet errors"""
-    return {
+    data = {
         "id": printer.id,
         "name": printer.name,
         "slug": printer.slug,
@@ -26,12 +55,15 @@ def serialize_printer(printer):
         "gcode_path": printer.gcode_path,
         "webcam_url": printer.webcam_url,
         "embedded_ui_url": printer.embedded_ui_url,
-        "status": printer.status,
+        "status": status_override if status_override is not None else printer.status,
         "last_seen": printer.last_seen,
         "assigned_node_id": printer.assigned_node_id,
         "created_at": printer.created_at,
         "updated_at": printer.updated_at,
     }
+    if include_node and printer.node:
+        data["node"] = serialize_node(printer.node)
+    return data
 
 @router.post("/", response_model=PrinterSchema)
 async def create_printer(printer_in: PrinterCreate, db: AsyncSession = Depends(get_db)):
@@ -51,11 +83,15 @@ async def create_printer(printer_in: PrinterCreate, db: AsyncSession = Depends(g
     await db.refresh(printer)
     return serialize_printer(printer)
 
-@router.get("/", response_model=List[PrinterSchema])
+@router.get("/", response_model=List[PrinterDetail])
 async def list_printers(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Printer))
     printers = result.scalars().all()
-    return [serialize_printer(p) for p in printers]
+    statuses = await asyncio.gather(*(probe_printer_status(p) for p in printers))
+    return [
+        serialize_printer(printer, include_node=True, status_override=status)
+        for printer, status in zip(printers, statuses)
+    ]
 
 @router.get("/{printer_id}", response_model=PrinterSchema)
 async def get_printer(printer_id: int, db: AsyncSession = Depends(get_db)):
@@ -87,9 +123,8 @@ async def get_printer_detail(printer_id: int, db: AsyncSession = Depends(get_db)
     if not printer:
         raise HTTPException(status_code=404, detail="Printer not found")
 
-    data = serialize_printer(printer)
-    if printer.node:
-        data["node"] = serialize_node(printer.node)
+    status = await probe_printer_status(printer)
+    data = serialize_printer(printer, include_node=True, status_override=status)
 
     return data
 

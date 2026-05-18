@@ -1,7 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import { File, Folder, Search, Filter, Save, X, Edit, Trash2, Loader2, FileWarning, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { File, Save, X, Edit, Trash2, Loader2, FileWarning, RefreshCw } from 'lucide-react';
 import axios from 'axios';
-import api from '../services/api';
 
 
 
@@ -24,13 +23,7 @@ const FileManager = ({ addToast }) => {
       .catch(() => addToast("Failed to fetch printers", "error"));
   }, [addToast]);
 
-  useEffect(() => {
-    if (selectedPrinter && selectedType) {
-      fetchFiles();
-    }
-  }, [selectedPrinter, selectedType]);
-
-  const fetchFiles = async () => {
+  const fetchFiles = useCallback(async () => {
     setLoading(true);
     try {
       const res = await axios.get(`/api/files/${selectedPrinter}/${selectedType}`);
@@ -40,7 +33,13 @@ const FileManager = ({ addToast }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedPrinter, selectedType]);
+
+  useEffect(() => {
+    if (selectedPrinter && selectedType) {
+      fetchFiles();
+    }
+  }, [selectedPrinter, selectedType, fetchFiles]);
 
   const handleEdit = async (file) => {
     try {

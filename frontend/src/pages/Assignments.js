@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { ArrowRight, AlertCircle, CheckCircle2, Server, Printer as PrinterIcon, ArrowLeftRight, Loader2 } from 'lucide-react';
+import { ArrowRight, AlertCircle, Server, Printer as PrinterIcon, ArrowLeftRight, Loader2 } from 'lucide-react';
 import axios from 'axios';
-import api from '../services/api';
 
 
 

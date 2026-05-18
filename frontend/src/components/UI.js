@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { X, CheckCircle, AlertCircle, Info, Loader2 } from 'lucide-react';
+import React from 'react';
+import { X, CheckCircle, AlertCircle, Info } from 'lucide-react';
 
 const ToastContainer = ({ toasts, removeToast }) => {
   return (

@@ -1,20 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, Printer, Activity, Settings, FileText, Camera, ShieldAlert, RefreshCw, Power, Loader2 } from 'lucide-react';
-import { printerService, agentService } from '../services/api';
+import { ArrowLeft, Printer, Activity, FileText, Camera, ShieldAlert, RefreshCw, Power } from 'lucide-react';
+import { printerService } from '../services/api';
 import axios from 'axios';
 
 const PrinterDetail = ({ addToast }) => {
   const { id } = useParams();
   const [printer, setPrinter] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState(false);
 
-  useEffect(() => {
-    fetchPrinter();
-  }, [id]);
-
-  const fetchPrinter = async () => {
+  const fetchPrinter = useCallback(async () => {
     try {
       const res = await printerService.getPrinterDetail(id);
       setPrinter(res.data);
@@ -23,7 +18,11 @@ const PrinterDetail = ({ addToast }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [id]);
+
+  useEffect(() => {
+    fetchPrinter();
+  }, [fetchPrinter]);
 
   const handleAction = async (name) => {
     const targetMap = {
@@ -41,14 +40,11 @@ const PrinterDetail = ({ addToast }) => {
 
     if (!window.confirm(`Initiate ${name}?`)) return;
 
-    setActionLoading(true);
     try {
         await axios.post(`/api/printers/${id}/restart`, { target });
         addToast(`${name} initiated`, "success");
     } catch (err) {
         addToast(err.response?.data?.detail || "Action failed", "error");
-    } finally {
-        setActionLoading(false);
     }
   };
 
@@ -63,6 +59,10 @@ const PrinterDetail = ({ addToast }) => {
 
   if (!printer) return <div className="text-red-500 font-bold p-8 bg-red-500/10 rounded-xl border border-red-500/20">Printer not found.</div>;
 
+  const nodeIp = printer.node?.ip_address;
+  const mainsailUrl = nodeIp ? `http://${nodeIp}` : printer.embedded_ui_url;
+  const moonrakerApiUrl = nodeIp && printer.moonraker_port ? `http://${nodeIp}:${printer.moonraker_port}/server/info` : null;
+
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
       <div className="flex items-center space-x-4">
@@ -71,7 +71,7 @@ const PrinterDetail = ({ addToast }) => {
         </Link>
         <div>
           <h2 className="text-2xl font-bold">{printer.name}</h2>
-          <p className="text-xs text-slate-500 font-mono mt-0.5">SLUG: {printer.slug} • MCU: {printer.mcu_serial || 'NOT CONNECTED'}</p>
+          <p className="text-xs text-slate-500 font-mono mt-0.5">SLUG: {printer.slug} - MCU: {printer.mcu_serial || 'NOT CONNECTED'}</p>
         </div>
       </div>
 
@@ -120,17 +120,24 @@ const PrinterDetail = ({ addToast }) => {
             <div className="p-4 border-b border-slate-700 flex justify-between items-center bg-slate-800/50">
               <div className="flex items-center space-x-2 text-blue-400">
                 <Printer size={18} />
-                <h3 className="font-bold text-sm">Mainsail / Fluidd View</h3>
+                <h3 className="font-bold text-sm">Mainsail</h3>
               </div>
-              <a href={printer.embedded_ui_url} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 text-xs font-bold uppercase tracking-wider">Open External</a>
+              <div className="flex items-center space-x-3">
+                {mainsailUrl && (
+                  <a href={mainsailUrl} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 text-xs font-bold uppercase tracking-wider">Open Mainsail</a>
+                )}
+                {moonrakerApiUrl && (
+                  <a href={moonrakerApiUrl} target="_blank" rel="noopener noreferrer" className="text-green-400 hover:text-green-300 text-xs font-bold uppercase tracking-wider">Open Moonraker API</a>
+                )}
+              </div>
             </div>
             <div className="aspect-video bg-slate-900">
-              {printer.embedded_ui_url ? (
-                <iframe src={printer.embedded_ui_url} className="w-full h-full border-none" title="Embedded UI"></iframe>
+              {mainsailUrl ? (
+                <iframe src={mainsailUrl} className="w-full h-full border-none" title="Mainsail"></iframe>
               ) : (
                 <div className="flex flex-col items-center justify-center h-full text-slate-600 space-y-2 italic">
                    <ShieldAlert size={48} className="opacity-10" />
-                   <p>No UI URL configured for this printer</p>
+                   <p>No assigned node or UI URL configured for this printer</p>
                 </div>
               )}
             </div>

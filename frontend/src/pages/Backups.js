@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Database, Download, RotateCcw, Plus, AlertCircle, CheckCircle2, Clock, Loader2, DatabaseBackup } from 'lucide-react';
+import { RotateCcw, Plus, Loader2, DatabaseBackup } from 'lucide-react';
 import axios from 'axios';
-import api from '../services/api';
 
 
 

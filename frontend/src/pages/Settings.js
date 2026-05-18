@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Mail, ShieldCheck, Save, Send, Loader2, HardDrive, Check, X, Copy, Terminal } from 'lucide-react';
+import { Mail, ShieldCheck, Save, Send, Loader2, HardDrive, Check, X, Copy } from 'lucide-react';
 import axios from 'axios';
 
 const Settings = ({ addToast }) => {

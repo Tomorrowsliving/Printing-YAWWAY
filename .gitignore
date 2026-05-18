@@ -1,0 +1,39 @@
+# Frontend generated files
+frontend/node_modules/
+frontend/build/
+frontend/dev-server.log
+
+# Python generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+node-agent/venv/
+
+# Local env/secrets
+.env
+.env.*
+!.env.example
+
+# Runtime farm data - keep out unless deliberately sanitised
+storage/backups/
+storage/uploads/
+storage/logs/
+storage/gcodes/
+storage/printers/*/logs/
+storage/printers/*/gcodes/
+storage/printers/*/config/*.cfg
+
+# Databases / dumps
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.sql
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
-import { Server, Activity, Thermometer, Cpu, HardDrive, CheckCircle, XCircle, RefreshCw, Plus, Loader2, Usb, Layers, ShieldCheck, Edit, Trash2, Save, ArrowUpCircle, Search, Power, Settings2 } from 'lucide-react';
-import { nodeService, agentService } from '../services/api';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Server, HardDrive, RefreshCw, Plus, Loader2, Layers, Edit, Trash2, ArrowUpCircle, Search, Power, Settings2 } from 'lucide-react';
+import { nodeService } from '../services/api';
 import { Modal } from '../components/UI';
 import axios from 'axios';
 
@@ -19,28 +19,21 @@ const NodeOverview = ({ addToast }) => {
   const [formData, setFormData] = useState({ hostname: '', ip_address: '', agent_port: 8001, model: '', notes: '' });
   const [editData, setEditData] = useState({ hostname: '', ip_address: '', agent_port: 8001, model: '', notes: '', approved: false });
 
-  useEffect(() => {
-    fetchNodes();
-    fetchNfsInfo();
-    const interval = setInterval(fetchNodes, 10000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchNfsInfo = async () => {
+  const fetchNfsInfo = useCallback(async () => {
     try {
         const res = await axios.get('/api/storage/nfs-status');
         setNfsInfo(res.data);
     } catch (err) {}
-  };
+  }, []);
 
-  const fetchNodeStorage = async (node) => {
+  const fetchNodeStorage = useCallback(async (node) => {
       try {
           const res = await axios.get(`/api/nodes/${node.id}/storage/check`);
           setStorageStatus(prev => ({ ...prev, [node.id]: res.data }));
       } catch (err) {}
-  };
+  }, []);
 
-  const fetchNodes = async () => {
+  const fetchNodes = useCallback(async () => {
     try {
       const res = await nodeService.getNodes();
       const nodeData = Array.isArray(res.data) ? res.data : [];
@@ -55,7 +48,14 @@ const NodeOverview = ({ addToast }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [fetchNodeStorage]);
+
+  useEffect(() => {
+    fetchNodes();
+    fetchNfsInfo();
+    const interval = setInterval(fetchNodes, 10000);
+    return () => clearInterval(interval);
+  }, [fetchNodes, fetchNfsInfo]);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
