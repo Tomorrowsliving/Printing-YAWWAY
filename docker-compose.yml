@@ -13,12 +13,27 @@ services:
       timeout: 5s
       retries: 5
 
+  storage-init:
+    image: alpine:latest
+    container_name: klipper-farm-storage-init
+    command: >
+      sh -c "
+      mkdir -p /storage/printers /storage/gcodes /storage/configs /storage/backups /storage/uploads /storage/logs &&
+      chmod -R 777 /storage &&
+      echo 'Storage initialised'
+      "
+    volumes:
+      - ./storage:/storage
+    restart: "no"
+
   nfs:
     image: itsthenetwork/nfs-server-alpine:latest
     container_name: klipper-farm-nfs
     privileged: true
     network_mode: host
     restart: unless-stopped
+    depends_on:
+      - storage-init
     environment:
       SHARED_DIRECTORY: /exports
       PERMITTED: "*"
@@ -38,8 +53,7 @@ services:
       NFS_SERVER_HOST: 10.1.8.133
       NFS_EXPORT_PATH: /exports
       NFS_CLIENT_MOUNT: /mnt/klipper-farm
-      NFS_PERMITTED: 10.1.8.0/22
-      NFS_READ_ONLY: "false"
+      NFS_PERMITTED: "*"
       NFS_SYNC: "true"
       AGENT_PORT: "8001"
       BACKEND_PUBLIC_URL: http://10.1.8.133
@@ -48,6 +62,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
 
   frontend:
     build: ./frontend
