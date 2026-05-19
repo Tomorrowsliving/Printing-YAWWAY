@@ -36,8 +36,8 @@ services:
       - storage-init
     environment:
       SHARED_DIRECTORY: /exports
-      PERMITTED: "*"
-      SYNC: "true"
+      PERMITTED: "${NFS_PERMITTED:-*}"
+      SYNC: "${NFS_SYNC:-true}"
     volumes:
       - ./storage:/exports
 
@@ -50,13 +50,13 @@ services:
       STORAGE_ROOT: /mnt/klipper-farm
       PRINTERS_PATH: /mnt/klipper-farm/printers
       BACKUP_PATH: /mnt/klipper-farm/backups
-      NFS_SERVER_HOST: 10.1.8.133
-      NFS_EXPORT_PATH: /exports
-      NFS_CLIENT_MOUNT: /mnt/klipper-farm
-      NFS_PERMITTED: "*"
-      NFS_SYNC: "true"
-      AGENT_PORT: "8001"
-      BACKEND_PUBLIC_URL: http://10.1.8.133
+      NFS_SERVER_HOST: "${NFS_SERVER_HOST:-}"
+      NFS_EXPORT_PATH: "${NFS_EXPORT_PATH:-/exports}"
+      NFS_CLIENT_MOUNT: "${NFS_CLIENT_MOUNT:-/mnt/klipper-farm}"
+      NFS_PERMITTED: "${NFS_PERMITTED:-*}"
+      NFS_SYNC: "${NFS_SYNC:-true}"
+      AGENT_PORT: "${AGENT_PORT:-8001}"
+      BACKEND_PUBLIC_URL: "${BACKEND_PUBLIC_URL:-http://localhost}"
     volumes:
       - ./storage:/mnt/klipper-farm
     depends_on:

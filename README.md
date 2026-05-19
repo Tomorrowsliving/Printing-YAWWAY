@@ -28,10 +28,11 @@ Create a central server to manage printer profiles, configs, G-code storage, nod
 
 ### Backend & Dashboard (Docker Compose)
 
-1. Copy `.env.example` to `.env` and configure your settings.
-2. Ensure you have Docker and Docker Compose installed.
-3. Run `docker-compose up -d`.
-4. Access the dashboard at `http://localhost`.
+1. Copy `.env.example` to `.env`.
+2. Set `NFS_SERVER_HOST` and `BACKEND_PUBLIC_URL` to the dashboard machine's LAN IP or DNS name, for example `10.1.8.137` and `http://10.1.8.137`.
+3. Ensure you have Docker and Docker Compose installed.
+4. Run `docker-compose up -d`.
+5. Access the dashboard at `http://YOUR_SERVER_IP`.
 
 ### Node Agent (on Raspberry Pi)
 
@@ -55,7 +56,7 @@ The NFS container is configured in `docker-compose.yml`:
 - Port: `2049`
 
 ### Client Side (Raspberry Pi)
-To mount the shared storage on your Pi nodes:
+The dashboard can ask an installed node-agent to mount storage from the Nodes page. For manual testing on a Pi:
 
 1. Install NFS client:
    ```bash
@@ -67,11 +68,11 @@ To mount the shared storage on your Pi nodes:
    ```
 3. Mount the share (replace `YOUR_SERVER_IP` with the dashboard server's IP):
    ```bash
-   sudo mount YOUR_SERVER_IP:/exports /mnt/klipper-farm
+   sudo mount -t nfs4 YOUR_SERVER_IP:/ /mnt/klipper-farm
    ```
 4. To make it persistent, add to `/etc/fstab`:
    ```text
-   YOUR_SERVER_IP:/exports /mnt/klipper-farm nfs defaults,soft,intr 0 0
+   YOUR_SERVER_IP:/ /mnt/klipper-farm nfs4 defaults,_netdev 0 0
    ```
 
 ## Storage Layout
@@ -96,7 +97,7 @@ The easiest way to install the node-agent on a Raspberry Pi is using the provide
 ```bash
 git clone https://github.com/Tomorrowsliving/Printing-YAWWAY.git
 cd Printing-YAWWAY/node-agent
-sudo ./install.sh --backend-url http://YOUR_SERVER_IP:8001 --port 8001
+sudo ./install.sh --backend-url http://YOUR_SERVER_IP --port 8001
 ```
 
 This script will:
@@ -104,7 +105,7 @@ This script will:
 - Install the agent to `/opt/klipper-farm-control`.
 - Set up a virtual environment and install requirements.
 - Create a systemd service and start the agent automatically.
-- Configure narrow sudoers rules for automatic updates.
+- Configure sudoers rules for automatic updates, service actions, and NFS mounting.
 
 When provisioning a printer from the dashboard, the backend generates `moonraker.conf` for the selected node. It uses `BACKEND_PUBLIC_URL` for the trusted backend host, the selected node's `ip_address`, the assigned Moonraker port, and the printer slug for the Klippy Unix socket.
 
@@ -125,7 +126,7 @@ If you prefer to install manually:
 2. Clone and enter the directory.
 3. Create venv: `python3 -m venv venv && source venv/bin/activate`.
 4. Install requirements: `pip install -r requirements.txt`.
-5. Run manually: `export BACKEND_URL=http://your-server-ip:8001 && python3 main.py`.
+5. Run manually: `export BACKEND_URL=http://your-server-ip && uvicorn main:app --host 0.0.0.0 --port 8001`.
 
 When setting up as a systemd service, ensure `Environment=NODE_AGENT_DIR=/path/to/node-agent` is included in the unit file.
 

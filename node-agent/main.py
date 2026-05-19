@@ -155,6 +155,17 @@ def describe_process_error(error):
         return f"{cmd} failed with exit code {error.returncode}: {output}"
     return output
 
+def get_mount_info(mount_path):
+    try:
+        with open("/proc/mounts", "r") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == mount_path:
+                    return parts[0], parts[2]
+    except Exception as e:
+        logger.error(f"Error reading /proc/mounts: {e}")
+    return "", ""
+
 def get_os_major_version():
     try:
         with open("/etc/os-release", "r") as f:
@@ -647,17 +658,8 @@ async def check_storage():
     missing_dirs = []
 
     # 1. Read /proc/mounts to detect mount status without blocking
-    try:
-        with open("/proc/mounts", "r") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) >= 3 and parts[1] == mount_path:
-                    mounted = True
-                    mount_source = parts[0]
-                    filesystem_type = parts[2]
-                    break
-    except Exception as e:
-        logger.error(f"Error reading /proc/mounts: {e}")
+    mount_source, filesystem_type = get_mount_info(mount_path)
+    mounted = bool(mount_source)
 
     # 2. Only perform IO tests if /proc/mounts confirms it is mounted
     if mounted:
@@ -716,7 +718,29 @@ async def mount_storage(req: MountRequest):
         # 2. Create mount point
         run_privileged(["mkdir", "-p", req.mount_point], check=True, capture_output=True, text=True, timeout=30)
 
-        # 3. Attempt mount - Try NFSv4 root first (modern)
+        # 3. Clear any stale mount before attempting the current server.
+        existing_source, existing_type = get_mount_info(req.mount_point)
+        if existing_source:
+            attempts.append({
+                "cmd": f"existing mount {existing_source} ({existing_type})",
+                "success": True,
+                "stderr": ""
+            })
+            unmount_cmd = privileged_command(["umount", "-l", req.mount_point])
+            unmount_res = subprocess.run(unmount_cmd, capture_output=True, text=True, timeout=15)
+            attempts.append({
+                "cmd": " ".join(unmount_cmd),
+                "success": unmount_res.returncode == 0,
+                "stderr": unmount_res.stderr
+            })
+            if unmount_res.returncode != 0:
+                return {
+                    "success": False,
+                    "message": f"Unable to unmount existing storage mount {existing_source}: {unmount_res.stderr}",
+                    "attempts": attempts
+                }
+
+        # 4. Attempt mount - Try NFSv4 root first (modern)
         mount_opts = "timeo=50,retrans=2"
 
         # Attempt 1: NFSv4 root
@@ -736,14 +760,38 @@ async def mount_storage(req: MountRequest):
                     msg = "NFS server denied access. Check PERMITTED settings on the dashboard server."
                 return {"success": False, "message": msg, "attempts": attempts}
 
-        # 4. Add to fstab for persistence if requested
+        # 5. Add to fstab for persistence if requested
         if req.persistent:
             if any(c in req.server + req.export + req.mount_point for c in ";|&><$()\"'"):
                  return {"success": False, "message": "Invalid characters in mount parameters"}
 
             fstab_entry = f"{req.server}:{req.export} {req.mount_point} nfs defaults,_netdev 0 0"
             with open("/etc/fstab", "r") as f:
-                if fstab_entry not in f.read():
+                existing_fstab = f.readlines()
+
+            filtered_fstab = [
+                line for line in existing_fstab
+                if line.lstrip().startswith("#")
+                or len(line.split()) < 2
+                or line.split()[1] != req.mount_point
+            ]
+            if not filtered_fstab or not filtered_fstab[-1].endswith("\n"):
+                filtered_fstab.append("\n")
+
+            if fstab_entry + "\n" not in filtered_fstab:
+                filtered_fstab.append(fstab_entry + "\n")
+
+            if filtered_fstab != existing_fstab:
+                try:
+                    run_privileged(
+                        ["tee", "/etc/fstab"],
+                        input="".join(filtered_fstab),
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                except subprocess.CalledProcessError:
                     run_privileged(
                         ["tee", "-a", "/etc/fstab"],
                         input=fstab_entry + "\n",

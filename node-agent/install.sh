@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Klipper Farm Node Agent Installer
-# Usage: sudo ./install.sh --backend-url http://SERVER_IP:8001 --port 8001
+# Usage: sudo ./install.sh --backend-url http://SERVER_IP --port 8001
 
 set -e
 
@@ -115,10 +115,12 @@ ALL ALL=(ALL) NOPASSWD: /usr/sbin/reboot
 ALL ALL=(ALL) NOPASSWD: /usr/bin/apt-get update
 ALL ALL=(ALL) NOPASSWD: /usr/bin/apt-get install *
 ALL ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /mnt/*
+ALL ALL=(ALL) NOPASSWD: /usr/bin/umount -l /mnt/*
 ALL ALL=(ALL) NOPASSWD: /usr/bin/mount -t nfs4 -o * * /mnt/*
 ALL ALL=(ALL) NOPASSWD: /usr/bin/mount -t nfs -o * * /mnt/*
 ALL ALL=(ALL) NOPASSWD: /usr/bin/touch /mnt/*/.agent_write_test
 ALL ALL=(ALL) NOPASSWD: /usr/bin/rm -f /mnt/*/.agent_write_test
+ALL ALL=(ALL) NOPASSWD: /usr/bin/tee /etc/fstab
 ALL ALL=(ALL) NOPASSWD: /usr/bin/tee -a /etc/fstab
 ALL ALL=(ALL) NOPASSWD: /usr/bin/mv /tmp/klipper-*.service /etc/systemd/system/
 ALL ALL=(ALL) NOPASSWD: /usr/bin/mv /tmp/moonraker-*.service /etc/systemd/system/
