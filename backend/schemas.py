@@ -100,6 +100,10 @@ class BackupBase(BaseModel):
     backup_type: str
     status: str
     error_message: Optional[str] = None
+    backup_category: Optional[str] = None
+    display_type: Optional[str] = None
+    printer_slug: Optional[str] = None
+    printer_name: Optional[str] = None
 
 class Backup(BackupBase):
     id: int
