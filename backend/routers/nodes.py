@@ -32,8 +32,80 @@ def clean_string(value):
 def host_from_url(value: Optional[str]):
     if not value:
         return None
-    parsed = urlparse(value if "://" in value else f"http://{value}")
-    return parsed.hostname or value.split(":", 1)[0].strip("/")
+    value = str(value).strip()
+    parsed = urlparse(value if "://" in value else f"//{value}")
+    return parsed.hostname or value.split("/", 1)[0].split(":", 1)[0].strip("/")
+
+def is_placeholder_host(host: Optional[str]):
+    if not host:
+        return True
+    lowered = host.strip().lower()
+    return lowered in {
+        "localhost",
+        "server_ip",
+        "your_server_ip",
+        "manual_ip_required",
+        "0.0.0.0",
+        "::",
+        "::1",
+    }
+
+def is_unusable_network_host(host: Optional[str]):
+    if is_placeholder_host(host):
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+        return addr.is_loopback or addr.is_unspecified or addr.is_link_local
+    except ValueError:
+        return False
+
+def is_docker_fallback_host(host: Optional[str]):
+    if is_unusable_network_host(host):
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+        return addr in ipaddress.ip_network("172.16.0.0/12")
+    except ValueError:
+        return False
+
+def get_request_host(request: Optional[Request]):
+    if not request:
+        return None
+    return (
+        host_from_url(request.headers.get("x-forwarded-host"))
+        or host_from_url(request.headers.get("host"))
+        or request.url.hostname
+    )
+
+def detect_socket_lan_host():
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return None
+    finally:
+        s.close()
+
+def get_nfs_server_host(request: Optional[Request] = None):
+    candidates = [
+        os.getenv("NFS_SERVER_HOST"),
+        os.getenv("BACKEND_PUBLIC_URL"),
+        os.getenv("BACKEND_URL"),
+        get_request_host(request),
+    ]
+
+    for candidate in candidates:
+        host = host_from_url(candidate)
+        if not is_unusable_network_host(host):
+            return host
+
+    socket_host = detect_socket_lan_host()
+    if socket_host and not is_docker_fallback_host(socket_host):
+        return socket_host
+
+    return None
 
 def unique_non_empty(values):
     seen = set()
@@ -497,33 +569,19 @@ async def get_node_usb(node_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")
 
 @router.post("/{node_id}/storage/mount")
-async def proxy_storage_mount(node_id: int, db: AsyncSession = Depends(get_db)):
+async def proxy_storage_mount(node_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """Proxied endpoint to initiate NFS mount on a node"""
     result = await db.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
 
-    # Get server IP (prioritise explicit host from ENV, then auto-detect)
-    server_ip = os.getenv("NFS_SERVER_HOST")
+    server_ip = get_nfs_server_host(request)
     if not server_ip:
-        import socket
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            # We try to find a LAN IP by connecting to a public address (not used)
-            s.connect(('8.8.8.8', 80))
-            server_ip = s.getsockname()[0]
-            # Ensure it is not a Docker internal IP (usually 172.x or 127.x)
-            if server_ip.startswith(("172.", "127.")):
-                 # Fallback to hostname -I if possible or leave for manual config
-                 server_ip = "MANUAL_IP_REQUIRED"
-        except:
-            server_ip = "SERVER_IP"
-        finally:
-            s.close()
-
-    if server_ip == "MANUAL_IP_REQUIRED":
-         raise HTTPException(status_code=400, detail="Could not auto-detect LAN IP. Please set NFS_SERVER_HOST in .env")
+        raise HTTPException(
+            status_code=400,
+            detail="Could not auto-detect the dashboard LAN host. Open the dashboard using its LAN IP/hostname, or set NFS_SERVER_HOST in .env.",
+        )
 
     payload = {
         "server": server_ip,

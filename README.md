@@ -29,7 +29,7 @@ Create a central server to manage printer profiles, configs, G-code storage, nod
 ### Backend & Dashboard (Docker Compose)
 
 1. Copy `.env.example` to `.env`.
-2. Set `NFS_SERVER_HOST` and `BACKEND_PUBLIC_URL` to the dashboard machine's LAN IP or DNS name, for example `10.1.8.137` and `http://10.1.8.137`.
+2. Optionally set `NFS_SERVER_HOST` and `BACKEND_PUBLIC_URL` to the dashboard machine's LAN IP or DNS name. For most LAN installs, leave them blank and open the dashboard using the same LAN host that nodes should use, for example `http://10.1.8.137`.
 3. Ensure you have Docker and Docker Compose installed.
 4. Run `docker-compose up -d`.
 5. Access the dashboard at `http://YOUR_SERVER_IP`.

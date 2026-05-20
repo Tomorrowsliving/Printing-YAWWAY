@@ -56,7 +56,7 @@ services:
       NFS_PERMITTED: "${NFS_PERMITTED:-*}"
       NFS_SYNC: "${NFS_SYNC:-true}"
       AGENT_PORT: "${AGENT_PORT:-8001}"
-      BACKEND_PUBLIC_URL: "${BACKEND_PUBLIC_URL:-http://localhost}"
+      BACKEND_PUBLIC_URL: "${BACKEND_PUBLIC_URL:-}"
     volumes:
       - ./storage:/mnt/klipper-farm
     depends_on:
