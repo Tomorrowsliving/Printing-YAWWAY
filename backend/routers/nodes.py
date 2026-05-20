@@ -5,12 +5,12 @@ from typing import List, Optional
 from ..database import get_db
 from ..models import Node, Event, Printer
 from ..schemas import NodeCreate, NodeHeartbeat, Node as NodeSchema
+from ..utils.network_settings import get_effective_dashboard_host, host_from_url
 import datetime
 import ipaddress
 import httpx
 import logging
 import os
-from urllib.parse import urlparse
 
 # Setup logger
 logger = logging.getLogger("klipper-farm")
@@ -29,83 +29,8 @@ def clean_string(value):
         return None
     return str(value).replace("\x00", "").strip()
 
-def host_from_url(value: Optional[str]):
-    if not value:
-        return None
-    value = str(value).strip()
-    parsed = urlparse(value if "://" in value else f"//{value}")
-    return parsed.hostname or value.split("/", 1)[0].split(":", 1)[0].strip("/")
-
-def is_placeholder_host(host: Optional[str]):
-    if not host:
-        return True
-    lowered = host.strip().lower()
-    return lowered in {
-        "localhost",
-        "server_ip",
-        "your_server_ip",
-        "manual_ip_required",
-        "0.0.0.0",
-        "::",
-        "::1",
-    }
-
-def is_unusable_network_host(host: Optional[str]):
-    if is_placeholder_host(host):
-        return True
-    try:
-        addr = ipaddress.ip_address(host)
-        return addr.is_loopback or addr.is_unspecified or addr.is_link_local
-    except ValueError:
-        return False
-
-def is_docker_fallback_host(host: Optional[str]):
-    if is_unusable_network_host(host):
-        return True
-    try:
-        addr = ipaddress.ip_address(host)
-        return addr in ipaddress.ip_network("172.16.0.0/12")
-    except ValueError:
-        return False
-
-def get_request_host(request: Optional[Request]):
-    if not request:
-        return None
-    return (
-        host_from_url(request.headers.get("x-forwarded-host"))
-        or host_from_url(request.headers.get("host"))
-        or request.url.hostname
-    )
-
-def detect_socket_lan_host():
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except Exception:
-        return None
-    finally:
-        s.close()
-
 def get_nfs_server_host(request: Optional[Request] = None):
-    candidates = [
-        os.getenv("NFS_SERVER_HOST"),
-        os.getenv("BACKEND_PUBLIC_URL"),
-        os.getenv("BACKEND_URL"),
-        get_request_host(request),
-    ]
-
-    for candidate in candidates:
-        host = host_from_url(candidate)
-        if not is_unusable_network_host(host):
-            return host
-
-    socket_host = detect_socket_lan_host()
-    if socket_host and not is_docker_fallback_host(socket_host):
-        return socket_host
-
-    return None
+    return get_effective_dashboard_host(request)
 
 def unique_non_empty(values):
     seen = set()
@@ -118,7 +43,7 @@ def unique_non_empty(values):
     return result
 
 def get_backend_public_host(request: Request):
-    configured_url = os.getenv("BACKEND_PUBLIC_URL") or os.getenv("BACKEND_URL")
+    configured_url = get_effective_dashboard_host(request) or os.getenv("BACKEND_PUBLIC_URL") or os.getenv("BACKEND_URL")
     client_host = request.client.host if request.client else None
     return host_from_url(configured_url) or request.url.hostname or client_host
 
