@@ -5,6 +5,8 @@ import socket
 import asyncio
 import httpx
 import logging
+import shutil
+import json
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
@@ -39,6 +41,9 @@ MOONRAKER_ENV_PATH = "/opt/moonraker-env"
 MAINSAIL_RELEASE_URL = "https://github.com/mainsail-crew/mainsail/releases/latest/download/mainsail.zip"
 MAINSAIL_NGINX_SITE = "/etc/nginx/sites-available/mainsail"
 MAINSAIL_NGINX_ENABLED_SITE = "/etc/nginx/sites-enabled/mainsail"
+MAINSAIL_CONFIG_PATH = os.path.join(MAINSAIL_PATH, "config.json")
+BACKUP_ROOT = os.getenv("BACKUP_PATH", "/mnt/klipper-farm/backups")
+PRINTERS_ROOT = os.getenv("PRINTERS_PATH", "/mnt/klipper-farm/printers")
 
 def get_node_uuid():
     """Get persistent UUID or generate a new one."""
@@ -84,6 +89,16 @@ class InstanceCreate(BaseModel):
     gcode_path: str
     logs_path: str
     printer_cfg_content: Optional[str] = None
+    moonraker_conf_content: Optional[str] = None
+    backend_ip: Optional[str] = None
+    node_ip: Optional[str] = None
+
+class MoonrakerRepairRequest(BaseModel):
+    printer_slug: str
+    moonraker_port: int
+    config_path: str
+    gcode_path: Optional[str] = None
+    logs_path: str
     moonraker_conf_content: Optional[str] = None
     backend_ip: Optional[str] = None
     node_ip: Optional[str] = None
@@ -249,8 +264,7 @@ def render_moonraker_config(printer_slug, moonraker_port, config_path, logs_path
         f"klippy_uds_address: /tmp/klippy_{printer_slug}",
         "",
         "[file_manager]",
-        f"config_path: {config_path}",
-        f"log_path: {logs_path}",
+        "enable_object_processing: False",
         "",
         "[authorization]",
         "trusted_clients:",
@@ -259,6 +273,147 @@ def render_moonraker_config(printer_slug, moonraker_port, config_path, logs_path
     lines.extend(["", "cors_domains:"])
     lines.extend(f"    {domain}" for domain in cors_domains)
     return "\n".join(lines) + "\n"
+
+def get_printer_data_path(config_path):
+    normalized = os.path.abspath(config_path)
+    if os.path.basename(normalized) == "config":
+        return os.path.dirname(normalized)
+    return os.path.dirname(normalized)
+
+def render_moonraker_unit(printer_slug, moonraker_conf, logs_path, data_path):
+    return f"""[Unit]
+Description=Moonraker for {printer_slug}
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/moonraker-env/bin/python /opt/moonraker/moonraker/moonraker.py -d {data_path} -c {moonraker_conf} -l {os.path.join(logs_path, "moonraker.log")}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+def path_is_within(path, root):
+    try:
+        return os.path.commonpath([os.path.abspath(path), os.path.abspath(root)]) == os.path.abspath(root)
+    except ValueError:
+        return False
+
+def moonraker_backup_path(original_path, source_path=None):
+    if not path_is_within(original_path, PRINTERS_ROOT):
+        return None
+
+    timestamp_source = source_path or original_path
+    timestamp = datetime.datetime.fromtimestamp(os.path.getmtime(timestamp_source)).strftime("%Y%m%d_%H%M%S_%f")
+    rel_path = os.path.relpath(original_path, PRINTERS_ROOT)
+    backup_dir = os.path.join(BACKUP_ROOT, "file-edits", os.path.dirname(rel_path), os.path.basename(original_path))
+    os.makedirs(backup_dir, exist_ok=True)
+
+    backup_path = os.path.join(backup_dir, f"{timestamp}_{os.path.basename(original_path)}.bak")
+    counter = 1
+    while os.path.exists(backup_path):
+        backup_path = os.path.join(backup_dir, f"{timestamp}_{counter}_{os.path.basename(original_path)}.bak")
+        counter += 1
+    return backup_path
+
+def backup_moonraker_config(moonraker_conf):
+    backup_path = moonraker_backup_path(moonraker_conf)
+    if not backup_path:
+        return None
+    shutil.copy2(moonraker_conf, backup_path)
+    return backup_path
+
+def move_legacy_moonraker_sidecar_backups(moonraker_conf):
+    moved_paths = []
+    directory = os.path.dirname(moonraker_conf)
+    prefix = f"{os.path.basename(moonraker_conf)}.bak"
+    try:
+        candidates = [
+            os.path.join(directory, name)
+            for name in os.listdir(directory)
+            if name.startswith(prefix) and os.path.isfile(os.path.join(directory, name))
+        ]
+    except FileNotFoundError:
+        return moved_paths
+
+    for candidate in candidates:
+        backup_path = moonraker_backup_path(moonraker_conf, source_path=candidate)
+        if not backup_path:
+            continue
+        shutil.move(candidate, backup_path)
+        moved_paths.append(backup_path)
+    return moved_paths
+
+def update_mainsail_config_instance(printer_slug, moonraker_port, node_ip=None):
+    if not os.path.isdir(MAINSAIL_PATH):
+        return None
+
+    node_host = host_from_url(node_ip) or get_ip()
+    config = {
+        "defaultLocale": "en",
+        "defaultMode": "dark",
+        "defaultTheme": "mainsail",
+        "hostname": None,
+        "port": None,
+        "path": None,
+        "instancesDB": "json",
+        "instances": [],
+    }
+
+    if os.path.exists(MAINSAIL_CONFIG_PATH):
+        try:
+            with open(MAINSAIL_CONFIG_PATH, "r") as f:
+                existing = json.load(f)
+            if isinstance(existing, dict):
+                config.update(existing)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    instances = config.get("instances")
+    if not isinstance(instances, list):
+        instances = []
+
+    instance = {
+        "hostname": node_host,
+        "port": int(moonraker_port),
+        "path": "/",
+        "name": printer_slug,
+    }
+
+    updated = False
+    for index, item in enumerate(instances):
+        if not isinstance(item, dict):
+            continue
+        if item.get("name") == printer_slug or (
+            item.get("hostname") == node_host and int(item.get("port", 0) or 0) == int(moonraker_port)
+        ):
+            instances[index] = {**item, **instance}
+            updated = True
+            break
+
+    if not updated:
+        instances.append(instance)
+
+    config["instances"] = instances
+    if len(instances) == 1:
+        config["hostname"] = node_host
+        config["port"] = int(moonraker_port)
+        config["path"] = "/"
+        config["instancesDB"] = "moonraker"
+    else:
+        config["hostname"] = None
+        config["port"] = None
+        config["path"] = None
+        config["instancesDB"] = "json"
+
+    with open(MAINSAIL_CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=4)
+        f.write("\n")
+
+    return instance
 
 def get_software_status():
     klippy_python = os.path.join(KLIPPY_ENV_PATH, "bin", "python")
@@ -282,8 +437,25 @@ def get_software_status():
         "systemd": os.path.exists("/run/systemd/system"),
     }
 
-def nginx_mainsail_config():
-    return """server {
+def nginx_mainsail_config(moonraker_port=None):
+    moonraker_proxy = ""
+    if moonraker_port:
+        moonraker_proxy = f"""
+    location /websocket {{
+        proxy_pass http://127.0.0.1:{int(moonraker_port)}/websocket;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+    }}
+
+    location ~ ^/(printer|server|machine|access|api|webcam|files|debug|announcements|history) {{
+        proxy_pass http://127.0.0.1:{int(moonraker_port)}$request_uri;
+        proxy_set_header Host $host;
+    }}
+"""
+
+    return f"""server {{
     listen 80 default_server;
     listen [::]:80 default_server;
 
@@ -291,12 +463,33 @@ def nginx_mainsail_config():
     index index.html;
 
     server_name _;
+{moonraker_proxy}
 
-    location / {
+    location / {{
         try_files $uri $uri/ /index.html;
-    }
-}
+    }}
+}}
 """
+
+def update_mainsail_nginx_proxy(moonraker_port):
+    if not os.path.exists("/usr/sbin/nginx") and not os.path.exists("/usr/bin/nginx"):
+        return False
+
+    config = nginx_mainsail_config(moonraker_port)
+    os.makedirs(os.path.dirname(MAINSAIL_NGINX_SITE), exist_ok=True)
+    with open(MAINSAIL_NGINX_SITE, "w") as f:
+        f.write(config)
+
+    if not os.path.exists(MAINSAIL_NGINX_ENABLED_SITE):
+        os.makedirs(os.path.dirname(MAINSAIL_NGINX_ENABLED_SITE), exist_ok=True)
+        try:
+            os.symlink(MAINSAIL_NGINX_SITE, MAINSAIL_NGINX_ENABLED_SITE)
+        except FileExistsError:
+            pass
+
+    run_checked(["sudo", "nginx", "-t"], timeout=30)
+    run_checked(["sudo", "systemctl", "restart", "nginx"], timeout=60)
+    return True
 
 def clean_string(value):
     if value is None:
@@ -447,20 +640,12 @@ RestartSec=10
 WantedBy=multi-user.target
 """
 
-    moonraker_unit = f"""[Unit]
-Description=Moonraker for {data.printer_slug}
-After=network.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=/opt/moonraker-env/bin/python /opt/moonraker/moonraker/moonraker.py -c {moonraker_conf} -l {os.path.join(data.logs_path, "moonraker.log")}
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-"""
+    moonraker_unit = render_moonraker_unit(
+        printer_slug=data.printer_slug,
+        moonraker_conf=moonraker_conf,
+        logs_path=data.logs_path,
+        data_path=get_printer_data_path(data.config_path),
+    )
 
     try:
         # We use a temp file and sudo mv to handle permissions safely if agent is not root
@@ -475,6 +660,8 @@ WantedBy=multi-user.target
         subprocess.run(["sudo", "systemctl", "enable", moonraker_service], check=True)
         subprocess.run(["sudo", "systemctl", "start", klipper_service], check=True)
         subprocess.run(["sudo", "systemctl", "start", moonraker_service], check=True)
+        update_mainsail_config_instance(data.printer_slug, data.moonraker_port, data.node_ip)
+        update_mainsail_nginx_proxy(data.moonraker_port)
     except Exception as e:
         logger.error(f"Failed to install systemd units: {e}")
         return {"status": "partial_success", "message": f"Configs created but systemd install failed: {e}"}
@@ -502,6 +689,81 @@ async def restart_instance(service: str = Body(..., embed=True)):
     validate_service_name(service)
     subprocess.run(["sudo", "systemctl", "restart", service])
     return {"status": "restarted"}
+
+@app.post("/instances/repair-moonraker")
+async def repair_moonraker_instance(data: MoonrakerRepairRequest):
+    service = f"moonraker-{data.printer_slug}.service"
+    validate_service_name(service)
+
+    data_path = get_printer_data_path(data.config_path)
+    moonraker_conf = os.path.join(data.config_path, "moonraker.conf")
+    moonraker_unit = f"/etc/systemd/system/{service}"
+    changes = []
+    backup_paths = []
+
+    try:
+        os.makedirs(data.config_path, exist_ok=True)
+        os.makedirs(data.logs_path, exist_ok=True)
+        if data.gcode_path:
+            os.makedirs(data.gcode_path, exist_ok=True)
+        os.makedirs(data_path, exist_ok=True)
+
+        if os.path.exists(moonraker_conf):
+            backup_path = backup_moonraker_config(moonraker_conf)
+            if backup_path:
+                backup_paths.append(backup_path)
+                changes.append(f"Backed up moonraker.conf to {backup_path}")
+
+        moved_legacy_paths = move_legacy_moonraker_sidecar_backups(moonraker_conf)
+        if moved_legacy_paths:
+            backup_paths.extend(moved_legacy_paths)
+            changes.append(f"Moved {len(moved_legacy_paths)} legacy Moonraker backup(s) into central backups")
+
+        config_content = data.moonraker_conf_content or render_moonraker_config(
+            printer_slug=data.printer_slug,
+            moonraker_port=data.moonraker_port,
+            config_path=data.config_path,
+            logs_path=data.logs_path,
+            backend_ip=data.backend_ip,
+            node_ip=data.node_ip,
+        )
+        with open(moonraker_conf, "w") as f:
+            f.write(config_content)
+        changes.append("Rewrote moonraker.conf without deprecated file_manager paths")
+
+        unit_content = render_moonraker_unit(
+            printer_slug=data.printer_slug,
+            moonraker_conf=moonraker_conf,
+            logs_path=data.logs_path,
+            data_path=data_path,
+        )
+        temp_unit = f"/tmp/{service}"
+        with open(temp_unit, "w") as f:
+            f.write(unit_content)
+        run_checked(["sudo", "mv", temp_unit, moonraker_unit], timeout=30)
+        changes.append(f"Updated {service} to use data path {data_path}")
+
+        run_checked(["sudo", "systemctl", "daemon-reload"], timeout=30)
+        run_checked(["sudo", "systemctl", "restart", service], timeout=60)
+        changes.append(f"Restarted {service}")
+
+        mainsail_instance = update_mainsail_config_instance(data.printer_slug, data.moonraker_port, data.node_ip)
+        if mainsail_instance:
+            changes.append(f"Updated Mainsail printer entry for {mainsail_instance['hostname']}:{mainsail_instance['port']}")
+        if update_mainsail_nginx_proxy(data.moonraker_port):
+            changes.append(f"Updated Mainsail nginx proxy for Moonraker port {data.moonraker_port}")
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=describe_process_error(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to repair Moonraker config: {e}")
+
+    return {
+        "status": "success",
+        "message": f"Moonraker config repaired for {data.printer_slug}",
+        "data_path": data_path,
+        "backup_paths": backup_paths,
+        "changes": changes,
+    }
 
 @app.get("/software/status")
 @app.get("/software/check")

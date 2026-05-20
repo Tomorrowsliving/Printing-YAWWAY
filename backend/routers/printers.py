@@ -1,13 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select
 from typing import List, Optional
 import asyncio
 import httpx
+import os
+import posixpath
 from ..database import get_db
-from ..models import Assignment, Event, FileRecord, Printer, Node, PrinterNote
+from ..models import Assignment, Backup, Event, FileRecord, Printer, Node, PrinterNote
 from ..schemas import PrinterCreate, Printer as PrinterSchema, PrinterDetail
-from .nodes import serialize_node
+from ..utils.file_backups import BACKUP_ROOT, FILE_EDIT_BACKUP_TYPE
+from .nodes import serialize_node, get_backend_public_host
 import datetime
 
 router = APIRouter(prefix="/printers", tags=["printers"])
@@ -119,6 +122,44 @@ def serialize_printer(printer, include_node=False, runtime_override=None, status
         data["node"] = serialize_node(printer.node)
     return data
 
+async def get_printer_and_assigned_node(printer_id: int, db: AsyncSession):
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(status_code=404, detail="Printer not found")
+    if not printer.assigned_node_id:
+        raise HTTPException(status_code=400, detail="Printer not assigned to any node")
+
+    node_result = await db.execute(select(Node).where(Node.id == printer.assigned_node_id))
+    node = node_result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Assigned node not found")
+    return printer, node
+
+async def fetch_moonraker_json(node: Node, moonraker_port: int, path: str, timeout: float = 3.0):
+    url = f"http://{node.ip_address}:{moonraker_port}{path}"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=timeout)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach Moonraker at {url}: {e}")
+
+    if res.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Moonraker returned HTTP {res.status_code}: {res.text}")
+    return res.json()
+
+async def post_moonraker_json(node: Node, moonraker_port: int, path: str, payload: dict, timeout: float = 10.0):
+    url = f"http://{node.ip_address}:{moonraker_port}{path}"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, json=payload, timeout=timeout)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach Moonraker at {url}: {e}")
+
+    if res.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Moonraker returned HTTP {res.status_code}: {res.text}")
+    return res.json()
+
 @router.post("/", response_model=PrinterSchema)
 async def create_printer(printer_in: PrinterCreate, db: AsyncSession = Depends(get_db)):
     validate_printer_payload(printer_in)
@@ -205,6 +246,62 @@ async def get_printer_detail(printer_id: int, db: AsyncSession = Depends(get_db)
 
     return data
 
+@router.get("/{printer_id}/runtime")
+async def get_printer_runtime_snapshot(printer_id: int, db: AsyncSession = Depends(get_db)):
+    printer, node = await get_printer_and_assigned_node(printer_id, db)
+    if not printer.moonraker_port:
+        raise HTTPException(status_code=400, detail="Printer Moonraker port is missing")
+
+    objects = [
+        "toolhead",
+        "gcode_move",
+        "print_stats",
+        "virtual_sdcard",
+        "extruder",
+        "heater_bed",
+        "webhooks",
+    ]
+    payload = await fetch_moonraker_json(
+        node,
+        printer.moonraker_port,
+        f"/printer/objects/query?{'&'.join(objects)}",
+    )
+    result = payload.get("result", payload)
+    return {
+        "eventtime": result.get("eventtime"),
+        "status": result.get("status", {}),
+        "moonraker_url": f"http://{node.ip_address}:{printer.moonraker_port}",
+    }
+
+@router.post("/{printer_id}/home")
+async def home_printer_axis(printer_id: int, axis: str = Body(..., embed=True), db: AsyncSession = Depends(get_db)):
+    printer, node = await get_printer_and_assigned_node(printer_id, db)
+    if not printer.moonraker_port:
+        raise HTTPException(status_code=400, detail="Printer Moonraker port is missing")
+
+    target_axis = (axis or "").strip().upper()
+    if target_axis not in {"X", "Y", "Z", "ALL"}:
+        raise HTTPException(status_code=400, detail="Axis must be X, Y, Z, or ALL")
+
+    script = "G28" if target_axis == "ALL" else f"G28 {target_axis}"
+    response = await post_moonraker_json(
+        node,
+        printer.moonraker_port,
+        "/printer/gcode/script",
+        {"script": script},
+        timeout=15.0,
+    )
+
+    db.add(Event(
+        printer_id=printer.id,
+        node_id=node.id,
+        severity="info",
+        event_type="printer_home_axis",
+        message=f"Sent {script} to printer {printer.name}",
+    ))
+    await db.commit()
+    return {"status": "success", "axis": target_axis, "script": script, "moonraker_response": response}
+
 @router.post("/{printer_id}/restart")
 async def restart_printer_services(printer_id: int, target: str = Body(..., embed=True), db: AsyncSession = Depends(get_db)):
     """Remote restart for specific printer services (klipper, moonraker, or both)"""
@@ -245,3 +342,68 @@ async def restart_printer_services(printer_id: int, target: str = Body(..., embe
     await db.commit()
 
     return {"status": "success", "results": results}
+
+@router.post("/{printer_id}/repair-moonraker")
+async def repair_printer_moonraker(printer_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(status_code=404, detail="Printer not found")
+    if not printer.assigned_node_id:
+        raise HTTPException(status_code=400, detail="Printer not assigned to any node")
+    if not printer.config_path or not printer.moonraker_port:
+        raise HTTPException(status_code=400, detail="Printer config path or Moonraker port is missing")
+
+    node_result = await db.execute(select(Node).where(Node.id == printer.assigned_node_id))
+    node = node_result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Assigned node not found")
+
+    data_path = posixpath.dirname(printer.config_path.rstrip("/"))
+    payload = {
+        "printer_slug": printer.slug,
+        "moonraker_port": printer.moonraker_port,
+        "config_path": printer.config_path,
+        "gcode_path": printer.gcode_path or posixpath.join(data_path, "gcodes"),
+        "logs_path": posixpath.join(data_path, "logs"),
+        "backend_ip": get_backend_public_host(request),
+        "node_ip": node.ip_address,
+    }
+
+    url = f"http://{node.ip_address}:{node.agent_port}/instances/repair-moonraker"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, json=payload, timeout=30)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}: {e}")
+
+    if res.status_code >= 400:
+        try:
+            error_payload = res.json()
+            detail = error_payload.get("detail", error_payload)
+        except Exception:
+            detail = res.text
+        raise HTTPException(status_code=502, detail=f"Node repair failed: {detail}")
+
+    response = res.json()
+    for backup_path in response.get("backup_paths") or []:
+        result = await db.execute(select(Backup).where(Backup.file_path == backup_path))
+        if result.scalar_one_or_none():
+            continue
+        db.add(Backup(
+            filename=os.path.relpath(backup_path, BACKUP_ROOT).replace(os.sep, "/"),
+            file_path=backup_path,
+            backup_type=FILE_EDIT_BACKUP_TYPE,
+            status="success",
+        ))
+
+    db.add(Event(
+        printer_id=printer.id,
+        node_id=node.id,
+        severity="info",
+        event_type="moonraker_repair",
+        message=f"Repaired Moonraker config for printer {printer.name}",
+        details=response,
+    ))
+    await db.commit()
+    return response
