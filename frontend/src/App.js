@@ -1,5 +1,6 @@
-import React, { useState, useCallback } from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import React, { useState, useCallback, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import axios from 'axios';
 import Layout from './components/Layout';
 import Fleet from './pages/Fleet';
 import Nodes from './pages/Nodes';
@@ -9,7 +10,62 @@ import Assignments from './pages/Assignments';
 import Events from './pages/Events';
 import Backups from './pages/Backups';
 import Settings from './pages/Settings';
+import NetworkSetup from './pages/NetworkSetup';
 import { ToastContainer } from './components/UI';
+
+const NETWORK_SETUP_ROUTE = '/setup/network';
+
+const AppRoutes = ({ addToast }) => {
+  const location = useLocation();
+  const [networkSetupRequired, setNetworkSetupRequired] = useState(null);
+
+  const refreshNetworkSetupRequired = useCallback(async () => {
+    try {
+      const res = await axios.get('/api/settings/network');
+      setNetworkSetupRequired(Boolean(res.data.requires_setup));
+    } catch (err) {
+      console.error("Network setup check error:", err);
+      setNetworkSetupRequired(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshNetworkSetupRequired();
+  }, [refreshNetworkSetupRequired]);
+
+  const handleNetworkSaved = (settings) => {
+    setNetworkSetupRequired(Boolean(settings.requires_setup));
+  };
+
+  if (networkSetupRequired === null) {
+    return (
+      <div className="min-h-[320px] flex items-center justify-center text-sm text-slate-400">
+        Checking network setup...
+      </div>
+    );
+  }
+
+  if (networkSetupRequired && location.pathname !== NETWORK_SETUP_ROUTE) {
+    return <Navigate to={NETWORK_SETUP_ROUTE} replace />;
+  }
+
+  return (
+    <Routes>
+      <Route path="/" element={<Fleet addToast={addToast} />} />
+      <Route path="/nodes" element={<Nodes addToast={addToast} />} />
+      <Route path="/printers/:id" element={<PrinterDetail addToast={addToast} />} />
+      <Route path="/assignments" element={<Assignments addToast={addToast} />} />
+      <Route path="/files" element={<Files addToast={addToast} />} />
+      <Route path="/backups" element={<Backups addToast={addToast} />} />
+      <Route path="/events" element={<Events addToast={addToast} />} />
+      <Route path="/settings" element={<Settings addToast={addToast} />} />
+      <Route
+        path={NETWORK_SETUP_ROUTE}
+        element={<NetworkSetup addToast={addToast} onNetworkSaved={handleNetworkSaved} />}
+      />
+    </Routes>
+  );
+};
 
 function App() {
   const [toasts, setToasts] = useState([]);
@@ -29,16 +85,7 @@ function App() {
   return (
     <Router>
       <Layout>
-        <Routes>
-          <Route path="/" element={<Fleet addToast={addToast} />} />
-          <Route path="/nodes" element={<Nodes addToast={addToast} />} />
-          <Route path="/printers/:id" element={<PrinterDetail addToast={addToast} />} />
-          <Route path="/assignments" element={<Assignments addToast={addToast} />} />
-          <Route path="/files" element={<Files addToast={addToast} />} />
-          <Route path="/backups" element={<Backups addToast={addToast} />} />
-          <Route path="/events" element={<Events addToast={addToast} />} />
-          <Route path="/settings" element={<Settings addToast={addToast} />} />
-        </Routes>
+        <AppRoutes addToast={addToast} />
       </Layout>
       <ToastContainer toasts={toasts} removeToast={removeToast} />
     </Router>

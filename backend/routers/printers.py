@@ -1,47 +1,99 @@
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from typing import List, Optional
 import asyncio
 import httpx
 from ..database import get_db
-from ..models import Printer, Node, PrinterNote, Event
+from ..models import Assignment, Event, FileRecord, Printer, Node, PrinterNote
 from ..schemas import PrinterCreate, Printer as PrinterSchema, PrinterDetail
 from .nodes import serialize_node
 import datetime
 
 router = APIRouter(prefix="/printers", tags=["printers"])
 
-async def probe_printer_status(printer):
+def validate_printer_payload(printer_in):
+    name = (printer_in.name or "").strip()
+    slug = (printer_in.slug or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Printer name is required")
+    if not slug:
+        raise HTTPException(status_code=400, detail="Printer slug is required")
+    printer_in.name = name
+    printer_in.slug = slug
+
+async def probe_printer_runtime(printer):
+    fallback = {
+        "status": printer.status or "offline",
+        "status_message": "",
+        "moonraker_warnings": [],
+    }
+
     if not printer.assigned_node_id or not printer.node or not printer.moonraker_port:
-        return printer.status or "offline"
+        fallback["status"] = printer.status or "offline"
+        fallback["status_message"] = "Printer is not assigned to a node or Moonraker port is missing."
+        return fallback
 
     url = f"http://{printer.node.ip_address}:{printer.moonraker_port}/server/info"
+    printer_info_url = f"http://{printer.node.ip_address}:{printer.moonraker_port}/printer/info"
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(url, timeout=1.5)
         if res.status_code != 200:
-            return "offline"
+            fallback["status"] = "offline"
+            fallback["status_message"] = f"Moonraker returned HTTP {res.status_code} from /server/info."
+            return fallback
 
         payload = res.json()
         info = payload.get("result", payload)
         klippy_state = str(info.get("klippy_state") or "").lower()
         klippy_connected = info.get("klippy_connected")
+        warnings = info.get("warnings") or []
+        status_message = ""
+
+        try:
+            async with httpx.AsyncClient() as client:
+                printer_res = await client.get(printer_info_url, timeout=1.5)
+            if printer_res.status_code == 200:
+                printer_info = printer_res.json().get("result", printer_res.json())
+                status_message = printer_info.get("state_message") or ""
+        except Exception:
+            pass
+
+        runtime = {
+            "status": "offline",
+            "status_message": status_message.strip(),
+            "moonraker_warnings": warnings,
+        }
 
         if klippy_state == "ready":
-            return "idle"
+            runtime["status"] = "idle"
+            return runtime
         if klippy_state in ("error", "shutdown"):
-            return "error"
+            runtime["status"] = "error"
+            if not runtime["status_message"]:
+                runtime["status_message"] = f"Klipper is in {klippy_state} state."
+            return runtime
         if klippy_state in ("startup", "connecting"):
-            return "starting"
+            runtime["status"] = "starting"
+            return runtime
         if klippy_connected is True:
-            return "online"
-        return "offline"
-    except Exception:
-        return "offline"
+            runtime["status"] = "online"
+            return runtime
+        if not runtime["status_message"]:
+            runtime["status_message"] = "Moonraker is reachable, but Klipper is not connected."
+        return runtime
+    except Exception as e:
+        fallback["status"] = "offline"
+        fallback["status_message"] = f"Could not reach Moonraker at {url}: {e}"
+        return fallback
 
-def serialize_printer(printer, include_node=False, status_override=None):
+async def probe_printer_status(printer):
+    return (await probe_printer_runtime(printer))["status"]
+
+def serialize_printer(printer, include_node=False, runtime_override=None, status_override=None):
     """Utility to serialize SQLAlchemy Printer model to dict to avoid MissingGreenlet errors"""
+    runtime = runtime_override or {}
     data = {
         "id": printer.id,
         "name": printer.name,
@@ -55,7 +107,9 @@ def serialize_printer(printer, include_node=False, status_override=None):
         "gcode_path": printer.gcode_path,
         "webcam_url": printer.webcam_url,
         "embedded_ui_url": printer.embedded_ui_url,
-        "status": status_override if status_override is not None else printer.status,
+        "status": runtime.get("status") or (status_override if status_override is not None else printer.status),
+        "status_message": runtime.get("status_message") or "",
+        "moonraker_warnings": runtime.get("moonraker_warnings") or [],
         "last_seen": printer.last_seen,
         "assigned_node_id": printer.assigned_node_id,
         "created_at": printer.created_at,
@@ -67,6 +121,7 @@ def serialize_printer(printer, include_node=False, status_override=None):
 
 @router.post("/", response_model=PrinterSchema)
 async def create_printer(printer_in: PrinterCreate, db: AsyncSession = Depends(get_db)):
+    validate_printer_payload(printer_in)
     printer = Printer(**printer_in.model_dump())
     printer.created_at = datetime.datetime.now(datetime.timezone.utc)
     db.add(printer)
@@ -87,10 +142,10 @@ async def create_printer(printer_in: PrinterCreate, db: AsyncSession = Depends(g
 async def list_printers(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Printer))
     printers = result.scalars().all()
-    statuses = await asyncio.gather(*(probe_printer_status(p) for p in printers))
+    runtimes = await asyncio.gather(*(probe_printer_runtime(p) for p in printers))
     return [
-        serialize_printer(printer, include_node=True, status_override=status)
-        for printer, status in zip(printers, statuses)
+        serialize_printer(printer, include_node=True, runtime_override=runtime)
+        for printer, runtime in zip(printers, runtimes)
     ]
 
 @router.get("/{printer_id}", response_model=PrinterSchema)
@@ -103,6 +158,7 @@ async def get_printer(printer_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.put("/{printer_id}", response_model=PrinterSchema)
 async def update_printer(printer_id: int, printer_in: PrinterCreate, db: AsyncSession = Depends(get_db)):
+    validate_printer_payload(printer_in)
     result = await db.execute(select(Printer).where(Printer.id == printer_id))
     printer = result.scalar_one_or_none()
     if not printer:
@@ -115,6 +171,27 @@ async def update_printer(printer_id: int, printer_in: PrinterCreate, db: AsyncSe
     await db.refresh(printer)
     return serialize_printer(printer)
 
+@router.delete("/{printer_id}")
+async def delete_printer(printer_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(status_code=404, detail="Printer not found")
+
+    printer_name = printer.name
+    await db.execute(delete(Assignment).where(Assignment.printer_id == printer_id))
+    await db.execute(delete(PrinterNote).where(PrinterNote.printer_id == printer_id))
+    await db.execute(delete(FileRecord).where(FileRecord.printer_id == printer_id))
+    await db.execute(delete(Event).where(Event.printer_id == printer_id))
+    await db.delete(printer)
+    db.add(Event(
+        severity="warning",
+        event_type="printer_deleted",
+        message=f"Printer {printer_name} was removed from the fleet"
+    ))
+    await db.commit()
+    return {"status": "success", "message": f"Printer {printer_name} deleted"}
+
 @router.get("/{printer_id}/detail", response_model=PrinterDetail)
 async def get_printer_detail(printer_id: int, db: AsyncSession = Depends(get_db)):
     """Extended endpoint that explicitly loads the assigned node"""
@@ -123,8 +200,8 @@ async def get_printer_detail(printer_id: int, db: AsyncSession = Depends(get_db)
     if not printer:
         raise HTTPException(status_code=404, detail="Printer not found")
 
-    status = await probe_printer_status(printer)
-    data = serialize_printer(printer, include_node=True, status_override=status)
+    runtime = await probe_printer_runtime(printer)
+    data = serialize_printer(printer, include_node=True, runtime_override=runtime)
 
     return data
 

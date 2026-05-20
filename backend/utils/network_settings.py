@@ -147,4 +147,5 @@ def describe_network_state(request=None):
         "effective_host": effective_host or "",
         "browser_host_usable": bool(browser_host and not is_unusable_network_host(browser_host)),
         "saved_host_usable": bool(saved["dashboard_host"]),
+        "requires_setup": not bool(saved["dashboard_host"] or env_host),
     }

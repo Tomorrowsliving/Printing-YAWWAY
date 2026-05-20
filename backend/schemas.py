@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List
 from datetime import datetime
 
@@ -71,6 +71,8 @@ class Printer(PrinterBase):
     id: int
     assigned_node_id: Optional[int]
     status: str
+    status_message: Optional[str] = None
+    moonraker_warnings: List[str] = Field(default_factory=list)
     last_seen: Optional[datetime]
     created_at: datetime
     updated_at: Optional[datetime]

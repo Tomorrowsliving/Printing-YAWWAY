@@ -1,12 +1,33 @@
 import React, { useState, useEffect } from 'react';
 import {
   Printer, Play, AlertTriangle, ExternalLink, Settings as SettingsIcon,
-  RefreshCw, Plus, Loader2, ChevronRight, ChevronLeft, Server, Usb, Check, ShieldAlert, Upload, Book, FileCode
+  RefreshCw, Plus, Loader2, ChevronRight, ChevronLeft, Server, Usb, Check, ShieldAlert, Upload, Book, FileCode, Trash2
 } from 'lucide-react';
 import { printerService, nodeService } from '../services/api';
 import { Link } from 'react-router-dom';
 import { Modal } from '../components/UI';
 import axios from 'axios';
+
+const defaultFormData = {
+  name: '',
+  slug: '',
+  model: '',
+  assigned_node_id: null,
+  expected_mcu_serial: '',
+  moonraker_port: 7125,
+  webcam_url: '',
+  embedded_ui_url: '',
+  printer_cfg_content: '',
+  config_source: 'minimal' // upload, example, minimal
+};
+
+const slugify = (value) => (
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+);
 
 const Fleet = ({ addToast }) => {
   const [printers, setPrinters] = useState([]);
@@ -26,20 +47,11 @@ const Fleet = ({ addToast }) => {
   const [storageLoading, setStorageLoading] = useState(false);
   const [examples, setExamples] = useState([]);
   const [examplesLoading, setExamplesLoading] = useState(false);
+  const [examplesError, setExamplesError] = useState('');
+  const [exampleFilter, setExampleFilter] = useState('');
   const [selectedExample, setSelectedNodeExample] = useState(null);
 
-  const [formData, setFormData] = useState({
-    name: '',
-    slug: '',
-    model: '',
-    assigned_node_id: null,
-    expected_mcu_serial: '',
-    moonraker_port: 7125,
-    webcam_url: '',
-    embedded_ui_url: '',
-    printer_cfg_content: '',
-    config_source: 'minimal' // upload, example, minimal
-  });
+  const [formData, setFormData] = useState(defaultFormData);
 
   useEffect(() => {
     fetchPrinters();
@@ -167,11 +179,14 @@ const Fleet = ({ addToast }) => {
 
   const fetchExamples = async () => {
     setExamplesLoading(true);
+    setExamplesError('');
     try {
       const res = await axios.get('/api/files/examples/klipper');
-      setExamples(res.data);
+      setExamples(Array.isArray(res.data) ? res.data : []);
     } catch (err) {
-      addToast("Failed to fetch Klipper example configs", "error");
+      const message = err.response?.data?.detail || "Failed to fetch Klipper example configs";
+      setExamplesError(message);
+      addToast(message, "error");
     } finally {
       setExamplesLoading(false);
     }
@@ -192,12 +207,59 @@ const Fleet = ({ addToast }) => {
     }
   };
 
+  const resetWizard = () => {
+    setStep(1);
+    setMcus({ available: [], used: [] });
+    setSoftwareStatus(null);
+    setAdvancedInstallOpen(false);
+    setStorageCheck(null);
+    setExamples([]);
+    setExamplesError('');
+    setExampleFilter('');
+    setSelectedNodeExample(null);
+    setFormData(defaultFormData);
+  };
+
+  const closeWizard = () => {
+    setIsModalOpen(false);
+    resetWizard();
+  };
+
+  const validatePrinterProfile = () => {
+    const name = formData.name.trim();
+    const slug = slugify(formData.slug || name);
+
+    if (!name) {
+      addToast("Enter a printer name before continuing", "error");
+      return null;
+    }
+    if (!slug) {
+      addToast("Enter a valid printer slug before continuing", "error");
+      return null;
+    }
+
+    setFormData(prev => ({ ...prev, name, slug }));
+    return { name, slug };
+  };
+
+  const handleProfileNext = () => {
+    if (validatePrinterProfile()) {
+      setStep(2);
+    }
+  };
+
   const handleInputChange = (e) => {
     const { name, value } = e.target;
     setFormData(prev => {
       const newData = { ...prev, [name]: value };
-      if (name === 'name' && !prev.slug) {
-        newData.slug = value.toLowerCase().replace(/[^a-z0-9]/g, '-');
+      if (name === 'name') {
+        const previousAutoSlug = slugify(prev.name);
+        if (!prev.slug || prev.slug === previousAutoSlug) {
+          newData.slug = slugify(value);
+        }
+      }
+      if (name === 'slug') {
+        newData.slug = slugify(value);
       }
       return newData;
     });
@@ -234,38 +296,69 @@ const Fleet = ({ addToast }) => {
     }
   };
 
+  const handleDeletePrinter = async (printer) => {
+    if (!window.confirm(`Delete ${printer.name || 'this printer'} from the fleet?`)) return;
+
+    try {
+      await printerService.deletePrinter(printer.id);
+      addToast(`${printer.name || 'Printer'} deleted`, "success");
+      fetchPrinters();
+    } catch (err) {
+      addToast(err.response?.data?.detail || "Failed to delete printer", "error");
+    }
+  };
+
   const handleSubmit = async () => {
+    const profile = validatePrinterProfile();
+    if (!profile) return;
+
+    if (!formData.assigned_node_id) {
+      addToast("Select a target node before provisioning", "error");
+      return;
+    }
+
     setIsSubmitting(true);
+    let createdPrinterId = null;
     try {
       const selectedNode = nodes.find(n => n.id === formData.assigned_node_id);
+      if (!selectedNode) {
+        addToast("Selected node is no longer available", "error");
+        return;
+      }
+
       const mainsailUrl = selectedNode?.ip_address ? `http://${selectedNode.ip_address}` : formData.embedded_ui_url;
       // 1. Create printer record in central DB
-      await printerService.createPrinter({
+      const createRes = await printerService.createPrinter({
         ...formData,
+        name: profile.name,
+        slug: profile.slug,
         status: 'offline',
-        klipper_service_name: `klipper-${formData.slug}`,
-        moonraker_service_name: `moonraker-${formData.slug}`,
-        config_path: `/mnt/klipper-farm/printers/${formData.slug}/config`,
-        gcode_path: `/mnt/klipper-farm/printers/${formData.slug}/gcodes`,
+        klipper_service_name: `klipper-${profile.slug}`,
+        moonraker_service_name: `moonraker-${profile.slug}`,
+        config_path: `/mnt/klipper-farm/printers/${profile.slug}/config`,
+        gcode_path: `/mnt/klipper-farm/printers/${profile.slug}/gcodes`,
         embedded_ui_url: formData.embedded_ui_url || mainsailUrl,
       });
+      createdPrinterId = createRes.data?.id;
 
       // 2. Instruct node agent to create instance
       await nodeService.createNodeInstance(formData.assigned_node_id, {
-        printer_slug: formData.slug,
+        printer_slug: profile.slug,
         mcu_serial: formData.expected_mcu_serial,
         moonraker_port: formData.moonraker_port,
-        config_path: `/mnt/klipper-farm/printers/${formData.slug}/config`,
-        gcode_path: `/mnt/klipper-farm/printers/${formData.slug}/gcodes`,
-        logs_path: `/mnt/klipper-farm/printers/${formData.slug}/logs`,
+        config_path: `/mnt/klipper-farm/printers/${profile.slug}/config`,
+        gcode_path: `/mnt/klipper-farm/printers/${profile.slug}/gcodes`,
+        logs_path: `/mnt/klipper-farm/printers/${profile.slug}/logs`,
         printer_cfg_content: formData.printer_cfg_content
       });
 
-      addToast(`Printer ${formData.name} initialised!`, 'success');
-      setIsModalOpen(false);
-      setStep(1);
+      addToast(`Printer ${profile.name} initialised!`, 'success');
+      closeWizard();
       fetchPrinters();
     } catch (err) {
+      if (createdPrinterId) {
+        await printerService.deletePrinter(createdPrinterId).catch(() => {});
+      }
       addToast(err.response?.data?.detail || "Failed to create printer", 'error');
     } finally {
       setIsSubmitting(false);
@@ -301,6 +394,9 @@ const Fleet = ({ addToast }) => {
   const nfsReady = Boolean(storageCheck?.nfs_available || (storageCheck?.mounted && storageCheck?.writable));
   const statusClass = (ok) => ok ? 'text-green-500' : 'text-red-400';
   const runtimeClass = runtimeLabel === 'Installed' ? 'text-green-500' : runtimeLabel === 'Partial' ? 'text-orange-400' : 'text-red-400';
+  const filteredExamples = examples.filter(example =>
+    example.name.toLowerCase().includes(exampleFilter.trim().toLowerCase())
+  );
 
   if (loading && printers.length === 0) {
     return (
@@ -350,6 +446,14 @@ const Fleet = ({ addToast }) => {
                     {assignedNode?.ip_address && <p className="text-[10px] text-slate-500 font-mono">{assignedNode.ip_address}</p>}
                   </div>
                   <div className="flex space-x-2">
+                    <button
+                      onClick={() => handleDeletePrinter(printer)}
+                      className="p-2 bg-red-900/20 hover:bg-red-900/40 rounded-lg transition-colors text-red-400"
+                      title="Delete Printer"
+                      aria-label={`Delete ${printer.name}`}
+                    >
+                      <Trash2 size={16} />
+                    </button>
                     <Link to={`/printers/${printer.id}`} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors text-slate-300">
                       <SettingsIcon size={16} />
                     </Link>
@@ -395,7 +499,7 @@ const Fleet = ({ addToast }) => {
         {printers.length === 0 && <div className="col-span-full py-16 text-center text-slate-500 italic border border-dashed border-slate-700 rounded-xl">No printers found. Click Add Printer to begin.</div>}
       </div>
 
-      <Modal isOpen={isModalOpen} onClose={() => { setIsModalOpen(false); setStep(1); }} title={`Guided Printer Setup - Step ${step} of 5`}>
+      <Modal isOpen={isModalOpen} onClose={closeWizard} title={`Guided Printer Setup - Step ${step} of 5`}>
         {step === 1 && (
           <div className="space-y-4">
             <h3 className="font-bold text-slate-300">1. Printer Profile</h3>
@@ -404,7 +508,7 @@ const Fleet = ({ addToast }) => {
                <div><label className="text-[10px] font-bold text-slate-500 uppercase">Model</label><input name="model" value={formData.model} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
                <div><label className="text-[10px] font-bold text-slate-500 uppercase">Slug</label><input name="slug" value={formData.slug} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
             </div>
-            <div className="flex justify-end pt-4"><button onClick={() => setStep(2)} className="bg-blue-600 px-6 py-2 rounded-lg font-bold flex items-center">Next <ChevronRight size={18} /></button></div>
+            <div className="flex justify-end pt-4"><button onClick={handleProfileNext} className="bg-blue-600 px-6 py-2 rounded-lg font-bold flex items-center">Next <ChevronRight size={18} /></button></div>
           </div>
         )}
 
@@ -571,10 +675,21 @@ const Fleet = ({ addToast }) => {
            <div className="space-y-4">
               <h3 className="font-bold text-slate-300">Select Klipper Example</h3>
               <div className="bg-slate-900 rounded-xl border border-slate-700 overflow-hidden">
-                 <div className="p-2 border-b border-slate-800"><input placeholder="Filter templates..." className="w-full bg-slate-800 rounded-lg px-3 py-1.5 text-xs outline-none" /></div>
+                 <div className="p-2 border-b border-slate-800">
+                    <input
+                      value={exampleFilter}
+                      onChange={(e) => setExampleFilter(e.target.value)}
+                      placeholder="Filter templates..."
+                      className="w-full bg-slate-800 rounded-lg px-3 py-1.5 text-xs outline-none"
+                    />
+                 </div>
                  <div className="max-h-64 overflow-y-auto">
-                    {examplesLoading ? <div className="p-12 flex justify-center"><Loader2 className="animate-spin text-blue-500" /></div> : (
-                       examples.map(ex => (
+                    {examplesLoading ? <div className="p-12 flex justify-center"><Loader2 className="animate-spin text-blue-500" /></div> : examplesError ? (
+                       <div className="p-8 text-center text-xs text-red-300">{examplesError}</div>
+                    ) : filteredExamples.length === 0 ? (
+                       <div className="p-8 text-center text-xs text-slate-500">No example configs found.</div>
+                    ) : (
+                       filteredExamples.map(ex => (
                          <button key={ex.name} onClick={() => selectExample(ex)} className="w-full px-4 py-2.5 text-left text-xs hover:bg-blue-600/10 hover:text-blue-400 border-b border-slate-800/50 last:border-none">
                             {ex.name}
                          </button>

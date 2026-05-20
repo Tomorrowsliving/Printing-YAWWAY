@@ -97,6 +97,31 @@ const PrinterDetail = ({ addToast }) => {
               </button>
             </div>
 
+            {printer.status_message && (
+              <div className="mb-6 rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-red-100">
+                <div className="flex items-start space-x-3">
+                  <ShieldAlert size={18} className="mt-0.5 shrink-0 text-red-400" />
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-red-300 mb-2">Klipper Error</p>
+                    <p className="whitespace-pre-wrap text-sm leading-relaxed">{printer.status_message}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {printer.moonraker_warnings?.length > 0 && (
+              <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-amber-100">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300 mb-2">Moonraker Warnings</p>
+                <div className="space-y-2">
+                  {printer.moonraker_warnings.map((warning, index) => (
+                    <p key={index} className="whitespace-pre-wrap text-xs leading-relaxed">
+                      {warning.replace(/<br\s*\/?>/gi, '\n')}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
               {[
                 { name: 'Restart Klipper', icon: RefreshCw, color: 'text-blue-400' },

@@ -32,6 +32,37 @@ class FileInfo(BaseModel):
 class SaveFileRequest(BaseModel):
     content: str
 
+@router.get("/examples/klipper")
+async def list_klipper_examples():
+    """Fetches list of example configs from Klipper GitHub"""
+    url = "https://api.github.com/repos/Klipper3d/klipper/contents/config"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=10)
+        if res.status_code != 200:
+            raise HTTPException(status_code=502, detail="Failed to fetch Klipper examples")
+
+        files = res.json()
+        return [f for f in files if f["name"].endswith(".cfg")]
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=502, detail="Failed to fetch Klipper examples")
+
+@router.get("/examples/klipper/content")
+async def get_klipper_example_content(path: str):
+    """Fetches content of a specific Klipper example config"""
+    # path is the download_url or relative path from GitHub
+    if not path.startswith("https://raw.githubusercontent.com/Klipper3d/klipper/master/config/"):
+         raise HTTPException(status_code=403, detail="Unauthorised example path")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(path, timeout=10)
+        return {"content": res.text}
+    except:
+        raise HTTPException(status_code=502, detail="Failed to fetch example content")
+
 @router.get("/{printer_slug}/{file_type}", response_model=List[FileInfo])
 async def list_files(printer_slug: str, file_type: str):
     # file_type could be: config, gcode, logs
@@ -154,32 +185,3 @@ async def delete_file(path: str):
         return {"status": "success"}
     else:
         raise HTTPException(status_code=404, detail="File not found")
-
-@router.get("/examples/klipper")
-async def list_klipper_examples():
-    """Fetches list of example configs from Klipper GitHub"""
-    url = "https://api.github.com/repos/Klipper3d/klipper/contents/config"
-    try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(url, timeout=10)
-        if res.status_code == 200:
-            files = res.json()
-            return [f for f in files if f["name"].endswith(".cfg")]
-        else:
-            return []
-    except:
-        return []
-
-@router.get("/examples/klipper/content")
-async def get_klipper_example_content(path: str):
-    """Fetches content of a specific Klipper example config"""
-    # path is the download_url or relative path from GitHub
-    if not path.startswith("https://raw.githubusercontent.com/Klipper3d/klipper/master/config/"):
-         raise HTTPException(status_code=403, detail="Unauthorised example path")
-
-    try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(path, timeout=10)
-        return {"content": res.text}
-    except:
-        raise HTTPException(status_code=502, detail="Failed to fetch example content")
