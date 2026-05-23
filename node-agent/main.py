@@ -7,6 +7,7 @@ import httpx
 import logging
 import shutil
 import json
+import re
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
@@ -325,6 +326,81 @@ def backup_moonraker_config(moonraker_conf):
         return None
     shutil.copy2(moonraker_conf, backup_path)
     return backup_path
+
+def backup_printer_config(printer_cfg):
+    backup_path = moonraker_backup_path(printer_cfg)
+    if not backup_path:
+        return None
+    shutil.copy2(printer_cfg, backup_path)
+    return backup_path
+
+def config_has_section(content, section):
+    pattern = rf"^\s*\[{re.escape(section)}\]\s*(?:#.*)?$"
+    return re.search(pattern, content, re.IGNORECASE | re.MULTILINE) is not None
+
+def append_missing_klipper_support(printer_cfg, gcode_path):
+    if not os.path.exists(printer_cfg):
+        return None, []
+
+    with open(printer_cfg, "r") as f:
+        content = f.read()
+
+    additions = []
+    added_sections = []
+
+    if not config_has_section(content, "virtual_sdcard"):
+        path = gcode_path or os.path.join(os.path.dirname(os.path.dirname(printer_cfg)), "gcodes")
+        os.makedirs(path, exist_ok=True)
+        additions.append(f"[virtual_sdcard]\npath: {path}\n")
+        added_sections.append("virtual_sdcard")
+
+    if not config_has_section(content, "pause_resume"):
+        additions.append("[pause_resume]\n")
+        added_sections.append("pause_resume")
+
+    if not config_has_section(content, "display_status"):
+        additions.append("[display_status]\n")
+        added_sections.append("display_status")
+
+    macro_templates = {
+        "gcode_macro PAUSE": """[gcode_macro PAUSE]
+description: Pause the active print
+rename_existing: PAUSE_BASE
+gcode:
+    PAUSE_BASE
+""",
+        "gcode_macro RESUME": """[gcode_macro RESUME]
+description: Resume the active print
+rename_existing: RESUME_BASE
+gcode:
+    RESUME_BASE
+""",
+        "gcode_macro CANCEL_PRINT": """[gcode_macro CANCEL_PRINT]
+description: Cancel the active print
+rename_existing: CANCEL_PRINT_BASE
+gcode:
+    TURN_OFF_HEATERS
+    CANCEL_PRINT_BASE
+""",
+    }
+
+    for section, template in macro_templates.items():
+        if not config_has_section(content, section):
+            additions.append(template)
+            added_sections.append(section)
+
+    if not additions:
+        return None, []
+
+    backup_path = backup_printer_config(printer_cfg)
+    with open(printer_cfg, "a") as f:
+        separator = "\n" if content.endswith("\n") else "\n\n"
+        f.write(separator)
+        f.write("# Klipper Farm auto-added support sections for Moonraker and Mainsail.\n\n")
+        f.write("\n".join(additions).rstrip())
+        f.write("\n")
+
+    return backup_path, added_sections
 
 def move_legacy_moonraker_sidecar_backups(moonraker_conf):
     moved_paths = []
@@ -693,13 +769,17 @@ async def restart_instance(service: str = Body(..., embed=True)):
 @app.post("/instances/repair-moonraker")
 async def repair_moonraker_instance(data: MoonrakerRepairRequest):
     service = f"moonraker-{data.printer_slug}.service"
+    klipper_service = f"klipper-{data.printer_slug}.service"
     validate_service_name(service)
+    validate_service_name(klipper_service)
 
     data_path = get_printer_data_path(data.config_path)
     moonraker_conf = os.path.join(data.config_path, "moonraker.conf")
+    printer_cfg = os.path.join(data.config_path, "printer.cfg")
     moonraker_unit = f"/etc/systemd/system/{service}"
     changes = []
     backup_paths = []
+    klipper_config_changed = False
 
     try:
         os.makedirs(data.config_path, exist_ok=True)
@@ -707,6 +787,14 @@ async def repair_moonraker_instance(data: MoonrakerRepairRequest):
         if data.gcode_path:
             os.makedirs(data.gcode_path, exist_ok=True)
         os.makedirs(data_path, exist_ok=True)
+
+        printer_backup_path, added_sections = append_missing_klipper_support(printer_cfg, data.gcode_path)
+        if added_sections:
+            klipper_config_changed = True
+            if printer_backup_path:
+                backup_paths.append(printer_backup_path)
+                changes.append(f"Backed up printer.cfg to {printer_backup_path}")
+            changes.append(f"Added missing Klipper/Mainsail section(s): {', '.join(added_sections)}")
 
         if os.path.exists(moonraker_conf):
             backup_path = backup_moonraker_config(moonraker_conf)
@@ -744,6 +832,9 @@ async def repair_moonraker_instance(data: MoonrakerRepairRequest):
         changes.append(f"Updated {service} to use data path {data_path}")
 
         run_checked(["sudo", "systemctl", "daemon-reload"], timeout=30)
+        if klipper_config_changed:
+            run_checked(["sudo", "systemctl", "restart", klipper_service], timeout=60)
+            changes.append(f"Restarted {klipper_service}")
         run_checked(["sudo", "systemctl", "restart", service], timeout=60)
         changes.append(f"Restarted {service}")
 
@@ -759,7 +850,7 @@ async def repair_moonraker_instance(data: MoonrakerRepairRequest):
 
     return {
         "status": "success",
-        "message": f"Moonraker config repaired for {data.printer_slug}",
+        "message": f"Printer and Moonraker config repaired for {data.printer_slug}",
         "data_path": data_path,
         "backup_paths": backup_paths,
         "changes": changes,

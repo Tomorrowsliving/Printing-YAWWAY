@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
   Printer,
@@ -123,12 +123,16 @@ const tempText = (heater) => {
 
 const PrinterDetail = ({ addToast }) => {
   const { id } = useParams();
+  const navigate = useNavigate();
   const [printer, setPrinter] = useState(null);
   const [runtime, setRuntime] = useState(null);
   const [runtimeError, setRuntimeError] = useState('');
   const [loading, setLoading] = useState(true);
   const [repairingMoonraker, setRepairingMoonraker] = useState(false);
   const [homingAxis, setHomingAxis] = useState('');
+  const [mainsailFrameNonce, setMainsailFrameNonce] = useState(0);
+  const previousMainsailUrl = useRef('');
+  const previousMainsailReady = useRef(false);
   const [layoutOpen, setLayoutOpen] = useState(false);
   const [layout, setLayout] = useState(() => {
     try {
@@ -143,11 +147,25 @@ const PrinterDetail = ({ addToast }) => {
       const res = await printerService.getPrinterDetail(id);
       setPrinter(res.data);
     } catch (err) {
+      if (err.response?.status === 404) {
+        try {
+          const res = await printerService.getPrinters();
+          const printers = Array.isArray(res.data) ? res.data : (res.data?.value || []);
+          if (printers.length === 1) {
+            addToast(`Printer record changed, opening ${printers[0].name}`, "info");
+            navigate(`/printers/${printers[0].id}`, { replace: true });
+            return;
+          }
+        } catch (fallbackErr) {
+          console.error("Error recovering printer route:", fallbackErr);
+        }
+      }
       console.error("Error fetching printer:", err);
+      setPrinter(null);
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, navigate, addToast]);
 
   const fetchRuntime = useCallback(async () => {
     try {
@@ -207,16 +225,16 @@ const PrinterDetail = ({ addToast }) => {
   };
 
   const handleRepairMoonraker = async () => {
-    if (!window.confirm("Auto-fix Moonraker config and restart Moonraker for this printer?")) return;
+    if (!window.confirm("Auto-fix printer config warnings and restart the affected printer services?")) return;
 
     setRepairingMoonraker(true);
     try {
       const res = await axios.post(`/api/printers/${id}/repair-moonraker`);
-      addToast(res.data?.message || "Moonraker config repaired", "success");
+      addToast(res.data?.message || "Printer config repaired", "success");
       await fetchPrinter();
       await fetchRuntime();
     } catch (err) {
-      addToast(err.response?.data?.detail || "Moonraker repair failed", "error");
+      addToast(err.response?.data?.detail || "Auto fix failed", "error");
     } finally {
       setRepairingMoonraker(false);
     }
@@ -304,6 +322,11 @@ const PrinterDetail = ({ addToast }) => {
     }
   };
 
+  const nodeIp = printer?.node?.ip_address;
+  const mainsailBaseUrl = printer ? (nodeIp ? `http://${nodeIp}` : printer.embedded_ui_url) : null;
+  const mainsailUrl = printer ? buildMainsailUrl(mainsailBaseUrl, printer.slug) : null;
+  const moonrakerApiUrl = nodeIp && printer?.moonraker_port ? `http://${nodeIp}:${printer.moonraker_port}/server/info` : null;
+  const status = (printer?.status || '').toLowerCase();
   const runtimeStatus = runtime?.status || {};
   const toolhead = runtimeStatus.toolhead || {};
   const gcodeMove = runtimeStatus.gcode_move || {};
@@ -319,6 +342,21 @@ const PrinterDetail = ({ addToast }) => {
     [visibleWidgetIds]
   );
 
+  useEffect(() => {
+    if (!mainsailUrl) return;
+
+    const ready = ['idle', 'online', 'ready'].includes(status);
+    const urlChanged = previousMainsailUrl.current !== mainsailUrl;
+    const becameReady = ready && !previousMainsailReady.current;
+
+    if (urlChanged || becameReady) {
+      setMainsailFrameNonce((value) => value + 1);
+    }
+
+    previousMainsailUrl.current = mainsailUrl;
+    previousMainsailReady.current = ready;
+  }, [mainsailUrl, status]);
+
   if (loading) {
     return (
       <div className="flex flex-col items-center justify-center h-64 space-y-4">
@@ -330,11 +368,6 @@ const PrinterDetail = ({ addToast }) => {
 
   if (!printer) return <div className="text-red-500 font-bold p-8 bg-red-500/10 rounded-xl border border-red-500/20">Printer not found.</div>;
 
-  const nodeIp = printer.node?.ip_address;
-  const mainsailBaseUrl = nodeIp ? `http://${nodeIp}` : printer.embedded_ui_url;
-  const mainsailUrl = buildMainsailUrl(mainsailBaseUrl, printer.slug);
-  const moonrakerApiUrl = nodeIp && printer.moonraker_port ? `http://${nodeIp}:${printer.moonraker_port}/server/info` : null;
-  const status = (printer.status || '').toLowerCase();
   const statusMessage = (printer.status_message || '').trim();
   const readyMessage = statusMessage.toLowerCase() === 'printer is ready';
   const showStatusMessage = Boolean(statusMessage && !(readyMessage && ['idle', 'online', 'ready'].includes(status)));
@@ -531,6 +564,15 @@ const PrinterDetail = ({ addToast }) => {
         </div>
         <div className="flex items-center space-x-3">
           {mainsailUrl && (
+            <button
+              onClick={() => setMainsailFrameNonce((value) => value + 1)}
+              className="text-slate-400 hover:text-blue-300"
+              title="Reload embedded Mainsail"
+            >
+              <RefreshCw size={15} />
+            </button>
+          )}
+          {mainsailUrl && (
             <a href={mainsailUrl} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 text-xs font-bold uppercase tracking-wider">Open Mainsail</a>
           )}
           {moonrakerApiUrl && (
@@ -540,7 +582,7 @@ const PrinterDetail = ({ addToast }) => {
       </div>
       <div className="aspect-video bg-slate-900">
         {mainsailUrl ? (
-          <iframe src={mainsailUrl} className="w-full h-full border-none" title="Mainsail"></iframe>
+          <iframe key={`${mainsailUrl}-${mainsailFrameNonce}`} src={mainsailUrl} className="w-full h-full border-none" title="Mainsail"></iframe>
         ) : (
           <div className="flex flex-col items-center justify-center h-full text-slate-600 space-y-2 italic">
             <ShieldAlert size={48} className="opacity-10" />

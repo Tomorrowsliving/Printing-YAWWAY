@@ -15,6 +15,23 @@ import datetime
 
 router = APIRouter(prefix="/printers", tags=["printers"])
 
+def moonraker_warning_messages(info):
+    warnings = [str(warning) for warning in (info.get("warnings") or []) if warning]
+    missing_requirements = [str(item) for item in (info.get("missing_klippy_requirements") or []) if item]
+    failed_components = [str(item) for item in (info.get("failed_components") or []) if item]
+
+    if missing_requirements:
+        sections = ", ".join(f"[{item}]" for item in missing_requirements)
+        warnings.append(
+            f"Missing Klipper config sections: {sections}. "
+            "Add these sections to printer.cfg so Moonraker and Mainsail features can work correctly."
+        )
+
+    if failed_components:
+        warnings.append(f"Moonraker failed components: {', '.join(failed_components)}.")
+
+    return warnings
+
 def validate_printer_payload(printer_in):
     name = (printer_in.name or "").strip()
     slug = (printer_in.slug or "").strip()
@@ -51,7 +68,7 @@ async def probe_printer_runtime(printer):
         info = payload.get("result", payload)
         klippy_state = str(info.get("klippy_state") or "").lower()
         klippy_connected = info.get("klippy_connected")
-        warnings = info.get("warnings") or []
+        warnings = moonraker_warning_messages(info)
         status_message = ""
 
         try:
