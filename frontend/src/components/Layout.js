@@ -1,5 +1,5 @@
 import React from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import { LayoutDashboard, Server, FileText, Database, Settings, History, ArrowLeftRight } from 'lucide-react';
 
 const Sidebar = () => {
@@ -40,11 +40,14 @@ const Sidebar = () => {
 };
 
 const Layout = ({ children }) => {
+  const location = useLocation();
+  const widePage = location.pathname.startsWith('/printers/');
+
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex">
       <Sidebar />
       <div className="flex-1 pl-64">
-        <main className="p-8 max-w-7xl mx-auto min-h-screen">
+        <main className={`min-h-screen p-8 ${widePage ? 'w-full' : 'max-w-7xl mx-auto'}`}>
           {children || <div className="text-slate-500">No content available.</div>}
         </main>
       </div>

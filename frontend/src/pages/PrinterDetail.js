@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft,
   Printer,
@@ -14,64 +14,73 @@ import {
   Thermometer,
   Gauge,
   SlidersHorizontal,
+  Settings,
   Eye,
   EyeOff,
   RotateCcw,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react';
 import { printerService } from '../services/api';
+import ConfigHelperCard from '../components/ConfigHelperCard';
 import axios from 'axios';
 
-const WIDGETS = [
-  { id: 'status', title: 'Status', wide: true, visible: true },
-  { id: 'webcam', title: 'Webcam', wide: false, visible: true },
-  { id: 'mainsail', title: 'Mainsail', wide: true, visible: true },
-  { id: 'toolhead', title: 'Toolhead', wide: false, visible: true },
-  { id: 'configuration', title: 'Configuration', wide: false, visible: true },
+const WIDGET_SIZE_OPTIONS = [
+  { id: '1x1', label: '1x1', cols: 1, rows: 1 },
+  { id: '2x1', label: '2x1', cols: 2, rows: 1 },
+  { id: '1x2', label: '1x2', cols: 1, rows: 2 },
+  { id: '2x2', label: '2x2', cols: 2, rows: 2 },
 ];
 
-const GRID_SLOTS = [
-  { id: 'top-left', title: 'Top left', colSpan: 2 },
-  { id: 'top-right', title: 'Top right', colSpan: 1 },
-  { id: 'middle-left', title: 'Middle left', colSpan: 2 },
-  { id: 'middle-right', title: 'Middle right', colSpan: 1 },
-  { id: 'bottom-left', title: 'Bottom left', colSpan: 1 },
-  { id: 'bottom-middle', title: 'Bottom middle', colSpan: 1 },
-  { id: 'bottom-right', title: 'Bottom right', colSpan: 1 },
+const WIDGET_SIZE_BY_ID = WIDGET_SIZE_OPTIONS.reduce((acc, size) => ({ ...acc, [size.id]: size }), {});
+
+const WIDGETS = [
+  { id: 'status', title: 'Status', defaultSize: '2x1', visible: true },
+  { id: 'mainsail', title: 'Mainsail', defaultSize: '2x2', visible: true },
+  { id: 'toolhead', title: 'Toolhead', defaultSize: '1x2', visible: true },
+  { id: 'webcam', title: 'Webcam', defaultSize: '1x1', visible: true },
+  { id: 'configuration', title: 'Configuration', defaultSize: '1x1', visible: true },
+  { id: 'config-helper', title: 'Config Helper', defaultSize: '2x1', visible: true },
 ];
 
 const WIDGET_BY_ID = WIDGETS.reduce((acc, widget) => ({ ...acc, [widget.id]: widget }), {});
-const SLOT_BY_ID = GRID_SLOTS.reduce((acc, slot) => ({ ...acc, [slot.id]: slot }), {});
-
-const DEFAULT_PLACEMENTS = {
-  'top-left': 'status',
-  'top-right': 'webcam',
-  'middle-left': 'mainsail',
-  'middle-right': 'toolhead',
-  'bottom-left': 'configuration',
-  'bottom-middle': null,
-  'bottom-right': null,
-};
 
 const ORIGINAL_DEFAULT_ORDER = ['status', 'toolhead', 'mainsail', 'webcam', 'configuration'];
 
 const defaultLayout = () => ({
-  version: 2,
-  placements: { ...DEFAULT_PLACEMENTS },
+  version: 3,
+  widgets: WIDGETS.map((widget) => ({
+    id: widget.id,
+    visible: widget.visible !== false,
+    size: widget.defaultSize,
+  })),
 });
 
 const layoutFromOrderedItems = (items) => {
-  const visibleItems = items.filter((item) => item.visible !== false);
+  const visibleItems = items.filter((item) => item.visible !== false && WIDGET_BY_ID[item.id]);
   const visibleIds = visibleItems.map((item) => item.id);
   const useNewDefault = visibleIds.length === ORIGINAL_DEFAULT_ORDER.length
     && visibleIds.every((widgetId, index) => widgetId === ORIGINAL_DEFAULT_ORDER[index]);
 
   if (useNewDefault) return defaultLayout();
 
-  const placements = GRID_SLOTS.reduce((acc, slot, index) => ({
-    ...acc,
-    [slot.id]: visibleItems[index]?.id || null,
-  }), {});
-  return { version: 2, placements };
+  const seen = new Set();
+  const widgets = [
+    ...visibleItems.map((item) => ({
+      id: item.id,
+      visible: true,
+      size: WIDGET_SIZE_BY_ID[item.size] ? item.size : WIDGET_BY_ID[item.id].defaultSize,
+    })),
+    ...WIDGETS
+      .filter((widget) => !visibleIds.includes(widget.id))
+      .map((widget) => ({ id: widget.id, visible: widget.visible !== false, size: widget.defaultSize })),
+  ].filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+
+  return { version: 3, widgets };
 };
 
 const normalizeLayout = (saved) => {
@@ -81,29 +90,77 @@ const normalizeLayout = (saved) => {
   if (Array.isArray(saved)) {
     const known = saved
       .filter((item) => item && WIDGET_BY_ID[item.id])
-      .map((item) => ({ id: item.id, visible: item.visible !== false }));
+      .map((item) => ({ id: item.id, visible: item.visible !== false, size: item.size }));
     const knownIds = new Set(known.map((item) => item.id));
     const missing = WIDGETS
       .filter((widget) => !knownIds.has(widget.id))
-      .map((widget) => ({ id: widget.id, visible: widget.visible !== false }));
+      .map((widget) => ({ id: widget.id, visible: widget.visible !== false, size: widget.defaultSize }));
     return layoutFromOrderedItems([...known, ...missing]);
   }
 
-  if (!saved.placements || typeof saved.placements !== 'object') return fallback;
+  if (saved.widgets && Array.isArray(saved.widgets)) {
+    const seen = new Set();
+    const widgets = saved.widgets
+      .filter((item) => item && WIDGET_BY_ID[item.id] && !seen.has(item.id))
+      .map((item) => {
+        seen.add(item.id);
+        return {
+          id: item.id,
+          visible: item.visible !== false,
+          size: WIDGET_SIZE_BY_ID[item.size] ? item.size : WIDGET_BY_ID[item.id].defaultSize,
+        };
+      });
 
-  const placements = {};
-  const usedWidgets = new Set();
-  GRID_SLOTS.forEach((slot) => {
-    const widgetId = saved.placements[slot.id];
-    if (widgetId && WIDGET_BY_ID[widgetId] && !usedWidgets.has(widgetId)) {
-      placements[slot.id] = widgetId;
-      usedWidgets.add(widgetId);
-    } else {
-      placements[slot.id] = null;
-    }
-  });
+    WIDGETS.forEach((widget) => {
+      if (!seen.has(widget.id)) {
+        widgets.push({ id: widget.id, visible: widget.visible !== false, size: widget.defaultSize });
+      }
+    });
 
-  return { version: 2, placements };
+    return { version: 3, widgets };
+  }
+
+  if (saved.placements && typeof saved.placements === 'object') {
+    const slotOrder = ['top-left', 'top-right', 'middle-left', 'middle-right', 'bottom-left', 'bottom-middle', 'bottom-right'];
+    const placed = [];
+    const usedWidgets = new Set();
+
+    slotOrder.forEach((slotId) => {
+      const widgetId = saved.placements[slotId];
+      if (widgetId && WIDGET_BY_ID[widgetId] && !usedWidgets.has(widgetId)) {
+        placed.push({ id: widgetId, visible: true, size: WIDGET_BY_ID[widgetId].defaultSize });
+        usedWidgets.add(widgetId);
+      }
+    });
+
+    WIDGETS.forEach((widget) => {
+      if (!usedWidgets.has(widget.id)) {
+        placed.push({ id: widget.id, visible: widget.visible !== false, size: widget.defaultSize });
+      }
+    });
+
+    return { version: 3, widgets: placed };
+  }
+
+  return fallback;
+};
+
+const widgetSizeClass = (sizeId) => {
+  const size = WIDGET_SIZE_BY_ID[sizeId] || WIDGET_SIZE_BY_ID['1x1'];
+  const colClass = size.cols === 2 ? 'printer-widget--2-cols' : '';
+  const rowClass = size.rows === 2 ? 'printer-widget--2-rows' : '';
+  return `${colClass} ${rowClass}`;
+};
+
+const moveWidgetItem = (widgets, widgetId, direction) => {
+  const index = widgets.findIndex((widget) => widget.id === widgetId);
+  const nextIndex = index + direction;
+  if (index < 0 || nextIndex < 0 || nextIndex >= widgets.length) return widgets;
+
+  const next = [...widgets];
+  const [item] = next.splice(index, 1);
+  next.splice(nextIndex, 0, item);
+  return next;
 };
 
 const formatNumber = (value, digits = 2) => {
@@ -124,6 +181,10 @@ const tempText = (heater) => {
 const PrinterDetail = ({ addToast }) => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const settingsRequested = useMemo(() => (
+    searchParams.get('panel') === 'settings' || searchParams.has('settings') || searchParams.has('settingsverify')
+  ), [searchParams]);
   const [printer, setPrinter] = useState(null);
   const [runtime, setRuntime] = useState(null);
   const [runtimeError, setRuntimeError] = useState('');
@@ -134,6 +195,10 @@ const PrinterDetail = ({ addToast }) => {
   const previousMainsailUrl = useRef('');
   const previousMainsailReady = useRef(false);
   const [layoutOpen, setLayoutOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('panel') === 'settings' || params.has('settings') || params.has('settingsverify');
+  });
   const [layout, setLayout] = useState(() => {
     try {
       return normalizeLayout(JSON.parse(window.localStorage.getItem(`printer-layout-${id}`)));
@@ -200,6 +265,10 @@ const PrinterDetail = ({ addToast }) => {
     window.localStorage.setItem(`printer-layout-${id}`, JSON.stringify(layout));
   }, [id, layout]);
 
+  useEffect(() => {
+    if (settingsRequested) setSettingsOpen(true);
+  }, [settingsRequested]);
+
   const handleAction = async (name) => {
     const targetMap = {
       'Restart Klipper': 'klipper',
@@ -257,57 +326,57 @@ const PrinterDetail = ({ addToast }) => {
     }
   };
 
-  const placeWidget = (slotId, widgetId) => {
-    if (!SLOT_BY_ID[slotId]) return;
-
-    setLayout((current) => {
-      const placements = { ...current.placements };
-      const selectedWidgetId = widgetId || null;
-      const currentWidgetInSlot = placements[slotId] || null;
-
-      if (!selectedWidgetId) {
-        placements[slotId] = null;
-        return { ...current, placements };
-      }
-
-      const currentSlotForSelectedWidget = Object.entries(placements)
-        .find(([, placedWidgetId]) => placedWidgetId === selectedWidgetId)?.[0];
-
-      if (currentSlotForSelectedWidget && currentSlotForSelectedWidget !== slotId) {
-        placements[currentSlotForSelectedWidget] = currentWidgetInSlot;
-      }
-
-      placements[slotId] = selectedWidgetId;
-      return { ...current, placements };
-    });
-  };
-
   const hideWidget = (widgetId) => {
     setLayout((current) => {
-      const placements = { ...current.placements };
-      Object.keys(placements).forEach((slotId) => {
-        if (placements[slotId] === widgetId) placements[slotId] = null;
-      });
-      return { ...current, placements };
+      const widgets = current.widgets.map((widget) => (
+        widget.id === widgetId ? { ...widget, visible: false } : widget
+      ));
+      return { ...current, widgets };
     });
   };
 
   const showWidget = (widgetId) => {
     setLayout((current) => {
-      const placements = { ...current.placements };
-      const alreadyPlaced = Object.values(placements).includes(widgetId);
-      if (alreadyPlaced) return current;
-
-      const emptySlot = GRID_SLOTS.find((slot) => !placements[slot.id]);
-      if (!emptySlot) return current;
-
-      placements[emptySlot.id] = widgetId;
-      return { ...current, placements };
+      const widgets = current.widgets.map((widget) => (
+        widget.id === widgetId ? { ...widget, visible: true } : widget
+      ));
+      return { ...current, widgets };
     });
+  };
+
+  const resizeWidget = (widgetId, size) => {
+    setLayout((current) => ({
+      ...current,
+      widgets: current.widgets.map((widget) => (
+        widget.id === widgetId ? { ...widget, size: WIDGET_SIZE_BY_ID[size] ? size : widget.size } : widget
+      )),
+    }));
+  };
+
+  const moveWidget = (widgetId, direction) => {
+    setLayout((current) => ({
+      ...current,
+      widgets: moveWidgetItem(current.widgets, widgetId, direction),
+    }));
   };
 
   const resetLayout = () => {
     setLayout(defaultLayout());
+  };
+
+  const toggleSettingsPanel = () => {
+    const nextOpen = !settingsOpen;
+    setSettingsOpen(nextOpen);
+
+    const nextParams = new URLSearchParams(searchParams);
+    if (nextOpen) {
+      nextParams.set('panel', 'settings');
+    } else {
+      nextParams.delete('panel');
+      nextParams.delete('settings');
+      nextParams.delete('settingsverify');
+    }
+    setSearchParams(nextParams, { replace: true });
   };
 
   const buildMainsailUrl = (baseUrl, printerSlug) => {
@@ -334,12 +403,13 @@ const PrinterDetail = ({ addToast }) => {
   const webhooks = runtimeStatus.webhooks || {};
   const position = gcodeMove.gcode_position || gcodeMove.position || toolhead.position || [];
   const homedAxes = (toolhead.homed_axes || '').toUpperCase();
-  const visibleWidgetIds = useMemo(() => new Set(
-    Object.values(layout.placements).filter((widgetId) => widgetId && WIDGET_BY_ID[widgetId])
-  ), [layout]);
+  const visibleLayoutWidgets = useMemo(
+    () => layout.widgets.filter((widget) => widget.visible !== false && WIDGET_BY_ID[widget.id]),
+    [layout.widgets]
+  );
   const hiddenWidgets = useMemo(
-    () => WIDGETS.filter((widget) => !visibleWidgetIds.has(widget.id)),
-    [visibleWidgetIds]
+    () => layout.widgets.filter((widget) => widget.visible === false && WIDGET_BY_ID[widget.id]),
+    [layout.widgets]
   );
 
   useEffect(() => {
@@ -400,10 +470,10 @@ const PrinterDetail = ({ addToast }) => {
           label: 'Printer Message'
         };
 
-  const cardClass = "bg-slate-800 border border-slate-700 rounded-xl shadow-sm";
+  const cardClass = "h-full bg-slate-800 border border-slate-700 rounded-xl shadow-sm";
 
   const renderStatusCard = () => (
-    <div className={`${cardClass} p-6`}>
+    <div className={`${cardClass} overflow-y-auto p-6`}>
       <div className="flex flex-wrap justify-between items-center gap-4 mb-6">
         <div className="flex items-center space-x-4">
           <div className="p-3 bg-blue-500/10 text-blue-500 rounded-xl shadow-inner">
@@ -479,7 +549,7 @@ const PrinterDetail = ({ addToast }) => {
   );
 
   const renderToolheadCard = () => (
-    <div className={`${cardClass} p-5 space-y-5`}>
+    <div className={`${cardClass} space-y-5 overflow-y-auto p-5`}>
       <div className="flex items-center justify-between border-b border-slate-700 pb-3">
         <div className="flex items-center space-x-2">
           <Navigation size={18} className="text-cyan-400" />
@@ -556,7 +626,7 @@ const PrinterDetail = ({ addToast }) => {
   );
 
   const renderMainsailCard = () => (
-    <div className={`${cardClass} overflow-hidden`}>
+    <div className={`${cardClass} flex flex-col overflow-hidden`}>
       <div className="p-4 border-b border-slate-700 flex flex-wrap justify-between items-center gap-3 bg-slate-800/50">
         <div className="flex items-center space-x-2 text-blue-400">
           <Printer size={18} />
@@ -580,7 +650,7 @@ const PrinterDetail = ({ addToast }) => {
           )}
         </div>
       </div>
-      <div className="aspect-video bg-slate-900">
+      <div className="min-h-0 flex-1 bg-slate-900">
         {mainsailUrl ? (
           <iframe key={`${mainsailUrl}-${mainsailFrameNonce}`} src={mainsailUrl} className="w-full h-full border-none" title="Mainsail"></iframe>
         ) : (
@@ -594,7 +664,7 @@ const PrinterDetail = ({ addToast }) => {
   );
 
   const renderWebcamCard = () => (
-    <div className={`${cardClass} p-5 space-y-4`}>
+    <div className={`${cardClass} space-y-4 overflow-hidden p-5`}>
       <div className="flex items-center space-x-2 border-b border-slate-700 pb-3">
         <Camera size={18} className="text-purple-400" />
         <h3 className="font-bold text-sm">Webcam Stream</h3>
@@ -610,7 +680,7 @@ const PrinterDetail = ({ addToast }) => {
   );
 
   const renderConfigurationCard = () => (
-    <div className={`${cardClass} p-5 space-y-4`}>
+    <div className={`${cardClass} space-y-4 overflow-y-auto p-5`}>
       <div className="flex items-center space-x-2 border-b border-slate-700 pb-3">
         <FileText size={18} className="text-green-400" />
         <h3 className="font-bold text-sm">Configuration</h3>
@@ -644,6 +714,15 @@ const PrinterDetail = ({ addToast }) => {
       case 'mainsail': return renderMainsailCard();
       case 'webcam': return renderWebcamCard();
       case 'configuration': return renderConfigurationCard();
+      case 'config-helper': return (
+        <ConfigHelperCard
+          printer={printer}
+          addToast={addToast}
+          fetchPrinter={fetchPrinter}
+          fetchRuntime={fetchRuntime}
+          cardClass={cardClass}
+        />
+      );
       default: return null;
     }
   };
@@ -660,51 +739,112 @@ const PrinterDetail = ({ addToast }) => {
             <p className="text-xs text-slate-500 font-mono mt-0.5">SLUG: {printer.slug} - MCU: {printer.mcu_serial || 'NOT CONNECTED'}</p>
           </div>
         </div>
-        <button
-          onClick={() => setLayoutOpen((value) => !value)}
-          className="inline-flex items-center space-x-2 rounded-lg bg-slate-800 px-4 py-2 text-sm font-bold text-slate-200 transition-colors hover:bg-slate-700"
-        >
-          <SlidersHorizontal size={17} />
-          <span>Customize</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={toggleSettingsPanel}
+            className={`inline-flex items-center space-x-2 rounded-lg px-4 py-2 text-sm font-bold transition-colors ${settingsOpen ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20 hover:bg-blue-500' : 'bg-slate-800 text-slate-200 hover:bg-slate-700'}`}
+          >
+            <Settings size={17} />
+            <span>Printer Settings</span>
+          </button>
+          <button
+            onClick={() => setLayoutOpen((value) => !value)}
+            className="inline-flex items-center space-x-2 rounded-lg bg-slate-800 px-4 py-2 text-sm font-bold text-slate-200 transition-colors hover:bg-slate-700"
+          >
+            <SlidersHorizontal size={17} />
+            <span>Customize</span>
+          </button>
+        </div>
       </div>
+
+      {settingsOpen && (
+        <div className={`${cardClass} p-5`}>
+          <div className="mb-4 flex items-center justify-between gap-3 border-b border-slate-700 pb-3">
+            <div className="flex items-center space-x-2">
+              <Settings size={18} className="text-blue-400" />
+              <h3 className="font-bold text-sm">Printer Settings</h3>
+            </div>
+            <span className="rounded-md bg-slate-900 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">{printer.status || 'offline'}</span>
+          </div>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-lg border border-slate-700 bg-slate-900 p-3">
+              <p className="mb-1 text-[9px] font-bold uppercase tracking-widest text-slate-500">Printer</p>
+              <p className="text-sm font-bold text-slate-100">{printer.name}</p>
+              <p className="mt-1 font-mono text-[11px] text-slate-400">{printer.slug}</p>
+            </div>
+            <div className="rounded-lg border border-slate-700 bg-slate-900 p-3">
+              <p className="mb-1 text-[9px] font-bold uppercase tracking-widest text-slate-500">Node</p>
+              <p className="text-sm font-bold text-slate-100">{printer.node?.hostname || printer.node?.name || 'Unassigned'}</p>
+              <p className="mt-1 font-mono text-[11px] text-slate-400">{printer.node?.ip_address || '--'}</p>
+            </div>
+            <div className="rounded-lg border border-slate-700 bg-slate-900 p-3">
+              <p className="mb-1 text-[9px] font-bold uppercase tracking-widest text-slate-500">Moonraker</p>
+              <p className="font-mono text-sm font-bold text-slate-100">{printer.moonraker_port || '7125'}</p>
+              {moonrakerApiUrl && <a href={moonrakerApiUrl} target="_blank" rel="noopener noreferrer" className="mt-1 block text-[11px] font-bold text-green-300 hover:text-green-200">Open API</a>}
+            </div>
+            <div className="rounded-lg border border-slate-700 bg-slate-900 p-3">
+              <p className="mb-1 text-[9px] font-bold uppercase tracking-widest text-slate-500">Configuration</p>
+              <p className="truncate font-mono text-[11px] text-blue-300">{printer.config_path || '--'}</p>
+              <Link to="/files" className="mt-1 block text-[11px] font-bold text-slate-300 hover:text-blue-300">Manage Files</Link>
+            </div>
+          </div>
+        </div>
+      )}
 
       {layoutOpen && (
         <div className={`${cardClass} p-4 space-y-4`}>
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Layout</p>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Printer Dashboard Layout</p>
             <button onClick={resetLayout} className="inline-flex items-center space-x-2 rounded-lg bg-slate-900 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-300 hover:text-blue-300">
               <RotateCcw size={14} />
               <span>Reset</span>
             </button>
           </div>
 
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
-            {GRID_SLOTS.map((slot) => {
-              const widgetId = layout.placements[slot.id] || '';
-              const widget = widgetId ? WIDGET_BY_ID[widgetId] : null;
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {layout.widgets.map((item, index) => {
+              const widget = WIDGET_BY_ID[item.id];
+              if (!widget) return null;
               return (
-                <div key={slot.id} className={`${slot.colSpan === 2 ? 'xl:col-span-2' : 'xl:col-span-1'} rounded-lg border border-slate-700 bg-slate-900 p-3`}>
+                <div key={item.id} className="rounded-lg border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 flex items-center justify-between gap-2">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">{slot.title}</p>
-                    {widget && (
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">{widget.title}</p>
+                      <p className="mt-1 text-[10px] font-semibold text-slate-600">{item.visible === false ? 'Hidden' : `Visible - ${item.size || widget.defaultSize}`}</p>
+                    </div>
+                    <div className="flex items-center gap-1">
                       <button
-                        onClick={() => hideWidget(widget.id)}
-                        className="rounded-md p-2 text-slate-500 transition-colors hover:bg-slate-800 hover:text-red-300"
-                        title={`Hide ${widget.title}`}
+                        onClick={() => moveWidget(item.id, -1)}
+                        disabled={index === 0}
+                        className="rounded-md p-2 text-slate-500 transition-colors hover:bg-slate-800 hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-30"
+                        title={`Move ${widget.title} earlier`}
                       >
-                        <EyeOff size={14} />
+                        <ArrowUp size={14} />
                       </button>
-                    )}
+                      <button
+                        onClick={() => moveWidget(item.id, 1)}
+                        disabled={index === layout.widgets.length - 1}
+                        className="rounded-md p-2 text-slate-500 transition-colors hover:bg-slate-800 hover:text-blue-300 disabled:cursor-not-allowed disabled:opacity-30"
+                        title={`Move ${widget.title} later`}
+                      >
+                        <ArrowDown size={14} />
+                      </button>
+                      <button
+                        onClick={() => (item.visible === false ? showWidget(item.id) : hideWidget(item.id))}
+                        className="rounded-md p-2 text-slate-500 transition-colors hover:bg-slate-800 hover:text-red-300"
+                        title={`${item.visible === false ? 'Show' : 'Hide'} ${widget.title}`}
+                      >
+                        {item.visible === false ? <Eye size={14} /> : <EyeOff size={14} />}
+                      </button>
+                    </div>
                   </div>
                   <select
-                    value={widgetId}
-                    onChange={(event) => placeWidget(slot.id, event.target.value)}
+                    value={item.size || widget.defaultSize}
+                    onChange={(event) => resizeWidget(item.id, event.target.value)}
                     className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm font-semibold text-slate-100 outline-none transition-colors focus:border-blue-500"
                   >
-                    <option value="">Empty</option>
-                    {WIDGETS.map((option) => (
-                      <option key={option.id} value={option.id}>{option.title}</option>
+                    {WIDGET_SIZE_OPTIONS.map((option) => (
+                      <option key={option.id} value={option.id}>{option.label}</option>
                     ))}
                   </select>
                 </div>
@@ -716,29 +856,41 @@ const PrinterDetail = ({ addToast }) => {
             <div>
               <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">Hidden</p>
               <div className="flex flex-wrap gap-2">
-                {hiddenWidgets.map((widget) => (
-                  <button
-                    key={widget.id}
-                    onClick={() => showWidget(widget.id)}
-                    className="inline-flex items-center space-x-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-bold text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-300"
-                  >
-                    <Eye size={14} />
-                    <span>{widget.title}</span>
-                  </button>
-                ))}
+                {hiddenWidgets.map((item) => {
+                  const widget = WIDGET_BY_ID[item.id];
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => showWidget(item.id)}
+                      className="inline-flex items-center space-x-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-bold text-slate-400 transition-colors hover:border-blue-500/40 hover:text-blue-300"
+                    >
+                      <Eye size={14} />
+                      <span>{widget.title}</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
         </div>
       )}
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 items-start">
-        {GRID_SLOTS.map((slot) => {
-          const widgetId = layout.placements[slot.id];
-          const widget = WIDGET_BY_ID[widgetId];
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h3 className="text-lg font-bold">Printer Dashboards</h3>
+          <p className="text-xs font-medium text-slate-500">Dashboard cards use fixed 1x1, 2x1, 1x2, or 2x2 sizes with a minimum card footprint.</p>
+        </div>
+        <span className="rounded-lg bg-slate-800 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+          {visibleLayoutWidgets.length} active
+        </span>
+      </div>
+
+      <div className="printer-dashboard-grid">
+        {visibleLayoutWidgets.map((item) => {
+          const widget = WIDGET_BY_ID[item.id];
           if (!widget) return null;
           return (
-            <div key={slot.id} className={slot.colSpan === 2 ? 'xl:col-span-2' : 'xl:col-span-1'}>
+            <div key={item.id} className={`${widgetSizeClass(item.size || widget.defaultSize)} min-h-0`}>
               {renderWidget(widget.id)}
             </div>
           );

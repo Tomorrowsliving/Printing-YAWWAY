@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Body, Request
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 import asyncio
 import httpx
 import os
@@ -14,6 +15,106 @@ from .nodes import serialize_node, get_backend_public_host
 import datetime
 
 router = APIRouter(prefix="/printers", tags=["printers"])
+
+CONFIG_HELPER_PRESETS = {
+    "probe_pin_presets": [
+        {
+            "id": "creality-42x-probe-port",
+            "label": "Creality 4.2.x Probe Port",
+            "probe_type": "bltouch",
+            "sensor_pin": "^PB1",
+            "control_pin": "PB0",
+            "x_offset": -44,
+            "y_offset": -6,
+            "z_offset": 0,
+        },
+        {
+            "id": "creality-42x-z-stop",
+            "label": "Creality 4.2.x Z-Stop Signal",
+            "probe_type": "bltouch",
+            "sensor_pin": "^PC14",
+            "control_pin": "PB0",
+            "x_offset": -44,
+            "y_offset": -6,
+            "z_offset": 0,
+        },
+        {
+            "id": "btt-skr-mini-e3-v3",
+            "label": "BTT SKR Mini E3 V3",
+            "probe_type": "bltouch",
+            "sensor_pin": "^PC14",
+            "control_pin": "PA1",
+            "x_offset": -44,
+            "y_offset": -6,
+            "z_offset": 0,
+        },
+        {
+            "id": "generic-inductive",
+            "label": "Generic Inductive Probe",
+            "probe_type": "probe",
+            "sensor_pin": "^PA1",
+            "control_pin": "",
+            "x_offset": 0,
+            "y_offset": 0,
+            "z_offset": 0,
+        },
+    ],
+    "mesh_presets": [
+        {
+            "id": "ender-small-bed",
+            "label": "Ender Small Bed",
+            "safe_z_home_x": 82.5,
+            "safe_z_home_y": 82.5,
+            "mesh_min_x": 20,
+            "mesh_min_y": 20,
+            "mesh_max_x": 145,
+            "mesh_max_y": 145,
+            "probe_count_x": 5,
+            "probe_count_y": 5,
+        },
+        {
+            "id": "ender-235-bed",
+            "label": "Ender 235mm Bed",
+            "safe_z_home_x": 117.5,
+            "safe_z_home_y": 117.5,
+            "mesh_min_x": 20,
+            "mesh_min_y": 20,
+            "mesh_max_x": 205,
+            "mesh_max_y": 205,
+            "probe_count_x": 5,
+            "probe_count_y": 5,
+        },
+    ],
+    "plugin_presets": [
+        {
+            "id": "exclude_object",
+            "label": "Exclude Object",
+            "sections": ["exclude_object"],
+        },
+        {
+            "id": "respond",
+            "label": "Respond",
+            "sections": ["respond"],
+        },
+        {
+            "id": "gcode_arcs",
+            "label": "G-code Arcs",
+            "sections": ["gcode_arcs"],
+        },
+        {
+            "id": "firmware_retraction",
+            "label": "Firmware Retraction",
+            "sections": ["firmware_retraction"],
+        },
+    ],
+}
+
+
+class PrinterConfigHelperRequest(BaseModel):
+    bed_probe: Optional[Dict[str, Any]] = None
+    plugins: List[str] = []
+    replace_existing: bool = True
+    restart_services: bool = True
 
 def moonraker_warning_messages(info):
     warnings = [str(warning) for warning in (info.get("warnings") or []) if warning]
@@ -205,6 +306,10 @@ async def list_printers(db: AsyncSession = Depends(get_db)):
         serialize_printer(printer, include_node=True, runtime_override=runtime)
         for printer, runtime in zip(printers, runtimes)
     ]
+
+@router.get("/config-helper/presets")
+async def get_config_helper_presets():
+    return CONFIG_HELPER_PRESETS
 
 @router.get("/{printer_id}", response_model=PrinterSchema)
 async def get_printer(printer_id: int, db: AsyncSession = Depends(get_db)):
@@ -424,3 +529,89 @@ async def repair_printer_moonraker(printer_id: int, request: Request, db: AsyncS
     ))
     await db.commit()
     return response
+
+async def proxy_printer_config_helper(
+    printer_id: int,
+    request_data: PrinterConfigHelperRequest,
+    dry_run: bool,
+    db: AsyncSession,
+):
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(status_code=404, detail="Printer not found")
+    if not printer.assigned_node_id:
+        raise HTTPException(status_code=400, detail="Printer not assigned to any node")
+    if not printer.config_path or not printer.moonraker_port:
+        raise HTTPException(status_code=400, detail="Printer config path or Moonraker port is missing")
+
+    node_result = await db.execute(select(Node).where(Node.id == printer.assigned_node_id))
+    node = node_result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Assigned node not found")
+
+    data_path = posixpath.dirname(printer.config_path.rstrip("/"))
+    payload = {
+        **request_data.model_dump(),
+        "dry_run": dry_run,
+        "printer_slug": printer.slug,
+        "moonraker_port": printer.moonraker_port,
+        "config_path": printer.config_path,
+        "gcode_path": printer.gcode_path or posixpath.join(data_path, "gcodes"),
+    }
+
+    url = f"http://{node.ip_address}:{node.agent_port}/instances/config-helper/apply"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(url, json=payload, timeout=30)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}: {e}")
+
+    if res.status_code >= 400:
+        try:
+            error_payload = res.json()
+            detail = error_payload.get("detail", error_payload)
+        except Exception:
+            detail = res.text
+        raise HTTPException(status_code=502, detail=f"Node config helper failed: {detail}")
+
+    response = res.json()
+    if not dry_run:
+        for backup_path in response.get("backup_paths") or []:
+            result = await db.execute(select(Backup).where(Backup.file_path == backup_path))
+            if result.scalar_one_or_none():
+                continue
+            db.add(Backup(
+                filename=os.path.relpath(backup_path, BACKUP_ROOT).replace(os.sep, "/"),
+                file_path=backup_path,
+                backup_type=FILE_EDIT_BACKUP_TYPE,
+                status="success",
+            ))
+
+        db.add(Event(
+            printer_id=printer.id,
+            node_id=node.id,
+            severity="info",
+            event_type="printer_config_helper",
+            message=f"Applied config helper changes for printer {printer.name}",
+            details=response,
+        ))
+        await db.commit()
+
+    return response
+
+@router.post("/{printer_id}/config-helper/preview")
+async def preview_printer_config_helper(
+    printer_id: int,
+    request_data: PrinterConfigHelperRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    return await proxy_printer_config_helper(printer_id, request_data, True, db)
+
+@router.post("/{printer_id}/config-helper/apply")
+async def apply_printer_config_helper(
+    printer_id: int,
+    request_data: PrinterConfigHelperRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    return await proxy_printer_config_helper(printer_id, request_data, False, db)

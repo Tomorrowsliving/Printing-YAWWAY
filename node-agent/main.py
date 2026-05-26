@@ -10,7 +10,7 @@ import json
 import re
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 import time
 import datetime
@@ -103,6 +103,17 @@ class MoonrakerRepairRequest(BaseModel):
     moonraker_conf_content: Optional[str] = None
     backend_ip: Optional[str] = None
     node_ip: Optional[str] = None
+
+class KlipperConfigHelperRequest(BaseModel):
+    printer_slug: str
+    moonraker_port: int
+    config_path: str
+    gcode_path: Optional[str] = None
+    bed_probe: Optional[Dict[str, Any]] = None
+    plugins: List[str] = []
+    replace_existing: bool = True
+    restart_services: bool = True
+    dry_run: bool = False
 
 class MountRequest(BaseModel):
     server: str
@@ -401,6 +412,283 @@ gcode:
         f.write("\n")
 
     return backup_path, added_sections
+
+PIN_VALUE_PATTERN = re.compile(r"^[!^~]*[A-Za-z0-9_:.+\-/]+$")
+
+PLUGIN_SNIPPETS = {
+    "exclude_object": {
+        "label": "Exclude Object",
+        "sections": ["exclude_object"],
+        "content": "[exclude_object]\n",
+    },
+    "respond": {
+        "label": "Respond",
+        "sections": ["respond"],
+        "content": "[respond]\n",
+    },
+    "gcode_arcs": {
+        "label": "G-code Arcs",
+        "sections": ["gcode_arcs"],
+        "content": "[gcode_arcs]\nresolution: 0.1\n",
+    },
+    "firmware_retraction": {
+        "label": "Firmware Retraction",
+        "sections": ["firmware_retraction"],
+        "content": "\n".join([
+            "[firmware_retraction]",
+            "retract_length: 0.8",
+            "retract_speed: 35",
+            "unretract_extra_length: 0",
+            "unretract_speed: 35",
+            "",
+        ]),
+    },
+}
+
+def clean_config_value(value, fallback=""):
+    if value is None:
+        return fallback
+    return str(value).replace("\x00", "").strip()
+
+def require_pin(value, label):
+    pin = clean_config_value(value)
+    if not pin:
+        raise ValueError(f"{label} is required")
+    if not PIN_VALUE_PATTERN.match(pin):
+        raise ValueError(f"{label} has invalid characters")
+    return pin
+
+def config_float(data, key, fallback):
+    try:
+        return float(data.get(key, fallback))
+    except (TypeError, ValueError):
+        return float(fallback)
+
+def config_int(data, key, fallback, minimum=None, maximum=None):
+    try:
+        value = int(data.get(key, fallback))
+    except (TypeError, ValueError):
+        value = int(fallback)
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+def format_config_number(value, digits=3):
+    number = float(value)
+    text = f"{number:.{digits}f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+def managed_block(block_id, body):
+    return (
+        f"# >>> Klipper Farm managed: {block_id}\n"
+        f"{body.rstrip()}\n"
+        f"# <<< Klipper Farm managed: {block_id}\n"
+    )
+
+def remove_managed_block(content, block_id):
+    pattern = rf"(?ms)^# >>> Klipper Farm managed: {re.escape(block_id)}\n.*?^# <<< Klipper Farm managed: {re.escape(block_id)}\n?"
+    return re.sub(pattern, "", content).rstrip() + "\n"
+
+def section_regex(section):
+    return re.compile(rf"(?ms)^\s*\[{re.escape(section)}\]\s*(?:#.*)?\n.*?(?=^\s*\[|^#\*# <---------------------- SAVE_CONFIG|\Z)")
+
+def remove_config_sections(content, sections):
+    removed = []
+    updated = content
+    for section in sections:
+        pattern = section_regex(section)
+        if pattern.search(updated):
+            updated = pattern.sub("", updated)
+            removed.append(section)
+    return updated.rstrip() + "\n", removed
+
+def update_section_option(content, section, option, value):
+    pattern = section_regex(section)
+    match = pattern.search(content)
+    if not match:
+        return content, False
+
+    section_text = match.group(0)
+    option_pattern = re.compile(rf"(?m)^(\s*{re.escape(option)}\s*:\s*).*$")
+    replacement = f"{option}: {value}"
+    if option_pattern.search(section_text):
+        updated_section = option_pattern.sub(replacement, section_text)
+    else:
+        updated_section = section_text.rstrip() + f"\n{replacement}\n"
+
+    return content[:match.start()] + updated_section + content[match.end():], True
+
+def comment_section_option(content, section, option, reason):
+    pattern = section_regex(section)
+    match = pattern.search(content)
+    if not match:
+        return content, False
+
+    section_text = match.group(0)
+    option_pattern = re.compile(rf"(?m)^(\s*)({re.escape(option)}\s*:\s*.*)$")
+    if not option_pattern.search(section_text):
+        return content, False
+
+    updated_section = option_pattern.sub(rf"\1# \2  # {reason}", section_text)
+    return content[:match.start()] + updated_section + content[match.end():], True
+
+def insert_before_save_config(content, block):
+    save_config_marker = "#*# <---------------------- SAVE_CONFIG"
+    marker_index = content.find(save_config_marker)
+    if marker_index >= 0:
+        prefix = content[:marker_index].rstrip()
+        suffix = content[marker_index:].lstrip()
+        return f"{prefix}\n\n{block}\n{suffix}"
+    return content.rstrip() + f"\n\n{block}"
+
+def render_bed_probe_block(bed_probe):
+    probe_type = clean_config_value(bed_probe.get("probe_type"), "bltouch").lower()
+    if probe_type not in {"bltouch", "probe"}:
+        raise ValueError("Probe type must be bltouch or probe")
+
+    sensor_pin = require_pin(bed_probe.get("sensor_pin"), "Sensor pin")
+    control_pin = clean_config_value(bed_probe.get("control_pin"))
+
+    x_offset = format_config_number(config_float(bed_probe, "x_offset", 0))
+    y_offset = format_config_number(config_float(bed_probe, "y_offset", 0))
+    z_offset = format_config_number(config_float(bed_probe, "z_offset", 0))
+    probe_speed = format_config_number(config_float(bed_probe, "probe_speed", 5))
+    lift_speed = format_config_number(config_float(bed_probe, "lift_speed", 5))
+    samples = config_int(bed_probe, "samples", 2, 1, 10)
+    sample_retract_dist = format_config_number(config_float(bed_probe, "sample_retract_dist", 2))
+
+    if probe_type == "bltouch":
+        control_pin = require_pin(control_pin, "Control pin")
+        probe_lines = [
+            "[bltouch]",
+            f"sensor_pin: {sensor_pin}",
+            f"control_pin: {control_pin}",
+            f"x_offset: {x_offset}",
+            f"y_offset: {y_offset}",
+            f"z_offset: {z_offset}",
+            f"speed: {probe_speed}",
+            f"lift_speed: {lift_speed}",
+            f"samples: {samples}",
+            f"sample_retract_dist: {sample_retract_dist}",
+        ]
+    else:
+        probe_lines = [
+            "[probe]",
+            f"pin: {sensor_pin}",
+            f"x_offset: {x_offset}",
+            f"y_offset: {y_offset}",
+            f"z_offset: {z_offset}",
+            f"speed: {probe_speed}",
+            f"samples: {samples}",
+            f"sample_retract_dist: {sample_retract_dist}",
+        ]
+
+    safe_x = format_config_number(config_float(bed_probe, "safe_z_home_x", 117.5))
+    safe_y = format_config_number(config_float(bed_probe, "safe_z_home_y", 117.5))
+    safe_speed = format_config_number(config_float(bed_probe, "safe_z_home_speed", 50))
+    z_hop = format_config_number(config_float(bed_probe, "z_hop", 10))
+    z_hop_speed = format_config_number(config_float(bed_probe, "z_hop_speed", 5))
+
+    mesh_min_x = format_config_number(config_float(bed_probe, "mesh_min_x", 20))
+    mesh_min_y = format_config_number(config_float(bed_probe, "mesh_min_y", 20))
+    mesh_max_x = format_config_number(config_float(bed_probe, "mesh_max_x", 205))
+    mesh_max_y = format_config_number(config_float(bed_probe, "mesh_max_y", 205))
+    mesh_speed = format_config_number(config_float(bed_probe, "mesh_speed", 120))
+    horizontal_move_z = format_config_number(config_float(bed_probe, "horizontal_move_z", 5))
+    probe_count_x = config_int(bed_probe, "probe_count_x", 5, 2, 15)
+    probe_count_y = config_int(bed_probe, "probe_count_y", 5, 2, 15)
+
+    mesh_lines = [
+        "[safe_z_home]",
+        f"home_xy_position: {safe_x}, {safe_y}",
+        f"speed: {safe_speed}",
+        f"z_hop: {z_hop}",
+        f"z_hop_speed: {z_hop_speed}",
+        "",
+        "[bed_mesh]",
+        f"speed: {mesh_speed}",
+        f"horizontal_move_z: {horizontal_move_z}",
+        f"mesh_min: {mesh_min_x}, {mesh_min_y}",
+        f"mesh_max: {mesh_max_x}, {mesh_max_y}",
+        f"probe_count: {probe_count_x}, {probe_count_y}",
+    ]
+    if probe_count_x >= 4 and probe_count_y >= 4:
+        mesh_lines.append("algorithm: bicubic")
+
+    return "\n".join(probe_lines) + "\n\n" + "\n".join(mesh_lines) + "\n"
+
+def build_config_helper_patch(content, data: KlipperConfigHelperRequest):
+    changes = []
+    warnings = []
+    snippets = []
+    updated = remove_managed_block(remove_managed_block(content, "bed_probe"), "klipper_plugins")
+
+    bed_probe = data.bed_probe or {}
+    if bed_probe.get("enabled"):
+        target_sections = ["bltouch", "probe", "safe_z_home", "bed_mesh"]
+        add_probe_block = True
+        if data.replace_existing:
+            updated, removed = remove_config_sections(updated, target_sections)
+            if removed:
+                changes.append(f"Replaced existing section(s): {', '.join(removed)}")
+        else:
+            existing = [section for section in target_sections if config_has_section(updated, section)]
+            if existing:
+                warnings.append(f"Skipped probe block because existing section(s) are present: {', '.join(existing)}")
+                add_probe_block = False
+
+        if add_probe_block:
+            probe_block = managed_block("bed_probe", render_bed_probe_block(bed_probe))
+            snippets.append(probe_block)
+            changes.append("Added bed probe, safe Z home, and bed mesh sections")
+
+        if bed_probe.get("use_probe_for_z_homing", True):
+            updated, changed = update_section_option(updated, "stepper_z", "endstop_pin", "probe:z_virtual_endstop")
+            if changed:
+                changes.append("Set [stepper_z] endstop_pin to probe:z_virtual_endstop")
+                updated, commented = comment_section_option(
+                    updated,
+                    "stepper_z",
+                    "position_endstop",
+                    "disabled by Klipper Farm when probe:z_virtual_endstop is used",
+                )
+                if commented:
+                    changes.append("Disabled [stepper_z] position_endstop")
+            else:
+                warnings.append("Could not find [stepper_z]; add endstop_pin: probe:z_virtual_endstop manually if this probe should home Z")
+
+    plugin_ids = [plugin for plugin in data.plugins if plugin in PLUGIN_SNIPPETS]
+    if plugin_ids:
+        plugin_sections = []
+        plugin_parts = []
+        for plugin_id in plugin_ids:
+            plugin = PLUGIN_SNIPPETS[plugin_id]
+            sections = plugin["sections"]
+            if data.replace_existing:
+                updated, removed = remove_config_sections(updated, sections)
+                if removed:
+                    changes.append(f"Replaced existing plugin section(s): {', '.join(removed)}")
+                plugin_parts.append(plugin["content"])
+                plugin_sections.extend(sections)
+            else:
+                existing = [section for section in sections if config_has_section(updated, section)]
+                if existing:
+                    warnings.append(f"Skipped {plugin['label']} because section already exists: {', '.join(existing)}")
+                    continue
+                plugin_parts.append(plugin["content"])
+                plugin_sections.extend(sections)
+
+        if plugin_parts:
+            snippets.append(managed_block("klipper_plugins", "\n".join(part.rstrip() for part in plugin_parts)))
+            changes.append(f"Added Klipper plugin section(s): {', '.join(plugin_sections)}")
+
+    if snippets:
+        updated = insert_before_save_config(updated, "\n".join(snippets))
+
+    changed = updated.rstrip() != content.rstrip()
+    return updated, changed, changes, warnings, "\n".join(snippets).rstrip() + ("\n" if snippets else "")
 
 def move_legacy_moonraker_sidecar_backups(moonraker_conf):
     moved_paths = []
@@ -765,6 +1053,54 @@ async def restart_instance(service: str = Body(..., embed=True)):
     validate_service_name(service)
     subprocess.run(["sudo", "systemctl", "restart", service])
     return {"status": "restarted"}
+
+@app.post("/instances/config-helper/apply")
+async def apply_klipper_config_helper(data: KlipperConfigHelperRequest):
+    service = f"klipper-{data.printer_slug}.service"
+    validate_service_name(service)
+
+    printer_cfg = os.path.join(data.config_path, "printer.cfg")
+    if not path_is_within(printer_cfg, PRINTERS_ROOT):
+        raise HTTPException(status_code=403, detail="Config path is outside the managed printers directory")
+    if not os.path.exists(printer_cfg):
+        raise HTTPException(status_code=404, detail=f"printer.cfg not found at {printer_cfg}")
+
+    try:
+        with open(printer_cfg, "r") as f:
+            content = f.read()
+
+        updated, changed, changes, warnings, snippet = build_config_helper_patch(content, data)
+        backup_paths = []
+
+        if changed and not data.dry_run:
+            backup_path = backup_printer_config(printer_cfg)
+            if backup_path:
+                backup_paths.append(backup_path)
+                changes.insert(0, f"Backed up printer.cfg to {backup_path}")
+
+            with open(printer_cfg, "w") as f:
+                f.write(updated.rstrip() + "\n")
+
+            if data.restart_services:
+                run_checked(["sudo", "systemctl", "restart", service], timeout=60)
+                changes.append(f"Restarted {service}")
+
+        return {
+            "status": "preview" if data.dry_run else "success",
+            "message": "Config helper preview generated" if data.dry_run else "Klipper config updated",
+            "changed": changed,
+            "backup_paths": backup_paths,
+            "changes": changes,
+            "warnings": warnings,
+            "snippet": snippet,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(status_code=500, detail=describe_process_error(e))
+    except Exception as e:
+        logger.error("Config helper failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Failed to apply Klipper config helper: {e}")
 
 @app.post("/instances/repair-moonraker")
 async def repair_moonraker_instance(data: MoonrakerRepairRequest):
