@@ -26,6 +26,7 @@ export const printerService = {
   getConfigHelperPresets: () => api.get('/printers/config-helper/presets'),
   previewConfigHelper: (id, data) => api.post(`/printers/${id}/config-helper/preview`, data),
   applyConfigHelper: (id, data) => api.post(`/printers/${id}/config-helper/apply`, data),
+  findProbeReach: (id, data) => api.post(`/printers/${id}/probe-reach/find`, data),
   createPrinter: (data) => api.post('/printers', data),
   updatePrinter: (id, data) => api.put(`/printers/${id}`, data),
   deletePrinter: (id) => api.delete(`/printers/${id}`),

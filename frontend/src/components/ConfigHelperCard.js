@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -137,11 +137,22 @@ const toNumber = (value, fallback = 0) => {
   return Number.isFinite(number) ? number : fallback;
 };
 
+const clampNumber = (value, min, max) => Math.max(min, Math.min(max, value));
+
+const roundConfigNumber = (value, digits = 1) => Number(Number(value).toFixed(digits));
+
 const formatNumber = (value, digits = 2) => {
   const number = Number(value);
   if (!Number.isFinite(number)) return '--';
   const text = number.toFixed(digits);
   return digits > 0 ? (text.replace(/\.?0+$/, '') || '0') : text;
+};
+
+const apiErrorMessage = (error, fallback) => {
+  const detail = error?.response?.data?.detail;
+  if (typeof detail === 'string') return detail;
+  if (detail?.message) return detail.message;
+  return fallback;
 };
 
 const getBedSize = (bedProbe, selectedMeshPreset) => {
@@ -210,6 +221,14 @@ const buildValidationIssues = (bedProbe, selectedMeshPreset) => {
 
   if (values.safe_z_home_x < 0 || values.safe_z_home_y < 0 || values.safe_z_home_x > bed.width || values.safe_z_home_y > bed.height) {
     addIssue('error', 'Safe home position is outside the selected bed area.', ['safe_z_home_x', 'safe_z_home_y']);
+  }
+
+  const safeProbe = {
+    x: values.safe_z_home_x + values.x_offset,
+    y: values.safe_z_home_y + values.y_offset,
+  };
+  if (safeProbe.x < 0 || safeProbe.x > bed.width || safeProbe.y < 0 || safeProbe.y > bed.height) {
+    addIssue('warning', 'The probe position at safe home is outside the selected bed area.', ['safe_z_home_x', 'safe_z_home_y', 'x_offset', 'y_offset']);
   }
 
   if (values.probe_count_x < 2 || values.probe_count_x > 15) {
@@ -291,6 +310,12 @@ const TextField = ({ name, value, onChange, issue, placeholder }) => {
   );
 };
 
+const NumberGrid = ({ children, className = '' }) => (
+  <div className={`grid grid-cols-[repeat(auto-fit,minmax(12rem,1fr))] gap-3 ${className}`}>
+    {children}
+  </div>
+);
+
 const NumberControl = ({
   label,
   name,
@@ -307,12 +332,12 @@ const NumberControl = ({
   return (
     <label className="block">
       <span className="mb-1 block text-[9px] font-bold uppercase tracking-widest text-slate-500">{label || fieldLabel[name] || name}</span>
-      <div className={`flex overflow-hidden rounded-lg border bg-slate-950/80 transition-colors ${invalid ? 'border-red-500/60' : warning ? 'border-amber-500/50' : 'border-slate-700/80 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/20 hover:border-slate-600'}`}>
+      <div className={`grid min-w-0 grid-cols-[2rem_minmax(5.25rem,1fr)_auto_2rem] overflow-hidden rounded-lg border bg-slate-950/80 transition-colors ${invalid ? 'border-red-500/60' : warning ? 'border-amber-500/50' : 'border-slate-700/80 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/20 hover:border-slate-600'}`}>
         {onNudge && (
           <button
             type="button"
             onClick={() => onNudge(name, -step)}
-            className={`${compact ? 'w-8' : 'w-10'} flex items-center justify-center border-r border-slate-700/70 text-slate-400 transition-colors hover:bg-slate-800 hover:text-blue-300`}
+            className="flex min-w-0 items-center justify-center border-r border-slate-700/70 text-slate-400 transition-colors hover:bg-slate-800 hover:text-blue-300"
             title={`Decrease ${label || fieldLabel[name] || name}`}
           >
             <Minus size={compact ? 12 : 14} />
@@ -323,14 +348,14 @@ const NumberControl = ({
           step={step}
           value={value}
           onChange={(event) => onChange(name, event.target.value)}
-          className="min-w-0 flex-1 bg-transparent px-2 py-2 text-center font-mono text-sm font-bold text-slate-100 outline-none"
+          className="min-w-0 bg-transparent px-2 py-2 text-center font-mono text-sm font-bold text-slate-100 outline-none"
         />
-        <span className="flex items-center border-l border-slate-700/60 px-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">{unit}</span>
+        <span className="flex min-w-10 items-center justify-center whitespace-nowrap border-l border-slate-700/60 px-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">{unit}</span>
         {onNudge && (
           <button
             type="button"
             onClick={() => onNudge(name, step)}
-            className={`${compact ? 'w-8' : 'w-10'} flex items-center justify-center border-l border-slate-700/70 text-slate-400 transition-colors hover:bg-slate-800 hover:text-blue-300`}
+            className="flex min-w-0 items-center justify-center border-l border-slate-700/70 text-slate-400 transition-colors hover:bg-slate-800 hover:text-blue-300"
             title={`Increase ${label || fieldLabel[name] || name}`}
           >
             <Plus size={compact ? 12 : 14} />
@@ -407,13 +432,14 @@ const ValidationSummary = ({ issues }) => {
   );
 };
 
-const MeshVisualPreview = ({ bedProbe, selectedMeshPreset, issues }) => {
+const MeshVisualPreview = ({ bedProbe, selectedMeshPreset, issues, onBedProbeChange }) => {
+  const svgRef = useRef(null);
+  const [dragState, setDragState] = useState(null);
   const bed = getBedSize(bedProbe, selectedMeshPreset);
   const pad = 26;
   const size = 248;
   const mapX = (value) => pad + (toNumber(value) / bed.width) * size;
   const mapY = (value) => pad + size - (toNumber(value) / bed.height) * size;
-  const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
   const safeX = toNumber(bedProbe.safe_z_home_x);
   const safeY = toNumber(bedProbe.safe_z_home_y);
   const probeAtHomeX = safeX + toNumber(bedProbe.x_offset);
@@ -426,8 +452,8 @@ const MeshVisualPreview = ({ bedProbe, selectedMeshPreset, issues }) => {
   const meshRight = mapX(Math.max(meshMinX, meshMaxX));
   const meshTop = mapY(Math.max(meshMinY, meshMaxY));
   const meshBottom = mapY(Math.min(meshMinY, meshMaxY));
-  const countX = clamp(Math.round(toNumber(bedProbe.probe_count_x, 5)), 2, 15);
-  const countY = clamp(Math.round(toNumber(bedProbe.probe_count_y, 5)), 2, 15);
+  const countX = clampNumber(Math.round(toNumber(bedProbe.probe_count_x, 5)), 2, 15);
+  const countY = clampNumber(Math.round(toNumber(bedProbe.probe_count_y, 5)), 2, 15);
   const points = [];
 
   for (let y = 0; y < countY; y += 1) {
@@ -439,14 +465,118 @@ const MeshVisualPreview = ({ bedProbe, selectedMeshPreset, issues }) => {
   }
 
   const safePoint = {
-    x: clamp(mapX(safeX), pad, pad + size),
-    y: clamp(mapY(safeY), pad, pad + size),
+    x: clampNumber(mapX(safeX), pad, pad + size),
+    y: clampNumber(mapY(safeY), pad, pad + size),
   };
   const probePoint = {
-    x: clamp(mapX(probeAtHomeX), pad, pad + size),
-    y: clamp(mapY(probeAtHomeY), pad, pad + size),
+    x: clampNumber(mapX(probeAtHomeX), pad, pad + size),
+    y: clampNumber(mapY(probeAtHomeY), pad, pad + size),
   };
   const hasSeriousIssue = issues.some((issue) => issue.severity === 'error');
+  const probeReachIssue = issues.find((issue) => issue.message.includes('Probe offset makes the probe miss'));
+
+  const pointFromEvent = (event) => {
+    if (!svgRef.current) return null;
+    const svgPoint = svgRef.current.createSVGPoint();
+    svgPoint.x = event.clientX;
+    svgPoint.y = event.clientY;
+    const point = svgPoint.matrixTransform(svgRef.current.getScreenCTM().inverse());
+    return {
+      x: clampNumber(((point.x - pad) / size) * bed.width, 0, bed.width),
+      y: clampNumber(((pad + size - point.y) / size) * bed.height, 0, bed.height),
+    };
+  };
+
+  const applyDrag = (updates) => {
+    if (!onBedProbeChange) return;
+    onBedProbeChange(Object.entries(updates).reduce((acc, [key, value]) => ({
+      ...acc,
+      [key]: roundConfigNumber(value, key === 'x_offset' || key === 'y_offset' ? 2 : 1),
+    }), {}));
+  };
+
+  const beginDrag = (target, event) => {
+    if (!onBedProbeChange) return;
+    const point = pointFromEvent(event);
+    if (!point) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    setDragState({
+      target,
+      start: point,
+      initial: {
+        mesh_min_x: meshMinX,
+        mesh_min_y: meshMinY,
+        mesh_max_x: meshMaxX,
+        mesh_max_y: meshMaxY,
+        safe_z_home_x: safeX,
+        safe_z_home_y: safeY,
+        x_offset: toNumber(bedProbe.x_offset),
+        y_offset: toNumber(bedProbe.y_offset),
+      },
+    });
+  };
+
+  const handleDrag = (event) => {
+    if (!dragState) return;
+    const point = pointFromEvent(event);
+    if (!point) return;
+    event.preventDefault();
+    const dx = point.x - dragState.start.x;
+    const dy = point.y - dragState.start.y;
+    const initial = dragState.initial;
+
+    if (dragState.target === 'mesh') {
+      const meshWidth = Math.max(1, initial.mesh_max_x - initial.mesh_min_x);
+      const meshHeight = Math.max(1, initial.mesh_max_y - initial.mesh_min_y);
+      const nextMinX = clampNumber(initial.mesh_min_x + dx, 0, Math.max(0, bed.width - meshWidth));
+      const nextMinY = clampNumber(initial.mesh_min_y + dy, 0, Math.max(0, bed.height - meshHeight));
+      applyDrag({
+        mesh_min_x: nextMinX,
+        mesh_max_x: nextMinX + meshWidth,
+        mesh_min_y: nextMinY,
+        mesh_max_y: nextMinY + meshHeight,
+      });
+      return;
+    }
+
+    if (dragState.target === 'mesh-min') {
+      applyDrag({
+        mesh_min_x: clampNumber(point.x, 0, initial.mesh_max_x - 1),
+        mesh_min_y: clampNumber(point.y, 0, initial.mesh_max_y - 1),
+      });
+      return;
+    }
+
+    if (dragState.target === 'mesh-max') {
+      applyDrag({
+        mesh_max_x: clampNumber(point.x, initial.mesh_min_x + 1, bed.width),
+        mesh_max_y: clampNumber(point.y, initial.mesh_min_y + 1, bed.height),
+      });
+      return;
+    }
+
+    if (dragState.target === 'safe-home') {
+      applyDrag({
+        safe_z_home_x: point.x,
+        safe_z_home_y: point.y,
+      });
+      return;
+    }
+
+    if (dragState.target === 'probe-offset') {
+      applyDrag({
+        x_offset: point.x - safeX,
+        y_offset: point.y - safeY,
+      });
+    }
+  };
+
+  const stopDrag = (event) => {
+    if (!dragState) return;
+    setDragState(null);
+  };
 
   return (
     <div className="space-y-3 rounded-lg border border-slate-700/70 bg-slate-900/45 p-3">
@@ -460,8 +590,27 @@ const MeshVisualPreview = ({ bedProbe, selectedMeshPreset, issues }) => {
         </span>
       </div>
 
+      {probeReachIssue && (
+        <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[11px] font-semibold leading-relaxed text-amber-100">
+          {probeReachIssue.message}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-700/60 bg-slate-950/50 px-3 py-2">
+        <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Drag mode</div>
+        <div className="rounded-md bg-blue-500/10 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-blue-300">Config only</div>
+      </div>
+
       <div className="overflow-hidden rounded-lg border border-slate-700/70 bg-slate-950/60">
-        <svg viewBox="0 0 300 300" className="block h-auto w-full">
+        <svg
+          ref={svgRef}
+          viewBox="0 0 300 300"
+          className="block h-auto w-full touch-none select-none"
+          onPointerMove={handleDrag}
+          onPointerUp={stopDrag}
+          onPointerCancel={stopDrag}
+          onPointerLeave={stopDrag}
+        >
           <defs>
             <pattern id="mesh-grid" width="16" height="16" patternUnits="userSpaceOnUse">
               <path d="M 16 0 L 0 0 0 16" fill="none" stroke="#1e293b" strokeWidth="1" />
@@ -479,13 +628,53 @@ const MeshVisualPreview = ({ bedProbe, selectedMeshPreset, issues }) => {
             opacity="0.14"
             stroke="#38bdf8"
             strokeWidth="2"
+            className={onBedProbeChange ? 'cursor-grab active:cursor-grabbing' : ''}
+            onPointerDown={(event) => beginDrag('mesh', event)}
           />
           {points.map((point, index) => (
             <circle key={`${point.x}-${point.y}-${index}`} cx={point.x} cy={point.y} r="2.6" fill="#7dd3fc" opacity="0.95" />
           ))}
           <line x1={safePoint.x} y1={safePoint.y} x2={probePoint.x} y2={probePoint.y} stroke="#a78bfa" strokeWidth="2" strokeDasharray="5 5" />
-          <circle cx={safePoint.x} cy={safePoint.y} r="7" fill="#2563eb" stroke="#bfdbfe" strokeWidth="2" />
-          <circle cx={probePoint.x} cy={probePoint.y} r="6" fill="#06b6d4" stroke="#cffafe" strokeWidth="2" />
+          <circle
+            cx={meshLeft}
+            cy={meshBottom}
+            r="6"
+            fill="#0f172a"
+            stroke="#38bdf8"
+            strokeWidth="2.5"
+            className={onBedProbeChange ? 'cursor-nwse-resize' : ''}
+            onPointerDown={(event) => beginDrag('mesh-min', event)}
+          />
+          <circle
+            cx={meshRight}
+            cy={meshTop}
+            r="6"
+            fill="#0f172a"
+            stroke="#38bdf8"
+            strokeWidth="2.5"
+            className={onBedProbeChange ? 'cursor-nwse-resize' : ''}
+            onPointerDown={(event) => beginDrag('mesh-max', event)}
+          />
+          <circle
+            cx={safePoint.x}
+            cy={safePoint.y}
+            r="8"
+            fill="#2563eb"
+            stroke="#bfdbfe"
+            strokeWidth="2"
+            className={onBedProbeChange ? 'cursor-grab active:cursor-grabbing' : ''}
+            onPointerDown={(event) => beginDrag('safe-home', event)}
+          />
+          <circle
+            cx={probePoint.x}
+            cy={probePoint.y}
+            r="7"
+            fill="#06b6d4"
+            stroke="#cffafe"
+            strokeWidth="2"
+            className={onBedProbeChange ? 'cursor-grab active:cursor-grabbing' : ''}
+            onPointerDown={(event) => beginDrag('probe-offset', event)}
+          />
           <text x={pad} y="18" fill="#94a3b8" fontSize="9" fontWeight="700">Y+</text>
           <text x="270" y="292" fill="#94a3b8" fontSize="9" fontWeight="700">X+</text>
         </svg>
@@ -588,6 +777,17 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
     setPreview(null);
   };
 
+  const updateBedProbeValues = (updates) => {
+    setForm((current) => ({
+      ...current,
+      bed_probe: {
+        ...current.bed_probe,
+        ...updates,
+      },
+    }));
+    setPreview(null);
+  };
+
   const nudgeBedProbeNumber = (name, amount) => {
     setForm((current) => {
       const currentValue = Number(current.bed_probe[name]);
@@ -644,6 +844,75 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
       } : current.bed_probe,
     }));
     setPreview(null);
+  };
+
+  const fitMeshToProbeReach = () => {
+    const bed = getBedSize(form.bed_probe, selectedMeshPreset);
+    const margin = 5;
+    const reachMinX = clampNumber(margin, 0, bed.width - 1);
+    const reachMaxX = clampNumber(bed.width - margin, reachMinX + 1, bed.width);
+    const reachMinY = clampNumber(margin, 0, bed.height - 1);
+    const reachMaxY = clampNumber(bed.height - margin, reachMinY + 1, bed.height);
+    const nextMinX = clampNumber(toNumber(form.bed_probe.mesh_min_x), reachMinX, reachMaxX - 1);
+    const nextMinY = clampNumber(toNumber(form.bed_probe.mesh_min_y), reachMinY, reachMaxY - 1);
+
+    updateBedProbeValues({
+      mesh_min_x: roundConfigNumber(nextMinX, 1),
+      mesh_min_y: roundConfigNumber(nextMinY, 1),
+      mesh_max_x: roundConfigNumber(clampNumber(toNumber(form.bed_probe.mesh_max_x), nextMinX + 1, reachMaxX), 1),
+      mesh_max_y: roundConfigNumber(clampNumber(toNumber(form.bed_probe.mesh_max_y), nextMinY + 1, reachMaxY), 1),
+    });
+  };
+
+  const runProbeReachFinder = async () => {
+    if (!form.bed_probe.enabled) {
+      addToast('Enable the bed probe before finding probe reach', 'info');
+      return;
+    }
+
+    if (hasBlockingValidation) {
+      setSettingsOpen(true);
+      addToast('Fix config validation errors before moving the printer', 'error');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      'Run probe reach finder now?\n\nThis will physically move X/Y/Z, retract before each attempt, and probe the mesh corners. Home X/Y/Z first and keep a hand near power.'
+    );
+    if (!confirmed) return;
+
+    const bed = getBedSize(form.bed_probe, selectedMeshPreset);
+    setBusy('probe-reach');
+    try {
+      const res = await printerService.findProbeReach(printer.id, {
+        bed_probe: form.bed_probe,
+        bed_width: bed.width,
+        bed_height: bed.height,
+        margin_mm: 5,
+        step_mm: 10,
+        max_attempts: 20,
+      });
+      const suggested = res.data?.suggested_bed_probe;
+      if (suggested) updateBedProbeValues(suggested);
+      setPreview({
+        changed: true,
+        changes: [
+          `Mesh min: ${formatNumber(suggested?.mesh_min_x, 1)}, ${formatNumber(suggested?.mesh_min_y, 1)}`,
+          `Mesh max: ${formatNumber(suggested?.mesh_max_x, 1)}, ${formatNumber(suggested?.mesh_max_y, 1)}`,
+          `${res.data?.successful_edges?.length || 0} edges confirmed`,
+        ],
+        warnings: [],
+        snippet: (res.data?.attempts || [])
+          .map((attempt) => `${attempt.edge || attempt.corner} #${attempt.attempt}: ${attempt.status} nozzle ${attempt.nozzle_x},${attempt.nozzle_y} probe ${attempt.probe_x},${attempt.probe_y}`)
+          .join('\n'),
+      });
+      addToast(res.data?.message || 'Probe reach finder completed', 'success');
+      await fetchRuntime();
+    } catch (err) {
+      addToast(apiErrorMessage(err, 'Probe reach finder failed'), 'error');
+    } finally {
+      setBusy('');
+    }
   };
 
   const togglePlugin = (pluginId, checked) => {
@@ -815,11 +1084,11 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
                 description="Measure probe location relative to the nozzle. Z is usually calibrated carefully after the probe is mounted."
               >
                 <div className={probeDisabled ? 'pointer-events-none opacity-40' : 'space-y-3'}>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <NumberGrid>
                     <NumberControl label="X Offset" name="x_offset" value={form.bed_probe.x_offset} onChange={updateBedProbe} onNudge={nudgeBedProbeNumber} step={1} issue={validationByField.x_offset} compact />
                     <NumberControl label="Y Offset" name="y_offset" value={form.bed_probe.y_offset} onChange={updateBedProbe} onNudge={nudgeBedProbeNumber} step={1} issue={validationByField.y_offset} compact />
                     <NumberControl label="Z Offset" name="z_offset" value={form.bed_probe.z_offset} onChange={updateBedProbe} onNudge={nudgeBedProbeNumber} step={0.01} issue={validationByField.z_offset} compact />
-                  </div>
+                  </NumberGrid>
                   <div className="rounded-lg border border-slate-700/60 bg-slate-950/50 px-3 py-2 text-[11px] leading-relaxed text-slate-400">
                     Positive X/Y means the probe is to the right/back of the nozzle. Negative X/Y means left/front.
                   </div>
@@ -832,12 +1101,12 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
                 description="Set where XY moves before probing Z and whether Klipper should use the probe as the Z endstop."
               >
                 <div className={probeDisabled ? 'pointer-events-none opacity-40' : 'space-y-3'}>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <NumberGrid>
                     <NumberControl name="safe_z_home_x" value={form.bed_probe.safe_z_home_x} onChange={updateBedProbe} onNudge={nudgeBedProbeNumber} step={1} issue={validationByField.safe_z_home_x} compact />
                     <NumberControl name="safe_z_home_y" value={form.bed_probe.safe_z_home_y} onChange={updateBedProbe} onNudge={nudgeBedProbeNumber} step={1} issue={validationByField.safe_z_home_y} compact />
                     <NumberControl name="z_hop" value={form.bed_probe.z_hop} onChange={updateBedProbe} onNudge={nudgeBedProbeNumber} step={1} issue={validationByField.z_hop} compact />
                     <NumberControl name="z_hop_speed" value={form.bed_probe.z_hop_speed} onChange={updateBedProbe} onNudge={nudgeBedProbeNumber} step={1} unit="mm/s" compact />
-                  </div>
+                  </NumberGrid>
                   <SwitchRow
                     checked={form.bed_probe.use_probe_for_z_homing}
                     label="Use probe for Z homing"
@@ -851,6 +1120,27 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
                 icon={Map}
                 title="Mesh Area"
                 description="Define the reachable probing rectangle, grid density, and travel height."
+                aside={(
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={fitMeshToProbeReach}
+                      disabled={Boolean(busy)}
+                      className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-cyan-200 transition-colors hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Fit Probe Reach
+                    </button>
+                    <button
+                      type="button"
+                      onClick={runProbeReachFinder}
+                      disabled={Boolean(busy)}
+                      className="inline-flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-emerald-200 transition-colors hover:bg-emerald-500/20 disabled:cursor-wait disabled:opacity-50"
+                    >
+                      {busy === 'probe-reach' ? <RefreshCw size={13} className="animate-spin" /> : <Crosshair size={13} />}
+                      <span>Probe Find Reach</span>
+                    </button>
+                  </div>
+                )}
               >
                 <div className={probeDisabled ? 'pointer-events-none opacity-40' : 'space-y-3'}>
                   <label className="block">
@@ -865,7 +1155,7 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
                       ))}
                     </select>
                   </label>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <NumberGrid>
                     <NumberControl name="mesh_min_x" value={form.bed_probe.mesh_min_x} onChange={updateBedProbe} onNudge={nudgeBedProbeNumber} step={1} issue={validationByField.mesh_min_x} compact />
                     <NumberControl name="mesh_min_y" value={form.bed_probe.mesh_min_y} onChange={updateBedProbe} onNudge={nudgeBedProbeNumber} step={1} issue={validationByField.mesh_min_y} compact />
                     <NumberControl name="mesh_max_x" value={form.bed_probe.mesh_max_x} onChange={updateBedProbe} onNudge={nudgeBedProbeNumber} step={1} issue={validationByField.mesh_max_x} compact />
@@ -874,7 +1164,7 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
                     <NumberControl name="probe_count_y" value={form.bed_probe.probe_count_y} onChange={updateBedProbe} onNudge={nudgeBedProbeNumber} step={1} unit="pts" issue={validationByField.probe_count_y} compact />
                     <NumberControl name="mesh_speed" value={form.bed_probe.mesh_speed} onChange={updateBedProbe} onNudge={nudgeBedProbeNumber} step={5} unit="mm/s" compact />
                     <NumberControl name="horizontal_move_z" value={form.bed_probe.horizontal_move_z} onChange={updateBedProbe} onNudge={nudgeBedProbeNumber} step={0.5} issue={validationByField.horizontal_move_z} compact />
-                  </div>
+                  </NumberGrid>
                 </div>
               </Section>
 
@@ -897,13 +1187,13 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
             </div>
 
             <aside className="space-y-4 xl:sticky xl:top-4 xl:self-start">
-              <MeshVisualPreview bedProbe={form.bed_probe} selectedMeshPreset={selectedMeshPreset} issues={validationIssues} />
+              <MeshVisualPreview bedProbe={form.bed_probe} selectedMeshPreset={selectedMeshPreset} issues={validationIssues} onBedProbeChange={updateBedProbeValues} />
               <ValidationSummary issues={validationIssues} />
             </aside>
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-            <MeshVisualPreview bedProbe={form.bed_probe} selectedMeshPreset={selectedMeshPreset} issues={validationIssues} />
+            <MeshVisualPreview bedProbe={form.bed_probe} selectedMeshPreset={selectedMeshPreset} issues={validationIssues} onBedProbeChange={updateBedProbeValues} />
             <ValidationSummary issues={validationIssues} />
           </div>
         )}
