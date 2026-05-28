@@ -45,6 +45,10 @@ class Node(NodeBase):
     last_update_status: Optional[str] = None
     last_update_message: Optional[str] = None
     last_update_at: Optional[datetime] = None
+    active_operation: Optional[str] = None
+    active_operation_message: Optional[str] = None
+    active_operation_started_at: Optional[datetime] = None
+    active_operation_expires_at: Optional[datetime] = None
     last_seen: Optional[datetime]
     created_at: datetime
     updated_at: Optional[datetime]

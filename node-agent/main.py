@@ -193,6 +193,80 @@ def get_mount_info(mount_path):
         logger.error(f"Error reading /proc/mounts: {e}")
     return "", ""
 
+def get_fstab_mount_entry(mount_path):
+    try:
+        with open("/etc/fstab", "r") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                parts = stripped.split()
+                if len(parts) >= 4 and parts[1] == mount_path and parts[2].startswith("nfs"):
+                    return {
+                        "source": parts[0],
+                        "mount_point": parts[1],
+                        "filesystem_type": parts[2],
+                        "options": parts[3],
+                    }
+    except Exception as e:
+        logger.error(f"Error reading /etc/fstab: {e}")
+    return None
+
+STORAGE_SELF_HEAL_STATUS = {
+    "enabled": False,
+    "last_attempt_at": None,
+    "last_success_at": None,
+    "last_error": "",
+}
+
+async def ensure_persistent_storage_mounted(reason="startup"):
+    mount_path = os.getenv("NFS_CLIENT_MOUNT", "/mnt/klipper-farm")
+    entry = get_fstab_mount_entry(mount_path)
+    STORAGE_SELF_HEAL_STATUS["enabled"] = bool(entry)
+
+    if not entry:
+        STORAGE_SELF_HEAL_STATUS["last_error"] = "No persistent NFS mount is configured yet."
+        return {"attempted": False, "reason": reason, "message": STORAGE_SELF_HEAL_STATUS["last_error"]}
+
+    source, filesystem_type = get_mount_info(mount_path)
+    if source:
+        STORAGE_SELF_HEAL_STATUS["last_error"] = ""
+        STORAGE_SELF_HEAL_STATUS["last_success_at"] = datetime.datetime.now().isoformat()
+        return {
+            "attempted": False,
+            "reason": reason,
+            "message": f"Storage already mounted from {source}.",
+            "mount_source": source,
+            "filesystem_type": filesystem_type,
+        }
+
+    STORAGE_SELF_HEAL_STATUS["last_attempt_at"] = datetime.datetime.now().isoformat()
+    try:
+        run_privileged(["mkdir", "-p", mount_path], check=True, capture_output=True, text=True, timeout=20)
+        result = run_privileged(["mount", mount_path], capture_output=True, text=True, timeout=20)
+        if result.returncode == 0:
+            STORAGE_SELF_HEAL_STATUS["last_error"] = ""
+            STORAGE_SELF_HEAL_STATUS["last_success_at"] = datetime.datetime.now().isoformat()
+            logger.info("Persistent storage remounted at %s after %s", mount_path, reason)
+            return {"attempted": True, "success": True, "reason": reason, "mount_point": mount_path}
+
+        STORAGE_SELF_HEAL_STATUS["last_error"] = result.stderr.strip() or result.stdout.strip() or "mount command failed"
+        logger.warning("Persistent storage remount failed: %s", STORAGE_SELF_HEAL_STATUS["last_error"])
+        return {
+            "attempted": True,
+            "success": False,
+            "reason": reason,
+            "message": STORAGE_SELF_HEAL_STATUS["last_error"],
+        }
+    except subprocess.TimeoutExpired as e:
+        STORAGE_SELF_HEAL_STATUS["last_error"] = f"mount timed out after {e.timeout}s"
+        logger.warning("Persistent storage remount timed out at %s", mount_path)
+        return {"attempted": True, "success": False, "reason": reason, "message": STORAGE_SELF_HEAL_STATUS["last_error"]}
+    except Exception as e:
+        STORAGE_SELF_HEAL_STATUS["last_error"] = str(e)
+        logger.error("Persistent storage remount error: %s", e)
+        return {"attempted": True, "success": False, "reason": reason, "message": str(e)}
+
 def get_os_major_version():
     try:
         with open("/etc/os-release", "r") as f:
@@ -895,6 +969,40 @@ def get_cpu_temperature():
         pass
     return 0.0
 
+def bytes_to_mb(value):
+    return round(float(value or 0) / 1024 / 1024, 1)
+
+def get_disk_usage(path="/"):
+    try:
+        usage = psutil.disk_usage(path)
+        return {
+            "path": path,
+            "total_mb": bytes_to_mb(usage.total),
+            "used_mb": bytes_to_mb(usage.used),
+            "free_mb": bytes_to_mb(usage.free),
+            "percent": round(float(usage.percent), 1),
+        }
+    except Exception:
+        return None
+
+def get_load_average():
+    try:
+        load1, load5, load15 = os.getloadavg()
+        cpu_count = psutil.cpu_count() or 1
+        return {
+            "load_1m": round(load1, 2),
+            "load_5m": round(load5, 2),
+            "load_15m": round(load15, 2),
+            "load_percent_1m": round(min(100, (load1 / cpu_count) * 100), 1),
+        }
+    except Exception:
+        return {
+            "load_1m": 0,
+            "load_5m": 0,
+            "load_15m": 0,
+            "load_percent_1m": 0,
+        }
+
 @app.get("/health")
 async def health():
     usb_serial = []
@@ -902,13 +1010,26 @@ async def health():
     if os.path.exists(base_path):
         usb_serial = os.listdir(base_path)
 
+    memory = psutil.virtual_memory()
+    boot_seconds = int(time.time() - psutil.boot_time())
+    root_disk = get_disk_usage("/")
+    nfs_disk = get_disk_usage("/mnt/klipper-farm") if os.path.exists("/mnt/klipper-farm") else None
+
     return {
         "hostname": clean_string(socket.gethostname()),
         "ip_address": clean_string(get_ip()),
-        "cpu_usage": psutil.cpu_percent(),
-        "ram_usage": psutil.virtual_memory().percent,
+        "cpu_usage": round(float(psutil.cpu_percent(interval=0.1)), 1),
+        "cpu_count": psutil.cpu_count() or 1,
+        "load_average": get_load_average(),
+        "ram_usage": round(float(memory.percent), 1),
+        "ram_total_mb": bytes_to_mb(memory.total),
+        "ram_used_mb": bytes_to_mb(memory.used),
+        "ram_available_mb": bytes_to_mb(memory.available),
         "temperature": get_cpu_temperature(),
-        "uptime": clean_string(f"{int(time.time() - psutil.boot_time())}s"),
+        "uptime": clean_string(f"{boot_seconds}s"),
+        "uptime_seconds": boot_seconds,
+        "root_disk": root_disk,
+        "nfs_disk": nfs_disk,
         "model": clean_string(get_pi_model()),
         "pi_model": clean_string(get_pi_model()),
         "version": "1.0.0",
@@ -1345,6 +1466,7 @@ async def check_storage():
     filesystem_type = ""
     writable = False
     missing_dirs = []
+    persistent_entry = get_fstab_mount_entry(mount_path)
 
     # 1. Read /proc/mounts to detect mount status without blocking
     mount_source, filesystem_type = get_mount_info(mount_path)
@@ -1388,7 +1510,12 @@ async def check_storage():
         "writable": writable,
         "mount_source": mount_source,
         "filesystem_type": filesystem_type,
-        "missing_dirs": missing_dirs
+        "missing_dirs": missing_dirs,
+        "persistent_configured": bool(persistent_entry),
+        "persistent_source": persistent_entry.get("source") if persistent_entry else "",
+        "auto_reconnect": bool(persistent_entry),
+        "self_heal": STORAGE_SELF_HEAL_STATUS,
+        "checked_at": datetime.datetime.now().isoformat()
     }
 
 @app.post("/storage/mount")
@@ -1399,10 +1526,13 @@ async def mount_storage(req: MountRequest):
     attempts = []
 
     try:
-        # 1. Install dependencies
-        logger.info("Ensuring nfs-common is installed...")
-        run_privileged(["apt-get", "update"], check=True, capture_output=True, text=True, timeout=120)
-        run_privileged(["apt-get", "install", "-y", "nfs-common"], check=True, capture_output=True, text=True, timeout=180)
+        # 1. Install dependencies only when the NFS mount helper is missing.
+        if not shutil.which("mount.nfs") and not shutil.which("mount.nfs4"):
+            logger.info("Ensuring nfs-common is installed...")
+            run_privileged(["apt-get", "update"], check=True, capture_output=True, text=True, timeout=120)
+            run_privileged(["apt-get", "install", "-y", "nfs-common"], check=True, capture_output=True, text=True, timeout=180)
+        else:
+            attempts.append({"cmd": "nfs-common already installed", "success": True, "stderr": ""})
 
         # 2. Create mount point
         run_privileged(["mkdir", "-p", req.mount_point], check=True, capture_output=True, text=True, timeout=30)
@@ -1436,12 +1566,16 @@ async def mount_storage(req: MountRequest):
         cmd1 = privileged_command(["mount", "-t", "nfs4", "-o", mount_opts, f"{req.server}:/", req.mount_point])
         res1 = subprocess.run(cmd1, capture_output=True, text=True, timeout=10)
         attempts.append({"cmd": " ".join(cmd1), "success": res1.returncode == 0, "stderr": res1.stderr})
+        fstab_source = f"{req.server}:/"
+        fstab_type = "nfs4"
 
         if res1.returncode != 0:
             # Attempt 2: Traditional NFS export path
             cmd2 = privileged_command(["mount", "-t", "nfs", "-o", mount_opts, f"{req.server}:{req.export}", req.mount_point])
             res2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=10)
             attempts.append({"cmd": " ".join(cmd2), "success": res2.returncode == 0, "stderr": res2.stderr})
+            fstab_source = f"{req.server}:{req.export}"
+            fstab_type = "nfs"
 
             if res2.returncode != 0:
                 msg = f"All mount attempts failed. Last error: {res2.stderr}"
@@ -1454,7 +1588,8 @@ async def mount_storage(req: MountRequest):
             if any(c in req.server + req.export + req.mount_point for c in ";|&><$()\"'"):
                  return {"success": False, "message": "Invalid characters in mount parameters"}
 
-            fstab_entry = f"{req.server}:{req.export} {req.mount_point} nfs defaults,_netdev 0 0"
+            fstab_options = "defaults,_netdev,nofail,x-systemd.automount,timeo=50,retrans=2"
+            fstab_entry = f"{fstab_source} {req.mount_point} {fstab_type} {fstab_options} 0 0"
             with open("/etc/fstab", "r") as f:
                 existing_fstab = f.readlines()
 
@@ -1489,6 +1624,16 @@ async def mount_storage(req: MountRequest):
                         text=True,
                         timeout=10,
                     )
+
+            daemon_reload = run_privileged(["systemctl", "daemon-reload"], capture_output=True, text=True, timeout=20)
+            attempts.append({
+                "cmd": "systemctl daemon-reload",
+                "success": daemon_reload.returncode == 0,
+                "stderr": daemon_reload.stderr,
+            })
+            STORAGE_SELF_HEAL_STATUS["enabled"] = True
+            STORAGE_SELF_HEAL_STATUS["last_error"] = ""
+            STORAGE_SELF_HEAL_STATUS["last_success_at"] = datetime.datetime.now().isoformat()
 
         return {"success": True, "message": "NFS storage mounted successfully.", "attempts": attempts}
     except subprocess.TimeoutExpired as e:
@@ -1662,8 +1807,19 @@ async def heartbeat_task():
                 logger.error(f"Heartbeat failed: {e}")
             await asyncio.sleep(15)
 
+async def storage_watchdog_task():
+    await asyncio.sleep(5)
+    while True:
+        try:
+            await ensure_persistent_storage_mounted("watchdog")
+        except Exception as e:
+            logger.error(f"Storage watchdog failed: {e}")
+        await asyncio.sleep(45)
+
 @app.on_event("startup")
 async def startup_event():
+    asyncio.create_task(ensure_persistent_storage_mounted("startup"))
+    asyncio.create_task(storage_watchdog_task())
     asyncio.create_task(heartbeat_task())
 
 if __name__ == "__main__":

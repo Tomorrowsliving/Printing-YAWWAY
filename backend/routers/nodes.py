@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, delete, update
 from typing import List, Optional
-from ..database import get_db
+from ..database import AsyncSessionLocal, get_db
 from ..models import Node, Event, Printer
 from ..schemas import NodeCreate, NodeHeartbeat, Node as NodeSchema
 from ..utils.network_settings import get_effective_dashboard_host, host_from_url
@@ -11,11 +11,18 @@ import ipaddress
 import httpx
 import logging
 import os
+import asyncio
+import time
 
 # Setup logger
 logger = logging.getLogger("klipper-farm")
 
 router = APIRouter(prefix="/nodes", tags=["nodes"])
+
+AUTO_MOUNT_IN_FLIGHT = set()
+AUTO_MOUNT_LAST_ATTEMPT = {}
+AUTO_MOUNT_THROTTLE_SECONDS = 300
+NODE_OPERATION_STATES = {}
 
 def is_local_ip(ip: str) -> bool:
     try:
@@ -31,6 +38,159 @@ def clean_string(value):
 
 def get_nfs_server_host(request: Optional[Request] = None):
     return get_effective_dashboard_host(request)
+
+def utcnow():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+def set_node_operation(node_id: int, operation: str, message: str, ttl_seconds: int = 600):
+    now = utcnow()
+    NODE_OPERATION_STATES[node_id] = {
+        "operation": operation,
+        "message": message,
+        "started_at": now,
+        "expires_at": now + datetime.timedelta(seconds=ttl_seconds),
+    }
+
+def get_node_operation(node_id: int):
+    state = NODE_OPERATION_STATES.get(node_id)
+    if not state:
+        return None
+    if state["expires_at"] <= utcnow():
+        NODE_OPERATION_STATES.pop(node_id, None)
+        return None
+    return state
+
+def clear_node_operation(node_id: int, operation: Optional[str] = None):
+    state = NODE_OPERATION_STATES.get(node_id)
+    if not state:
+        return
+    if operation and state.get("operation") != operation:
+        return
+    NODE_OPERATION_STATES.pop(node_id, None)
+
+def _storage_mount_payload(server_ip: str):
+    return {
+        "server": server_ip,
+        "export": os.getenv("NFS_EXPORT_PATH", "/exports"),
+        "mount_point": os.getenv("NFS_CLIENT_MOUNT", "/mnt/klipper-farm"),
+        "persistent": True,
+    }
+
+async def auto_mount_node_storage(node_id: int, hostname: str, ip_address: str, agent_port: int, server_ip: str, reason: str):
+    if not server_ip or not ip_address or not agent_port:
+        return
+
+    now = time.monotonic()
+    last_attempt = AUTO_MOUNT_LAST_ATTEMPT.get(node_id, 0)
+    if node_id in AUTO_MOUNT_IN_FLIGHT or now - last_attempt < AUTO_MOUNT_THROTTLE_SECONDS:
+        return
+
+    AUTO_MOUNT_IN_FLIGHT.add(node_id)
+    AUTO_MOUNT_LAST_ATTEMPT[node_id] = now
+    set_node_operation(
+        node_id,
+        "nfs_mounting",
+        "Auto-connecting NFS storage. The node may briefly stop responding while packages or mounts settle.",
+        ttl_seconds=420,
+    )
+    base_url = f"http://{ip_address}:{agent_port}"
+    event_severity = "info"
+    event_message = f"NFS storage auto-connect completed for {hostname}"
+    details = {"reason": reason, "server": server_ip}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            try:
+                check_res = await client.get(f"{base_url}/storage/check", timeout=5)
+                if check_res.status_code == 200:
+                    check_data = check_res.json()
+                    details["before"] = check_data
+                    if check_data.get("nfs_available"):
+                        return
+            except Exception as e:
+                details["precheck_error"] = str(e)
+
+            mount_res = await client.post(
+                f"{base_url}/storage/mount",
+                json=_storage_mount_payload(server_ip),
+                timeout=360,
+            )
+            try:
+                mount_data = mount_res.json()
+            except Exception:
+                mount_data = {"message": mount_res.text}
+            details["mount"] = mount_data
+
+            if mount_res.status_code >= 400 or mount_data.get("success") is False:
+                event_severity = "warning"
+                event_message = mount_data.get("message") or f"NFS storage auto-connect failed for {hostname}"
+            else:
+                event_message = mount_data.get("message") or event_message
+    except Exception as e:
+        event_severity = "warning"
+        event_message = f"NFS storage auto-connect failed for {hostname}: {e}"
+        details["error"] = str(e)
+    finally:
+        AUTO_MOUNT_IN_FLIGHT.discard(node_id)
+        clear_node_operation(node_id, "nfs_mounting")
+
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(Event(
+                node_id=node_id,
+                severity=event_severity,
+                event_type="node_storage_auto_mount",
+                message=event_message,
+                details=details,
+            ))
+            await db.commit()
+    except Exception as e:
+        logger.error(f"Failed to record auto-mount event for node {node_id}: {e}")
+
+def schedule_auto_mount_node_storage(node: Node, request: Optional[Request], reason: str):
+    if not node or not node.approved:
+        return
+    server_ip = get_nfs_server_host(request)
+    if not server_ip:
+        logger.warning("Skipping storage auto-connect for %s: dashboard LAN host is not configured", node.hostname)
+        return
+    asyncio.create_task(auto_mount_node_storage(
+        node.id,
+        node.hostname,
+        node.ip_address,
+        node.agent_port,
+        server_ip,
+        reason,
+    ))
+
+async def monitor_approved_node_storage():
+    await asyncio.sleep(15)
+    while True:
+        try:
+            server_ip = get_nfs_server_host(None)
+            if not server_ip:
+                logger.warning("Skipping storage watchdog: dashboard LAN host is not configured")
+            else:
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(
+                        select(Node).where(Node.approved == True).where(Node.online == True)
+                    )
+                    for node in result.scalars().all():
+                        active_operation = get_node_operation(node.id)
+                        if active_operation and active_operation.get("operation") == "nfs_mounting":
+                            continue
+                        asyncio.create_task(auto_mount_node_storage(
+                            node.id,
+                            node.hostname,
+                            node.ip_address,
+                            node.agent_port,
+                            server_ip,
+                            "storage_watchdog",
+                        ))
+        except Exception as e:
+            logger.error("Storage watchdog failed: %s", e)
+
+        await asyncio.sleep(60)
 
 def unique_non_empty(values):
     seen = set()
@@ -107,6 +267,7 @@ def ensure_moonraker_config_payload(data: dict, node: Node, request: Request):
 
 def serialize_node(node):
     """Utility to serialize SQLAlchemy Node model to dict to avoid MissingGreenlet errors"""
+    active_operation = get_node_operation(node.id)
     return {
         "id": node.id,
         "node_uuid": node.node_uuid,
@@ -129,13 +290,17 @@ def serialize_node(node):
         "last_update_status": node.last_update_status,
         "last_update_message": node.last_update_message,
         "last_update_at": node.last_update_at,
+        "active_operation": active_operation.get("operation") if active_operation else None,
+        "active_operation_message": active_operation.get("message") if active_operation else None,
+        "active_operation_started_at": active_operation.get("started_at") if active_operation else None,
+        "active_operation_expires_at": active_operation.get("expires_at") if active_operation else None,
         "status": node.status,
         "created_at": node.created_at,
         "updated_at": node.updated_at,
     }
 
 @router.post("/", response_model=NodeSchema)
-async def register_node(node_in: NodeCreate, db: AsyncSession = Depends(get_db)):
+async def register_node(node_in: NodeCreate, request: Request, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Node).where(
             or_(
@@ -169,21 +334,25 @@ async def register_node(node_in: NodeCreate, db: AsyncSession = Depends(get_db))
     db.add(event)
     await db.commit()
     await db.refresh(node)
+    schedule_auto_mount_node_storage(node, request, "manual_registration")
     return serialize_node(node)
 
 @router.put("/{node_id}", response_model=NodeSchema)
-async def update_node(node_id: int, node_in: NodeCreate, db: AsyncSession = Depends(get_db)):
+async def update_node(node_id: int, node_in: NodeCreate, request: Request, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
     if not node:
         raise HTTPException(status_code=404, detail="Node not found")
 
+    was_approved = bool(node.approved)
     for field, value in node_in.model_dump(exclude_unset=True).items():
         setattr(node, field, value)
 
     node.updated_at = datetime.datetime.now(datetime.timezone.utc)
     await db.commit()
     await db.refresh(node)
+    if node.approved and not was_approved:
+        schedule_auto_mount_node_storage(node, request, "node_approved_from_edit")
     return serialize_node(node)
 
 @router.get("/", response_model=List[NodeSchema])
@@ -281,16 +450,21 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
     else:
         node.status = "discovered"
 
+    active_operation = get_node_operation(node.id)
+    if active_operation and active_operation.get("operation") != "nfs_mounting":
+        clear_node_operation(node.id)
+
     if is_new:
         await db.flush() # Ensure node.id is populated
         db.add(Event(node_id=node.id, severity="info", event_type="node_discovered", message=f"New node discovered: {node.hostname}"))
 
     await db.commit()
     await db.refresh(node)
+    schedule_auto_mount_node_storage(node, request, "heartbeat")
     return serialize_node(node)
 
 @router.post("/{node_id}/approve", response_model=NodeSchema)
-async def approve_node(node_id: int, db: AsyncSession = Depends(get_db)):
+async def approve_node(node_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
     if not node: raise HTTPException(status_code=404, detail="Node not found")
@@ -300,6 +474,7 @@ async def approve_node(node_id: int, db: AsyncSession = Depends(get_db)):
     db.add(Event(node_id=node.id, severity="info", event_type="node_approved", message=f"Node {node.hostname} approved"))
     await db.commit()
     await db.refresh(node)
+    schedule_auto_mount_node_storage(node, request, "node_approved")
     return serialize_node(node)
 
 @router.post("/{node_id}/refresh", response_model=NodeSchema)
@@ -332,18 +507,73 @@ async def refresh_node(node_id: int, db: AsyncSession = Depends(get_db)):
             return serialize_node(node)
         else:
             logger.warning(f"Refresh failed for {node.hostname}: Status {res.status_code}")
-            node.online = False
-            node.status = "offline"
+            active_operation = get_node_operation(node.id)
+            if active_operation:
+                node.status = active_operation.get("operation", node.status)
+            else:
+                node.online = False
+                node.status = "offline"
             await db.commit()
             await db.refresh(node)
             return serialize_node(node)
     except Exception as e:
         logger.error(f"Refresh error for {node.hostname} at {url}: {str(e)}")
-        node.online = False
-        node.status = "offline"
+        active_operation = get_node_operation(node.id)
+        if active_operation:
+            node.status = active_operation.get("operation", node.status)
+        else:
+            node.online = False
+            node.status = "offline"
         await db.commit()
         await db.refresh(node)
         return serialize_node(node)
+
+@router.get("/{node_id}/health")
+async def get_node_live_health(node_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+
+    url = f"http://{node.ip_address}:{node.agent_port}/health"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=4)
+        if res.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Node agent returned {res.status_code}")
+
+        data = res.json()
+        node.cpu_usage = data.get("cpu_usage", node.cpu_usage)
+        node.ram_usage = data.get("ram_usage", node.ram_usage)
+        node.temperature = data.get("temperature", node.temperature)
+        node.uptime = clean_string(data.get("uptime")) or node.uptime
+        node.model = data.get("pi_model", data.get("model", node.model))
+        node.agent_version = data.get("version", node.agent_version)
+        node.online = True
+        node.last_seen = datetime.datetime.now(datetime.timezone.utc)
+        node.status = "online" if node.approved else "discovered"
+        await db.commit()
+
+        data["source"] = "live"
+        data["checked_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Live health check failed for node {node.hostname} at {url}: {e}")
+        active_operation = get_node_operation(node.id)
+        if active_operation:
+            return {
+                "source": "operation",
+                "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "active_operation": active_operation.get("operation"),
+                "message": active_operation.get("message"),
+                "cpu_usage": node.cpu_usage,
+                "ram_usage": node.ram_usage,
+                "temperature": node.temperature,
+                "uptime": node.uptime,
+            }
+        raise HTTPException(status_code=502, detail="Node health temporarily unavailable")
 
 @router.post("/{node_id}/detect-port", response_model=NodeSchema)
 async def detect_node_port(node_id: int, db: AsyncSession = Depends(get_db)):
@@ -379,6 +609,12 @@ async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
 
     url = f"http://{node.ip_address}:{node.agent_port}/update"
     try:
+        set_node_operation(
+            node.id,
+            "node_updating",
+            "Updating the node agent. It may briefly stop responding while dependencies or services restart.",
+            ttl_seconds=180,
+        )
         node.status = "updating"
         await db.commit()
 
@@ -400,9 +636,11 @@ async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
 
         await db.commit()
         await db.refresh(node)
+        clear_node_operation(node.id, "node_updating")
         return update_res
     except Exception as e:
         logger.error(f"Dashboard update route error: {e}")
+        clear_node_operation(node.id, "node_updating")
         node.status = "error"
         node.last_update_status = "failed"
         node.last_update_message = str(e)
@@ -418,6 +656,12 @@ async def restart_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
 
     url = f"http://{node.ip_address}:{node.agent_port}/restart-agent"
     try:
+        set_node_operation(
+            node.id,
+            "agent_restarting",
+            "Agent restart requested. The node can look unreachable until the next heartbeat arrives.",
+            ttl_seconds=120,
+        )
         node.status = "restarting"
         await db.commit()
         async with httpx.AsyncClient() as client:
@@ -426,6 +670,7 @@ async def restart_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
         await db.commit()
         return res.json()
     except Exception as e:
+        clear_node_operation(node.id, "agent_restarting")
         node.status = "error"
         await db.commit()
         raise HTTPException(status_code=400, detail=f"Restart agent failed: {str(e)}")
@@ -438,6 +683,12 @@ async def reboot_node_proxy(node_id: int, db: AsyncSession = Depends(get_db)):
 
     url = f"http://{node.ip_address}:{node.agent_port}/reboot"
     try:
+        set_node_operation(
+            node.id,
+            "node_rebooting",
+            "Node reboot requested. It will report online again after the Pi starts and sends a heartbeat.",
+            ttl_seconds=300,
+        )
         node.status = "rebooting"
         node.online = False
         await db.commit()
@@ -447,6 +698,7 @@ async def reboot_node_proxy(node_id: int, db: AsyncSession = Depends(get_db)):
         await db.commit()
         return res.json()
     except Exception as e:
+        clear_node_operation(node.id, "node_rebooting")
         node.status = "error"
         await db.commit()
         raise HTTPException(status_code=400, detail=f"Reboot node failed: {str(e)}")
@@ -459,15 +711,23 @@ async def restart_node_services(node_id: int, db: AsyncSession = Depends(get_db)
 
     url = f"http://{node.ip_address}:{node.agent_port}/restart-printers"
     try:
+        set_node_operation(
+            node.id,
+            "services_restarting",
+            "Restarting printer services. Status and storage checks may pause for a moment.",
+            ttl_seconds=120,
+        )
         node.status = "restarting_services"
         await db.commit()
         async with httpx.AsyncClient() as client:
             res = await client.post(url, timeout=10)
         db.add(Event(node_id=node.id, severity="info", event_type="printer_services_restart", message=f"Restarted all printer services on {node.hostname}"))
         node.status = "online"
+        clear_node_operation(node.id, "services_restarting")
         await db.commit()
         return res.json()
     except Exception as e:
+        clear_node_operation(node.id, "services_restarting")
         node.status = "error"
         await db.commit()
         raise HTTPException(status_code=400, detail=f"Restart services failed: {str(e)}")
@@ -507,15 +767,16 @@ async def proxy_storage_mount(node_id: int, request: Request, db: AsyncSession =
             detail="Could not auto-detect the dashboard LAN host. Open the dashboard using its LAN IP/hostname, or set NFS_SERVER_HOST in .env.",
         )
 
-    payload = {
-        "server": server_ip,
-        "export": os.getenv("NFS_EXPORT_PATH", "/exports"),
-        "mount_point": os.getenv("NFS_CLIENT_MOUNT", "/mnt/klipper-farm"),
-        "persistent": True
-    }
+    payload = _storage_mount_payload(server_ip)
 
     url = f"http://{node.ip_address}:{node.agent_port}/storage/mount"
     try:
+        set_node_operation(
+            node.id,
+            "nfs_mounting",
+            "Connecting NFS storage. Installing helpers or mounting shares can make the agent briefly stop responding.",
+            ttl_seconds=420,
+        )
         async with httpx.AsyncClient() as client:
             res = await client.post(url, json=payload, timeout=360)
 
@@ -530,6 +791,8 @@ async def proxy_storage_mount(node_id: int, request: Request, db: AsyncSession =
     except httpx.RequestError as e:
         logger.error(f"Network error reaching node {node.hostname}: {e}")
         raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")
+    finally:
+        clear_node_operation(node.id, "nfs_mounting")
 
 @router.post("/{node_id}/instances/create")
 async def proxy_create_instance(node_id: int, request: Request, data: dict = Body(...), db: AsyncSession = Depends(get_db)):
@@ -604,7 +867,7 @@ async def proxy_software_check(node_id: int, db: AsyncSession = Depends(get_db))
     return await proxy_software_status(node_id, db)
 
 @router.get("/{node_id}/storage/check")
-async def proxy_storage_check(node_id: int, db: AsyncSession = Depends(get_db)):
+async def proxy_storage_check(node_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """Proxied endpoint to check NFS status on a node"""
     result = await db.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
@@ -617,7 +880,10 @@ async def proxy_storage_check(node_id: int, db: AsyncSession = Depends(get_db)):
             res = await client.get(url, timeout=5)
 
         if res.status_code == 200:
-            return res.json()
+            data = res.json()
+            if node.approved and not data.get("nfs_available"):
+                schedule_auto_mount_node_storage(node, request, "storage_check")
+            return data
         elif res.status_code == 404:
             return {
                 "nfs_available": False,

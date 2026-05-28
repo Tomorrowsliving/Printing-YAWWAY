@@ -72,6 +72,7 @@ async def startup_event():
 
     # Start background tasks
     asyncio.create_task(monitor_nodes())
+    asyncio.create_task(nodes.monitor_approved_node_storage())
 
 async def monitor_nodes():
     """Background task to detect offline nodes"""
@@ -88,6 +89,11 @@ async def monitor_nodes():
                 nodes_to_offline = result.scalars().all()
 
                 for node in nodes_to_offline:
+                    active_operation = nodes.get_node_operation(node.id)
+                    if active_operation:
+                        node.status = active_operation.get("operation", node.status)
+                        continue
+
                     node.online = False
                     event = Event(
                         node_id=node.id,
