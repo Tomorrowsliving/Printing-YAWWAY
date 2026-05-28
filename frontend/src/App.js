@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import Layout from './components/Layout';
@@ -6,6 +6,7 @@ import Fleet from './pages/Fleet';
 import Nodes from './pages/Nodes';
 import PrinterDetail from './pages/PrinterDetail';
 import Files from './pages/Files';
+import GcodeHub from './components/GcodeHub';
 import Assignments from './pages/Assignments';
 import Events from './pages/Events';
 import Backups from './pages/Backups';
@@ -53,8 +54,10 @@ const AppRoutes = ({ addToast }) => {
     <Routes>
       <Route path="/" element={<Fleet addToast={addToast} />} />
       <Route path="/nodes" element={<Nodes addToast={addToast} />} />
+      <Route path="/nodes/assignments" element={<Assignments addToast={addToast} />} />
       <Route path="/printers/:id" element={<PrinterDetail addToast={addToast} />} />
-      <Route path="/assignments" element={<Assignments addToast={addToast} />} />
+      <Route path="/assignments" element={<Navigate to="/nodes/assignments" replace />} />
+      <Route path="/gcode" element={<GcodeHub addToast={addToast} />} />
       <Route path="/files" element={<Files addToast={addToast} />} />
       <Route path="/backups" element={<Backups addToast={addToast} />} />
       <Route path="/events" element={<Events addToast={addToast} />} />
@@ -69,13 +72,15 @@ const AppRoutes = ({ addToast }) => {
 
 function App() {
   const [toasts, setToasts] = useState([]);
+  const toastCounter = useRef(0);
 
   const removeToast = useCallback((id) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
   const addToast = useCallback((message, type = 'info') => {
-    const id = Date.now();
+    toastCounter.current += 1;
+    const id = `${Date.now()}-${toastCounter.current}`;
     setToasts((prev) => [...prev, { id, message, type }]);
     setTimeout(() => {
       removeToast(id);

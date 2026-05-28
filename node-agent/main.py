@@ -11,7 +11,7 @@ import re
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import time
 import datetime
 from urllib.parse import urlparse
@@ -110,7 +110,7 @@ class KlipperConfigHelperRequest(BaseModel):
     config_path: str
     gcode_path: Optional[str] = None
     bed_probe: Optional[Dict[str, Any]] = None
-    plugins: List[str] = []
+    plugins: List[str] = Field(default_factory=list)
     replace_existing: bool = True
     restart_services: bool = True
     dry_run: bool = False
@@ -950,7 +950,7 @@ def get_pi_model():
     try:
         with open("/proc/device-tree/model", "r") as f:
             return f.read().strip()
-    except:
+    except Exception:
         return "Unknown"
 
 def get_cpu_temperature():
@@ -1653,7 +1653,8 @@ async def get_version():
         try:
             commit = subprocess.check_output(["git", "-C", NODE_AGENT_REPO_DIR, "rev-parse", "HEAD"], text=True).strip()
             branch = subprocess.check_output(["git", "-C", NODE_AGENT_REPO_DIR, "rev-parse", "--abbrev-ref", "HEAD"], text=True).strip()
-        except: pass
+        except Exception:
+            pass
 
     return {
         "version": "1.0.0",

@@ -1,16 +1,19 @@
 from fastapi import APIRouter, Depends, HTTPException, Body, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select
+from sqlalchemy.orm import selectinload
 from typing import Any, Dict, List, Optional
 import asyncio
 import httpx
 import os
 import posixpath
+import re
+import shutil
 from ..database import get_db
 from ..models import Assignment, Backup, Event, FileRecord, Printer, Node, PrinterNote
 from ..schemas import PrinterCreate, Printer as PrinterSchema, PrinterDetail
-from ..utils.file_backups import BACKUP_ROOT, FILE_EDIT_BACKUP_TYPE
+from ..utils.file_backups import BACKUP_ROOT, FILE_EDIT_BACKUP_TYPE, PRINTERS_ROOT, is_path_within
 from .nodes import serialize_node, get_backend_public_host
 import datetime
 
@@ -112,7 +115,7 @@ CONFIG_HELPER_PRESETS = {
 
 class PrinterConfigHelperRequest(BaseModel):
     bed_probe: Optional[Dict[str, Any]] = None
-    plugins: List[str] = []
+    plugins: List[str] = Field(default_factory=list)
     replace_existing: bool = True
     restart_services: bool = True
 
@@ -123,6 +126,14 @@ class PrinterProbeReachRequest(BaseModel):
     margin_mm: float = 5
     step_mm: float = 10
     max_attempts: int = 20
+
+class GcodePrintRequest(BaseModel):
+    file_path: str
+    target_printer_ids: List[int] = Field(default_factory=list)
+    only_compatible: bool = False
+
+GCODE_EXTENSIONS = (".gcode", ".gco", ".g")
+GCODE_WORD_RE = re.compile(r"([A-Z])\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))", re.IGNORECASE)
 
 def moonraker_warning_messages(info):
     warnings = [str(warning) for warning in (info.get("warnings") or []) if warning]
@@ -151,7 +162,7 @@ def validate_printer_payload(printer_in):
     printer_in.name = name
     printer_in.slug = slug
 
-async def probe_printer_runtime(printer):
+async def probe_printer_runtime(printer, client: Optional[httpx.AsyncClient] = None):
     fallback = {
         "status": printer.status or "offline",
         "status_message": "",
@@ -165,9 +176,12 @@ async def probe_printer_runtime(printer):
 
     url = f"http://{printer.node.ip_address}:{printer.moonraker_port}/server/info"
     printer_info_url = f"http://{printer.node.ip_address}:{printer.moonraker_port}/printer/info"
+    if client is None:
+        async with httpx.AsyncClient() as scoped_client:
+            return await probe_printer_runtime(printer, scoped_client)
+
     try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(url, timeout=1.5)
+        res = await client.get(url, timeout=1.5)
         if res.status_code != 200:
             fallback["status"] = "offline"
             fallback["status_message"] = f"Moonraker returned HTTP {res.status_code} from /server/info."
@@ -181,8 +195,7 @@ async def probe_printer_runtime(printer):
         status_message = ""
 
         try:
-            async with httpx.AsyncClient() as client:
-                printer_res = await client.get(printer_info_url, timeout=1.5)
+            printer_res = await client.get(printer_info_url, timeout=1.5)
             if printer_res.status_code == 200:
                 printer_info = printer_res.json().get("result", printer_res.json())
                 status_message = printer_info.get("state_message") or ""
@@ -249,18 +262,256 @@ def serialize_printer(printer, include_node=False, runtime_override=None, status
     return data
 
 async def get_printer_and_assigned_node(printer_id: int, db: AsyncSession):
-    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    result = await db.execute(
+        select(Printer)
+        .options(selectinload(Printer.node))
+        .where(Printer.id == printer_id)
+    )
     printer = result.scalar_one_or_none()
     if not printer:
         raise HTTPException(status_code=404, detail="Printer not found")
     if not printer.assigned_node_id:
         raise HTTPException(status_code=400, detail="Printer not assigned to any node")
 
-    node_result = await db.execute(select(Node).where(Node.id == printer.assigned_node_id))
-    node = node_result.scalar_one_or_none()
+    node = printer.node
+    if not node:
+        node_result = await db.execute(select(Node).where(Node.id == printer.assigned_node_id))
+        node = node_result.scalar_one_or_none()
     if not node:
         raise HTTPException(status_code=404, detail="Assigned node not found")
     return printer, node
+
+async def record_file_edit_backups(db: AsyncSession, backup_paths):
+    for backup_path in backup_paths or []:
+        result = await db.execute(select(Backup).where(Backup.file_path == backup_path))
+        if result.scalar_one_or_none():
+            continue
+        db.add(Backup(
+            filename=os.path.relpath(backup_path, BACKUP_ROOT).replace(os.sep, "/"),
+            file_path=backup_path,
+            backup_type=FILE_EDIT_BACKUP_TYPE,
+            status="success",
+        ))
+
+def _printer_gcode_dir(printer: Printer) -> str:
+    return printer.gcode_path or os.path.join(PRINTERS_ROOT, printer.slug, "gcodes")
+
+def _is_gcode_file(path: str) -> bool:
+    return os.path.basename(path).lower().endswith(GCODE_EXTENSIONS)
+
+def _safe_gcode_path(path: str, root: str = PRINTERS_ROOT) -> str:
+    if not is_path_within(path, root) or not _is_gcode_file(path):
+        raise HTTPException(status_code=403, detail="G-code path is outside managed printer storage")
+    return os.path.abspath(path)
+
+def _relative_gcode_path(printer: Printer, path: str) -> str:
+    gcode_dir = os.path.abspath(_printer_gcode_dir(printer))
+    abs_path = _safe_gcode_path(path, gcode_dir)
+    return os.path.relpath(abs_path, gcode_dir).replace(os.sep, "/")
+
+def _parse_bed_size_text(value: Optional[str]):
+    if not value:
+        return None
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:x|×|by|,)\s*(\d+(?:\.\d+)?)", str(value), re.IGNORECASE)
+    if not match:
+        return None
+    return {
+        "min_x": 0.0,
+        "max_x": float(match.group(1)),
+        "min_y": 0.0,
+        "max_y": float(match.group(2)),
+        "source": "printer_notes",
+    }
+
+def _parse_bed_from_config(config_path: Optional[str]):
+    if not config_path:
+        return None
+
+    printer_cfg = os.path.join(config_path, "printer.cfg") if os.path.isdir(config_path) else config_path
+    if not os.path.exists(printer_cfg) or not is_path_within(printer_cfg, PRINTERS_ROOT):
+        return None
+
+    axes = {
+        "x": {"min": 0.0, "max": None},
+        "y": {"min": 0.0, "max": None},
+    }
+    section = ""
+
+    try:
+        with open(printer_cfg, "r", encoding="utf-8", errors="ignore") as f:
+            for raw_line in f:
+                line = raw_line.split(";", 1)[0].strip()
+                if not line:
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    section = line.strip("[]").strip().lower()
+                    continue
+                if section not in {"stepper_x", "stepper_y"} or ":" not in line:
+                    continue
+
+                key, value = [part.strip().lower() for part in line.split(":", 1)]
+                axis = "x" if section == "stepper_x" else "y"
+                try:
+                    number = float(value.split()[0])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if key == "position_min":
+                    axes[axis]["min"] = number
+                elif key == "position_max":
+                    axes[axis]["max"] = number
+    except OSError:
+        return None
+
+    if axes["x"]["max"] is None or axes["y"]["max"] is None:
+        return None
+
+    return {
+        "min_x": axes["x"]["min"],
+        "max_x": axes["x"]["max"],
+        "min_y": axes["y"]["min"],
+        "max_y": axes["y"]["max"],
+        "source": "printer_cfg",
+    }
+
+def _printer_bed_bounds(printer: Printer):
+    return _parse_bed_size_text(getattr(getattr(printer, "notes", None), "bed_size", None)) or _parse_bed_from_config(printer.config_path)
+
+def _analyse_gcode_file(path: str):
+    path = _safe_gcode_path(path)
+    bounds = {
+        "min_x": None,
+        "max_x": None,
+        "min_y": None,
+        "max_y": None,
+    }
+    absolute_xy = True
+    units_factor = 1.0
+    current_x = None
+    current_y = None
+    move_count = 0
+    xy_move_count = 0
+
+    def update_bounds(x, y):
+        if x is None or y is None:
+            return
+        bounds["min_x"] = x if bounds["min_x"] is None else min(bounds["min_x"], x)
+        bounds["max_x"] = x if bounds["max_x"] is None else max(bounds["max_x"], x)
+        bounds["min_y"] = y if bounds["min_y"] is None else min(bounds["min_y"], y)
+        bounds["max_y"] = y if bounds["max_y"] is None else max(bounds["max_y"], y)
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for raw_line in f:
+                line = raw_line.split(";", 1)[0].strip().upper()
+                if not line:
+                    continue
+                words = {letter.upper(): float(value) for letter, value in GCODE_WORD_RE.findall(line)}
+                gcode = words.get("G")
+                if gcode == 20:
+                    units_factor = 25.4
+                    continue
+                if gcode == 21:
+                    units_factor = 1.0
+                    continue
+                if gcode == 90:
+                    absolute_xy = True
+                    continue
+                if gcode == 91:
+                    absolute_xy = False
+                    continue
+                if gcode not in {0, 1}:
+                    continue
+
+                move_count += 1
+                next_x = current_x
+                next_y = current_y
+                has_xy = False
+                if "X" in words:
+                    value = words["X"] * units_factor
+                    next_x = value if absolute_xy or current_x is None else current_x + value
+                    has_xy = True
+                if "Y" in words:
+                    value = words["Y"] * units_factor
+                    next_y = value if absolute_xy or current_y is None else current_y + value
+                    has_xy = True
+
+                current_x = next_x
+                current_y = next_y
+                if has_xy and current_x is not None and current_y is not None:
+                    xy_move_count += 1
+                    update_bounds(current_x, current_y)
+    except OSError as e:
+        raise HTTPException(status_code=404, detail=f"Could not read G-code file: {e}")
+
+    has_bounds = all(value is not None for value in bounds.values())
+    width = bounds["max_x"] - bounds["min_x"] if has_bounds else None
+    depth = bounds["max_y"] - bounds["min_y"] if has_bounds else None
+    return {
+        **bounds,
+        "width": width,
+        "depth": depth,
+        "move_count": move_count,
+        "xy_move_count": xy_move_count,
+        "has_bounds": has_bounds,
+    }
+
+def _gcode_fit_status(analysis: dict, bed_bounds: Optional[dict]):
+    if not analysis.get("has_bounds"):
+        return {"status": "unknown", "message": "No XY bounds found"}
+    if not bed_bounds:
+        return {"status": "unknown", "message": "Bed size unavailable"}
+
+    margin = 0.001
+    fits = (
+        analysis["min_x"] >= bed_bounds["min_x"] - margin
+        and analysis["max_x"] <= bed_bounds["max_x"] + margin
+        and analysis["min_y"] >= bed_bounds["min_y"] - margin
+        and analysis["max_y"] <= bed_bounds["max_y"] + margin
+    )
+    if fits:
+        return {"status": "fits", "message": "Fits bed"}
+    return {"status": "too_large", "message": "Outside bed bounds"}
+
+def _serialize_gcode_target(printer: Printer):
+    bed_bounds = _printer_bed_bounds(printer)
+    return {
+        "id": printer.id,
+        "name": printer.name,
+        "slug": printer.slug,
+        "status": printer.status,
+        "assigned_node_id": printer.assigned_node_id,
+        "moonraker_port": printer.moonraker_port,
+        "node": serialize_node(printer.node) if printer.node else None,
+        "bed_bounds": bed_bounds,
+    }
+
+def _serialize_gcode_file(path: str, source_printer: Printer, target_printers: List[Printer]):
+    stat = os.stat(path)
+    analysis = _analyse_gcode_file(path)
+    target_statuses = []
+    compatible_printer_ids = []
+    for target in target_printers:
+        fit = _gcode_fit_status(analysis, _printer_bed_bounds(target))
+        if fit["status"] == "fits":
+            compatible_printer_ids.append(target.id)
+        target_statuses.append({
+            "printer_id": target.id,
+            **fit,
+        })
+
+    return {
+        "name": os.path.basename(path),
+        "path": path,
+        "relative_path": os.path.relpath(path, _printer_gcode_dir(source_printer)).replace(os.sep, "/"),
+        "source_printer_id": source_printer.id,
+        "source_printer_name": source_printer.name,
+        "source_printer_slug": source_printer.slug,
+        "size": stat.st_size,
+        "last_modified": stat.st_mtime,
+        "analysis": analysis,
+        "compatible_printer_ids": compatible_printer_ids,
+        "target_statuses": target_statuses,
+    }
 
 async def fetch_moonraker_json(node: Node, moonraker_port: int, path: str, timeout: float = 3.0):
     url = f"http://{node.ip_address}:{moonraker_port}{path}"
@@ -387,9 +638,10 @@ async def create_printer(printer_in: PrinterCreate, db: AsyncSession = Depends(g
 
 @router.get("/", response_model=List[PrinterDetail])
 async def list_printers(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Printer))
+    result = await db.execute(select(Printer).options(selectinload(Printer.node)))
     printers = result.scalars().all()
-    runtimes = await asyncio.gather(*(probe_printer_runtime(p) for p in printers))
+    async with httpx.AsyncClient() as client:
+        runtimes = await asyncio.gather(*(probe_printer_runtime(p, client) for p in printers))
     return [
         serialize_printer(printer, include_node=True, runtime_override=runtime)
         for printer, runtime in zip(printers, runtimes)
@@ -398,6 +650,44 @@ async def list_printers(db: AsyncSession = Depends(get_db)):
 @router.get("/config-helper/presets")
 async def get_config_helper_presets():
     return CONFIG_HELPER_PRESETS
+
+@router.get("/gcodes")
+async def list_all_printer_gcodes(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Printer)
+        .options(selectinload(Printer.node), selectinload(Printer.notes))
+        .order_by(Printer.name)
+    )
+    printers = result.scalars().all()
+
+    files = []
+    for printer in printers:
+        gcode_dir = _printer_gcode_dir(printer)
+        if not is_path_within(gcode_dir, PRINTERS_ROOT):
+            continue
+
+        os.makedirs(gcode_dir, exist_ok=True)
+        for dirpath, _, filenames in os.walk(gcode_dir):
+            for filename in filenames:
+                path = os.path.join(dirpath, filename)
+                if not _is_gcode_file(path):
+                    continue
+                files.append(_serialize_gcode_file(path, printer, printers))
+
+    files.sort(key=lambda item: item["last_modified"], reverse=True)
+    return {
+        "files": files,
+        "targets": [_serialize_gcode_target(printer) for printer in printers],
+        "printers": [
+            {
+                "id": printer.id,
+                "name": printer.name,
+                "slug": printer.slug,
+                "gcode_dir": _printer_gcode_dir(printer),
+            }
+            for printer in printers
+        ],
+    }
 
 @router.get("/{printer_id}", response_model=PrinterSchema)
 async def get_printer(printer_id: int, db: AsyncSession = Depends(get_db)):
@@ -446,7 +736,11 @@ async def delete_printer(printer_id: int, db: AsyncSession = Depends(get_db)):
 @router.get("/{printer_id}/detail", response_model=PrinterDetail)
 async def get_printer_detail(printer_id: int, db: AsyncSession = Depends(get_db)):
     """Extended endpoint that explicitly loads the assigned node"""
-    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    result = await db.execute(
+        select(Printer)
+        .options(selectinload(Printer.node))
+        .where(Printer.id == printer_id)
+    )
     printer = result.scalar_one_or_none()
     if not printer:
         raise HTTPException(status_code=404, detail="Printer not found")
@@ -481,6 +775,172 @@ async def get_printer_runtime_snapshot(printer_id: int, db: AsyncSession = Depen
         "eventtime": result.get("eventtime"),
         "status": result.get("status", {}),
         "moonraker_url": f"http://{node.ip_address}:{printer.moonraker_port}",
+    }
+
+@router.get("/{printer_id}/gcodes")
+async def list_printer_gcodes(printer_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Printer)
+        .options(selectinload(Printer.node), selectinload(Printer.notes))
+        .where(Printer.id == printer_id)
+    )
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(status_code=404, detail="Printer not found")
+
+    targets_result = await db.execute(
+        select(Printer)
+        .options(selectinload(Printer.node), selectinload(Printer.notes))
+        .order_by(Printer.name)
+    )
+    target_printers = targets_result.scalars().all()
+
+    gcode_dir = _printer_gcode_dir(printer)
+    if not is_path_within(gcode_dir, PRINTERS_ROOT):
+        raise HTTPException(status_code=403, detail="G-code directory is outside managed printer storage")
+
+    os.makedirs(gcode_dir, exist_ok=True)
+    files = []
+    for dirpath, _, filenames in os.walk(gcode_dir):
+        for filename in filenames:
+            path = os.path.join(dirpath, filename)
+            if not _is_gcode_file(path):
+                continue
+            files.append(_serialize_gcode_file(path, printer, target_printers))
+
+    files.sort(key=lambda item: item["last_modified"], reverse=True)
+    return {
+        "printer_id": printer.id,
+        "gcode_dir": gcode_dir,
+        "files": files,
+        "targets": [_serialize_gcode_target(target) for target in target_printers],
+    }
+
+@router.post("/{printer_id}/gcodes/print")
+async def print_printer_gcode(printer_id: int, request_data: GcodePrintRequest, db: AsyncSession = Depends(get_db)):
+    source_result = await db.execute(
+        select(Printer)
+        .options(selectinload(Printer.node), selectinload(Printer.notes))
+        .where(Printer.id == printer_id)
+    )
+    source_printer = source_result.scalar_one_or_none()
+    if not source_printer:
+        raise HTTPException(status_code=404, detail="Printer not found")
+
+    if not request_data.target_printer_ids:
+        raise HTTPException(status_code=400, detail="Select at least one printer")
+
+    source_path = _safe_gcode_path(request_data.file_path, _printer_gcode_dir(source_printer))
+    relative_path = _relative_gcode_path(source_printer, source_path)
+    analysis = _analyse_gcode_file(source_path)
+
+    target_result = await db.execute(
+        select(Printer)
+        .options(selectinload(Printer.node), selectinload(Printer.notes))
+        .where(Printer.id.in_(request_data.target_printer_ids))
+    )
+    targets = target_result.scalars().all()
+    if not targets:
+        raise HTTPException(status_code=404, detail="No target printers found")
+
+    results = []
+    for target in targets:
+        fit = _gcode_fit_status(analysis, _printer_bed_bounds(target))
+        if request_data.only_compatible and fit["status"] != "fits":
+            results.append({
+                "printer_id": target.id,
+                "printer_name": target.name,
+                "status": "skipped",
+                "fit_status": fit["status"],
+                "message": fit["message"],
+            })
+            continue
+
+        if not target.node or not target.moonraker_port:
+            results.append({
+                "printer_id": target.id,
+                "printer_name": target.name,
+                "status": "failed",
+                "fit_status": fit["status"],
+                "message": "Printer is missing an assigned node or Moonraker port",
+            })
+            continue
+
+        target_dir = _printer_gcode_dir(target)
+        if not is_path_within(target_dir, PRINTERS_ROOT):
+            results.append({
+                "printer_id": target.id,
+                "printer_name": target.name,
+                "status": "failed",
+                "fit_status": fit["status"],
+                "message": "Target G-code directory is outside managed storage",
+            })
+            continue
+
+        target_path = os.path.abspath(os.path.join(target_dir, *relative_path.split("/")))
+        if not is_path_within(target_path, target_dir):
+            results.append({
+                "printer_id": target.id,
+                "printer_name": target.name,
+                "status": "failed",
+                "fit_status": fit["status"],
+                "message": "Invalid target G-code path",
+            })
+            continue
+
+        try:
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            if os.path.abspath(source_path) != target_path:
+                shutil.copy2(source_path, target_path)
+
+            moonraker_response = await post_moonraker_json(
+                target.node,
+                target.moonraker_port,
+                "/printer/print/start",
+                {"filename": relative_path},
+                timeout=10.0,
+            )
+            results.append({
+                "printer_id": target.id,
+                "printer_name": target.name,
+                "status": "started",
+                "fit_status": fit["status"],
+                "message": "Print started",
+                "moonraker_response": moonraker_response,
+            })
+            db.add(Event(
+                printer_id=target.id,
+                node_id=target.node.id,
+                severity="info",
+                event_type="gcode_print_start",
+                message=f"Started {relative_path} on printer {target.name}",
+                details={"source_printer_id": source_printer.id, "fit_status": fit["status"]},
+            ))
+        except HTTPException as e:
+            results.append({
+                "printer_id": target.id,
+                "printer_name": target.name,
+                "status": "failed",
+                "fit_status": fit["status"],
+                "message": _api_error_message(e),
+            })
+        except Exception as e:
+            results.append({
+                "printer_id": target.id,
+                "printer_name": target.name,
+                "status": "failed",
+                "fit_status": fit["status"],
+                "message": str(e),
+            })
+
+    await db.commit()
+    return {
+        "file": relative_path,
+        "analysis": analysis,
+        "results": results,
+        "started": len([item for item in results if item["status"] == "started"]),
+        "failed": len([item for item in results if item["status"] == "failed"]),
+        "skipped": len([item for item in results if item["status"] == "skipped"]),
     }
 
 @router.post("/{printer_id}/home")
@@ -763,15 +1223,7 @@ async def find_printer_probe_reach(printer_id: int, request_data: PrinterProbeRe
 @router.post("/{printer_id}/restart")
 async def restart_printer_services(printer_id: int, target: str = Body(..., embed=True), db: AsyncSession = Depends(get_db)):
     """Remote restart for specific printer services (klipper, moonraker, or both)"""
-    result = await db.execute(select(Printer).where(Printer.id == printer_id))
-    printer = result.scalar_one_or_none()
-    if not printer: raise HTTPException(status_code=404, detail="Printer not found")
-
-    if not printer.assigned_node_id:
-        raise HTTPException(status_code=400, detail="Printer not assigned to any node")
-
-    node_result = await db.execute(select(Node).where(Node.id == printer.assigned_node_id))
-    node = node_result.scalar_one_or_none()
+    printer, node = await get_printer_and_assigned_node(printer_id, db)
 
     services = []
     if target == "klipper" or target == "all":
@@ -803,19 +1255,9 @@ async def restart_printer_services(printer_id: int, target: str = Body(..., embe
 
 @router.post("/{printer_id}/repair-moonraker")
 async def repair_printer_moonraker(printer_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Printer).where(Printer.id == printer_id))
-    printer = result.scalar_one_or_none()
-    if not printer:
-        raise HTTPException(status_code=404, detail="Printer not found")
-    if not printer.assigned_node_id:
-        raise HTTPException(status_code=400, detail="Printer not assigned to any node")
+    printer, node = await get_printer_and_assigned_node(printer_id, db)
     if not printer.config_path or not printer.moonraker_port:
         raise HTTPException(status_code=400, detail="Printer config path or Moonraker port is missing")
-
-    node_result = await db.execute(select(Node).where(Node.id == printer.assigned_node_id))
-    node = node_result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Assigned node not found")
 
     data_path = posixpath.dirname(printer.config_path.rstrip("/"))
     payload = {
@@ -844,16 +1286,7 @@ async def repair_printer_moonraker(printer_id: int, request: Request, db: AsyncS
         raise HTTPException(status_code=502, detail=f"Node repair failed: {detail}")
 
     response = res.json()
-    for backup_path in response.get("backup_paths") or []:
-        result = await db.execute(select(Backup).where(Backup.file_path == backup_path))
-        if result.scalar_one_or_none():
-            continue
-        db.add(Backup(
-            filename=os.path.relpath(backup_path, BACKUP_ROOT).replace(os.sep, "/"),
-            file_path=backup_path,
-            backup_type=FILE_EDIT_BACKUP_TYPE,
-            status="success",
-        ))
+    await record_file_edit_backups(db, response.get("backup_paths"))
 
     db.add(Event(
         printer_id=printer.id,
@@ -872,19 +1305,9 @@ async def proxy_printer_config_helper(
     dry_run: bool,
     db: AsyncSession,
 ):
-    result = await db.execute(select(Printer).where(Printer.id == printer_id))
-    printer = result.scalar_one_or_none()
-    if not printer:
-        raise HTTPException(status_code=404, detail="Printer not found")
-    if not printer.assigned_node_id:
-        raise HTTPException(status_code=400, detail="Printer not assigned to any node")
+    printer, node = await get_printer_and_assigned_node(printer_id, db)
     if not printer.config_path or not printer.moonraker_port:
         raise HTTPException(status_code=400, detail="Printer config path or Moonraker port is missing")
-
-    node_result = await db.execute(select(Node).where(Node.id == printer.assigned_node_id))
-    node = node_result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Assigned node not found")
 
     data_path = posixpath.dirname(printer.config_path.rstrip("/"))
     payload = {
@@ -913,16 +1336,7 @@ async def proxy_printer_config_helper(
 
     response = res.json()
     if not dry_run:
-        for backup_path in response.get("backup_paths") or []:
-            result = await db.execute(select(Backup).where(Backup.file_path == backup_path))
-            if result.scalar_one_or_none():
-                continue
-            db.add(Backup(
-                filename=os.path.relpath(backup_path, BACKUP_ROOT).replace(os.sep, "/"),
-                file_path=backup_path,
-                backup_type=FILE_EDIT_BACKUP_TYPE,
-                status="success",
-            ))
+        await record_file_edit_backups(db, response.get("backup_paths"))
 
         db.add(Event(
             printer_id=printer.id,

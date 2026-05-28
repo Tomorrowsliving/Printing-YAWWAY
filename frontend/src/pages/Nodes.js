@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Server, HardDrive, RefreshCw, Plus, Loader2, Layers, Edit, Trash2, ArrowUpCircle, Search, Power, Settings2, Info, Activity, Thermometer, Clock, Cpu } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Server, HardDrive, RefreshCw, Plus, Loader2, Layers, Edit, Trash2, ArrowUpCircle, Search, Power, Settings2, Info, Activity, Thermometer, Clock, Cpu, ArrowLeftRight } from 'lucide-react';
 import { nodeService } from '../services/api';
 import { Modal } from '../components/UI';
 import axios from 'axios';
+import { clampPercent, formatLastSeen, formatMb, formatPercent, formatUptime } from '../utils/format';
 
 const OPERATION_DETAILS = {
   nfs_mounting: {
@@ -49,46 +51,6 @@ const ACTION_MIN_VISIBLE_MS = {
 };
 
 const NODE_VIEW_MODE_KEY = 'klipper-farm-node-view-mode';
-
-const formatLastSeen = (value) => {
-  if (!value) return 'Never';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return 'Unknown';
-  const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
-  if (seconds < 20) return 'just now';
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
-};
-
-const clampPercent = (value) => Math.min(100, Math.max(0, Number(value) || 0));
-
-const formatPercent = (value) => `${clampPercent(value).toFixed(clampPercent(value) < 10 ? 1 : 0)}%`;
-
-const formatMb = (value) => {
-  const number = Number(value);
-  if (!Number.isFinite(number) || number <= 0) return '';
-  if (number >= 1024) return `${(number / 1024).toFixed(number >= 10240 ? 0 : 1)} GB`;
-  return `${number.toFixed(0)} MB`;
-};
-
-const formatUptime = (value, secondsValue) => {
-  let seconds = Number(secondsValue);
-  if (!Number.isFinite(seconds) && typeof value === 'string') {
-    const match = value.match(/^(\d+)s$/);
-    if (match) seconds = Number(match[1]);
-  }
-  if (!Number.isFinite(seconds)) return value || 'Unknown';
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  return `${Math.max(1, minutes)}m`;
-};
 
 const usageColor = (value) => {
   const percent = clampPercent(value);
@@ -558,6 +520,11 @@ const NodeOverview = ({ addToast }) => {
               Advanced
             </button>
           </div>
+
+          <Link to="/nodes/assignments" className="flex items-center space-x-2 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-bold text-slate-200 transition-colors hover:border-blue-500/40 hover:bg-slate-700 hover:text-blue-200">
+            <ArrowLeftRight size={18} />
+            <span>Assignments</span>
+          </Link>
 
           <button onClick={() => setIsModalOpen(true)} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center space-x-2 shadow-lg shadow-blue-900/20">
             <Plus size={18} /> <span>Add Manual</span>

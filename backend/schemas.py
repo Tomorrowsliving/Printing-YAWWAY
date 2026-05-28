@@ -28,8 +28,8 @@ class NodeHeartbeat(BaseModel):
     uptime: Optional[str] = None
     usb_serial_count: Optional[int] = 0
     usb_device_count: Optional[int] = 0
-    usb_devices: List[dict] = []
-    service_instances: List[dict] = []
+    usb_devices: List[dict] = Field(default_factory=list)
+    service_instances: List[dict] = Field(default_factory=list)
 
 class Node(NodeBase):
     id: int

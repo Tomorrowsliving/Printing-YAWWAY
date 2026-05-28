@@ -1,0 +1,15 @@
+services:
+  storage-init:
+    volumes:
+      - ${LIVE_STORAGE_ROOT:-./storage}:/storage
+
+  nfs:
+    volumes:
+      - ${LIVE_STORAGE_ROOT:-./storage}:/exports
+
+  backend:
+    environment:
+      NFS_SERVER_HOST: "${NFS_SERVER_HOST:-}"
+      BACKEND_PUBLIC_URL: "${BACKEND_PUBLIC_URL:-}"
+    volumes:
+      - ${LIVE_STORAGE_ROOT:-./storage}:/mnt/klipper-farm

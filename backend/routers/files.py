@@ -21,6 +21,13 @@ router = APIRouter(prefix="/files", tags=["files"])
 
 STORAGE_ROOT = os.getenv("PRINTERS_PATH", "/mnt/klipper-farm/printers")
 ALLOWED_FILE_TYPES = {"config", "gcode", "logs"}
+FILE_TYPE_DIRECTORIES = {
+    "config": "config",
+    "gcode": "gcodes",
+    "logs": "logs",
+}
+KLIPPER_CONFIG_API_URL = "https://api.github.com/repos/Klipper3d/klipper/contents/config"
+KLIPPER_RAW_CONFIG_PREFIX = "https://raw.githubusercontent.com/Klipper3d/klipper/master/config/"
 
 class FileInfo(BaseModel):
     name: str
@@ -32,13 +39,23 @@ class FileInfo(BaseModel):
 class SaveFileRequest(BaseModel):
     content: str
 
+def validate_storage_file_path(path: str):
+    if not is_path_within(path, STORAGE_ROOT):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if is_backup_filename(os.path.basename(path)):
+        raise HTTPException(status_code=400, detail="Backup files are managed from the Backups section")
+
+def storage_subdir_for_file_type(file_type: str):
+    if file_type not in ALLOWED_FILE_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid file type")
+    return FILE_TYPE_DIRECTORIES[file_type]
+
 @router.get("/examples/klipper")
 async def list_klipper_examples():
     """Fetches list of example configs from Klipper GitHub"""
-    url = "https://api.github.com/repos/Klipper3d/klipper/contents/config"
     try:
         async with httpx.AsyncClient() as client:
-            res = await client.get(url, timeout=10)
+            res = await client.get(KLIPPER_CONFIG_API_URL, timeout=10)
         if res.status_code != 200:
             raise HTTPException(status_code=502, detail="Failed to fetch Klipper examples")
 
@@ -53,23 +70,23 @@ async def list_klipper_examples():
 async def get_klipper_example_content(path: str):
     """Fetches content of a specific Klipper example config"""
     # path is the download_url or relative path from GitHub
-    if not path.startswith("https://raw.githubusercontent.com/Klipper3d/klipper/master/config/"):
-         raise HTTPException(status_code=403, detail="Unauthorised example path")
+    if not path.startswith(KLIPPER_RAW_CONFIG_PREFIX):
+        raise HTTPException(status_code=403, detail="Unauthorised example path")
 
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(path, timeout=10)
+        if res.status_code != 200:
+            raise HTTPException(status_code=502, detail="Failed to fetch example content")
         return {"content": res.text}
-    except:
+    except HTTPException:
+        raise
+    except Exception:
         raise HTTPException(status_code=502, detail="Failed to fetch example content")
 
 @router.get("/{printer_slug}/{file_type}", response_model=List[FileInfo])
 async def list_files(printer_slug: str, file_type: str):
-    # file_type could be: config, gcode, logs
-    if file_type not in ALLOWED_FILE_TYPES:
-        raise HTTPException(status_code=400, detail="Invalid file type")
-
-    target_path = os.path.join(STORAGE_ROOT, printer_slug, file_type)
+    target_path = os.path.join(STORAGE_ROOT, printer_slug, storage_subdir_for_file_type(file_type))
     if not is_path_within(target_path, STORAGE_ROOT):
         raise HTTPException(status_code=403, detail="Access denied")
 
@@ -95,24 +112,17 @@ async def list_files(printer_slug: str, file_type: str):
 
 @router.get("/read")
 async def read_file(path: str):
-    # Security: Ensure path is within STORAGE_ROOT
-    if not is_path_within(path, STORAGE_ROOT):
-        raise HTTPException(status_code=403, detail="Access denied")
-    if is_backup_filename(os.path.basename(path)):
-        raise HTTPException(status_code=400, detail="Backup files are managed from the Backups section")
+    validate_storage_file_path(path)
 
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File not found")
 
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return {"content": f.read()}
 
 @router.post("/save")
 async def save_file(path: str, req: SaveFileRequest, db: AsyncSession = Depends(get_db)):
-    if not is_path_within(path, STORAGE_ROOT):
-        raise HTTPException(status_code=403, detail="Access denied")
-    if is_backup_filename(os.path.basename(path)):
-        raise HTTPException(status_code=400, detail="Backup files are managed from the Backups section")
+    validate_storage_file_path(path)
 
     backup_path, pruned_paths = create_file_edit_backup(path)
     if backup_path:
@@ -132,7 +142,7 @@ async def save_file(path: str, req: SaveFileRequest, db: AsyncSession = Depends(
     if pruned_paths:
         await db.execute(delete(Backup).where(Backup.file_path.in_(pruned_paths)))
 
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(req.content)
 
     await db.flush()
@@ -140,30 +150,25 @@ async def save_file(path: str, req: SaveFileRequest, db: AsyncSession = Depends(
 
 @router.post("/upload")
 async def upload_file(printer_slug: str, file_type: str, file: UploadFile = File(...)):
-    if file_type not in ALLOWED_FILE_TYPES:
-        raise HTTPException(status_code=400, detail="Invalid file type")
-
-    target_dir = os.path.join(STORAGE_ROOT, printer_slug, file_type)
+    target_dir = os.path.join(STORAGE_ROOT, printer_slug, storage_subdir_for_file_type(file_type))
     if not is_path_within(target_dir, STORAGE_ROOT):
         raise HTTPException(status_code=403, detail="Access denied")
 
     os.makedirs(target_dir, exist_ok=True)
 
-    file_path = os.path.join(target_dir, file.filename)
-    if not is_path_within(file_path, target_dir) or is_backup_filename(file.filename):
+    filename = os.path.basename(file.filename or "")
+    file_path = os.path.join(target_dir, filename)
+    if not filename or not is_path_within(file_path, target_dir) or is_backup_filename(filename):
         raise HTTPException(status_code=400, detail="Invalid filename")
 
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    return {"filename": file.filename, "status": "success"}
+    return {"filename": filename, "status": "success"}
 
 @router.get("/download")
 async def download_file(path: str):
-    if not is_path_within(path, STORAGE_ROOT):
-        raise HTTPException(status_code=403, detail="Access denied")
-    if is_backup_filename(os.path.basename(path)):
-        raise HTTPException(status_code=400, detail="Backup files are managed from the Backups section")
+    validate_storage_file_path(path)
 
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -172,10 +177,7 @@ async def download_file(path: str):
 
 @router.delete("/delete")
 async def delete_file(path: str):
-    if not is_path_within(path, STORAGE_ROOT):
-        raise HTTPException(status_code=403, detail="Access denied")
-    if is_backup_filename(os.path.basename(path)):
-        raise HTTPException(status_code=400, detail="Backup files are managed from the Backups section")
+    validate_storage_file_path(path)
 
     if os.path.exists(path):
         if os.path.isdir(path):

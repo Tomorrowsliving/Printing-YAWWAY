@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -6,10 +6,9 @@ from .routers import nodes, printers, files, assignments, events, backups, webso
 import logging
 import asyncio
 import datetime
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from .database import AsyncSessionLocal, engine, Base
-from .models import Node, Event, Printer, PrinterNote, Backup, NotificationSetting, FileRecord, Assignment
+from .models import Event, Node
 
 app = FastAPI(title="Klipper Farm Control Plane API")
 
@@ -19,11 +18,12 @@ logger = logging.getLogger("klipper-farm")
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    body = await request.body()
     logger.error(f"422 Validation Error: {exc.errors()}")
-    logger.error(f"Request body: {await request.body()}")
+    logger.error(f"Request body: {body}")
     return JSONResponse(
         status_code=422,
-        content={"detail": exc.errors(), "body": str(await request.body())},
+        content={"detail": exc.errors(), "body": body.decode(errors="replace")},
     )
 
 app.add_middleware(
@@ -56,19 +56,19 @@ app.include_router(websocket.router)
 @app.on_event("startup")
 async def startup_event():
     # Initialise Database Tables
-    print("Initialising database tables...")
+    logger.info("Initialising database tables...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    print("Database tables initialised.")
+    logger.info("Database tables initialised.")
 
     # Data Migration: Fix "unknown" UUIDs
     try:
         async with AsyncSessionLocal() as db:
             await db.execute(update(Node).where(Node.node_uuid == "unknown").values(node_uuid=None))
             await db.commit()
-            print("Cleaned up 'unknown' node UUIDs from database.")
+            logger.info("Cleaned up 'unknown' node UUIDs from database.")
     except Exception as e:
-        print(f"Migration error: {e}")
+        logger.error("Migration error: %s", e)
 
     # Start background tasks
     asyncio.create_task(monitor_nodes())
@@ -84,7 +84,7 @@ async def monitor_nodes():
 
                 # Find nodes going offline
                 result = await db.execute(
-                    select(Node).where(Node.online == True).where(Node.last_seen < threshold)
+                    select(Node).where(Node.online.is_(True)).where(Node.last_seen < threshold)
                 )
                 nodes_to_offline = result.scalars().all()
 
@@ -102,11 +102,11 @@ async def monitor_nodes():
                         message=f"Node {node.hostname} is offline (no heartbeat for 60s)"
                     )
                     db.add(event)
-                    print(f"Node {node.hostname} marked offline")
+                    logger.info("Node %s marked offline", node.hostname)
 
                 await db.commit()
         except Exception as e:
-            print(f"Error in monitor_nodes: {e}")
+            logger.error("Error in monitor_nodes: %s", e)
 
         await asyncio.sleep(30)
 

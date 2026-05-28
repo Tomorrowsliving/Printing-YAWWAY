@@ -173,7 +173,7 @@ async def monitor_approved_node_storage():
             else:
                 async with AsyncSessionLocal() as db:
                     result = await db.execute(
-                        select(Node).where(Node.approved == True).where(Node.online == True)
+                        select(Node).where(Node.approved.is_(True)).where(Node.online.is_(True))
                     )
                     for node in result.scalars().all():
                         active_operation = get_node_operation(node.id)
@@ -299,6 +299,13 @@ def serialize_node(node):
         "updated_at": node.updated_at,
     }
 
+async def get_node_or_404(node_id: int, db: AsyncSession):
+    result = await db.execute(select(Node).where(Node.id == node_id))
+    node = result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
+    return node
+
 @router.post("/", response_model=NodeSchema)
 async def register_node(node_in: NodeCreate, request: Request, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
@@ -314,14 +321,14 @@ async def register_node(node_in: NodeCreate, request: Request, db: AsyncSession 
     if existing_node:
         for field, value in node_in.model_dump(exclude_unset=True).items():
             setattr(existing_node, field, value)
-        existing_node.last_seen = datetime.datetime.now(datetime.timezone.utc)
+        existing_node.last_seen = utcnow()
         existing_node.online = True
         node = existing_node
     else:
         node = Node(**node_in.model_dump())
         node.approved = True
         node.status = "approved"
-        node.last_seen = datetime.datetime.now(datetime.timezone.utc)
+        node.last_seen = utcnow()
         node.online = True
         db.add(node)
 
@@ -339,16 +346,13 @@ async def register_node(node_in: NodeCreate, request: Request, db: AsyncSession 
 
 @router.put("/{node_id}", response_model=NodeSchema)
 async def update_node(node_id: int, node_in: NodeCreate, request: Request, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
 
     was_approved = bool(node.approved)
     for field, value in node_in.model_dump(exclude_unset=True).items():
         setattr(node, field, value)
 
-    node.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    node.updated_at = utcnow()
     await db.commit()
     await db.refresh(node)
     if node.approved and not was_approved:
@@ -363,18 +367,12 @@ async def list_nodes(db: AsyncSession = Depends(get_db)):
 
 @router.get("/{node_id}", response_model=NodeSchema)
 async def get_node(node_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
     return serialize_node(node)
 
 @router.delete("/{node_id}")
 async def delete_node(node_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
 
     node_hostname = node.hostname
     await db.execute(update(Printer).where(Printer.assigned_node_id == node_id).values(assigned_node_id=None))
@@ -444,7 +442,7 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
     node.uptime = hb_uptime or node.uptime
     node.agent_version = hb_version or node.agent_version
     node.online = True
-    node.last_seen = datetime.datetime.now(datetime.timezone.utc)
+    node.last_seen = utcnow()
     if node.approved:
         node.status = "online"
     else:
@@ -465,12 +463,10 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
 
 @router.post("/{node_id}/approve", response_model=NodeSchema)
 async def approve_node(node_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node: raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
     node.approved = True
     node.status = "approved"
-    node.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    node.updated_at = utcnow()
     db.add(Event(node_id=node.id, severity="info", event_type="node_approved", message=f"Node {node.hostname} approved"))
     await db.commit()
     await db.refresh(node)
@@ -479,10 +475,7 @@ async def approve_node(node_id: int, request: Request, db: AsyncSession = Depend
 
 @router.post("/{node_id}/refresh", response_model=NodeSchema)
 async def refresh_node(node_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
 
     url = f"http://{node.ip_address}:{node.agent_port}/health"
     logger.info(f"Refreshing node {node.id} ({node.hostname}) at {url}")
@@ -499,7 +492,7 @@ async def refresh_node(node_id: int, db: AsyncSession = Depends(get_db)):
             node.model = data.get("pi_model", data.get("model", node.model))
             node.agent_version = data.get("version", node.agent_version)
             node.online = True
-            node.last_seen = datetime.datetime.now(datetime.timezone.utc)
+            node.last_seen = utcnow()
             node.status = "online" if node.approved else "discovered"
 
             await db.commit()
@@ -530,10 +523,7 @@ async def refresh_node(node_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.get("/{node_id}/health")
 async def get_node_live_health(node_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
 
     url = f"http://{node.ip_address}:{node.agent_port}/health"
     try:
@@ -550,12 +540,12 @@ async def get_node_live_health(node_id: int, db: AsyncSession = Depends(get_db))
         node.model = data.get("pi_model", data.get("model", node.model))
         node.agent_version = data.get("version", node.agent_version)
         node.online = True
-        node.last_seen = datetime.datetime.now(datetime.timezone.utc)
+        node.last_seen = utcnow()
         node.status = "online" if node.approved else "discovered"
         await db.commit()
 
         data["source"] = "live"
-        data["checked_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        data["checked_at"] = utcnow().isoformat()
         return data
     except HTTPException:
         raise
@@ -565,7 +555,7 @@ async def get_node_live_health(node_id: int, db: AsyncSession = Depends(get_db))
         if active_operation:
             return {
                 "source": "operation",
-                "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "checked_at": utcnow().isoformat(),
                 "active_operation": active_operation.get("operation"),
                 "message": active_operation.get("message"),
                 "cpu_usage": node.cpu_usage,
@@ -577,9 +567,7 @@ async def get_node_live_health(node_id: int, db: AsyncSession = Depends(get_db))
 
 @router.post("/{node_id}/detect-port", response_model=NodeSchema)
 async def detect_node_port(node_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node: raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
 
     common_ports = [8001, 8002, 8003, 7126, 7125]
     async with httpx.AsyncClient() as client:
@@ -589,11 +577,11 @@ async def detect_node_port(node_id: int, db: AsyncSession = Depends(get_db)):
                 res = await client.get(url, timeout=1)
                 if res.status_code == 200:
                     node.agent_port = port
-                node.online = True
-                node.status = "online" if node.approved else "discovered"
-                await db.commit()
-                await db.refresh(node)
-                return serialize_node(node)
+                    node.online = True
+                    node.status = "online" if node.approved else "discovered"
+                    await db.commit()
+                    await db.refresh(node)
+                    return serialize_node(node)
             except Exception as e:
                 logger.debug(f"Port {port} not responsive on {node.ip_address}: {e}")
                 continue
@@ -602,10 +590,7 @@ async def detect_node_port(node_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{node_id}/update")
 async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
 
     url = f"http://{node.ip_address}:{node.agent_port}/update"
     try:
@@ -625,7 +610,7 @@ async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
 
         node.last_update_status = update_res.get("status", "failed")
         node.last_update_message = update_res.get("message", "No message provided")
-        node.last_update_at = datetime.datetime.now(datetime.timezone.utc)
+        node.last_update_at = utcnow()
 
         if update_res.get("success"):
             node.status = "online" # or "restart_required" if we add that state
@@ -644,15 +629,13 @@ async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
         node.status = "error"
         node.last_update_status = "failed"
         node.last_update_message = str(e)
-        node.last_update_at = datetime.datetime.now(datetime.timezone.utc)
+        node.last_update_at = utcnow()
         await db.commit()
         raise HTTPException(status_code=400, detail=f"Update communication failed at {url}: {str(e)}")
 
 @router.post("/{node_id}/restart-agent")
 async def restart_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node: raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
 
     url = f"http://{node.ip_address}:{node.agent_port}/restart-agent"
     try:
@@ -677,9 +660,7 @@ async def restart_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{node_id}/reboot")
 async def reboot_node_proxy(node_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node: raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
 
     url = f"http://{node.ip_address}:{node.agent_port}/reboot"
     try:
@@ -705,9 +686,7 @@ async def reboot_node_proxy(node_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{node_id}/restart-services")
 async def restart_node_services(node_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node: raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
 
     url = f"http://{node.ip_address}:{node.agent_port}/restart-printers"
     try:
@@ -735,10 +714,7 @@ async def restart_node_services(node_id: int, db: AsyncSession = Depends(get_db)
 @router.get("/{node_id}/usb")
 async def get_node_usb(node_id: int, db: AsyncSession = Depends(get_db)):
     """Proxied endpoint to fetch USB devices from a node-agent"""
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
 
     url = f"http://{node.ip_address}:{node.agent_port}/usb"
     try:
@@ -755,10 +731,7 @@ async def get_node_usb(node_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("/{node_id}/storage/mount")
 async def proxy_storage_mount(node_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """Proxied endpoint to initiate NFS mount on a node"""
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
 
     server_ip = get_nfs_server_host(request)
     if not server_ip:
@@ -797,10 +770,7 @@ async def proxy_storage_mount(node_id: int, request: Request, db: AsyncSession =
 @router.post("/{node_id}/instances/create")
 async def proxy_create_instance(node_id: int, request: Request, data: dict = Body(...), db: AsyncSession = Depends(get_db)):
     """Proxied endpoint to create a printer instance on a node-agent"""
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
 
     data = ensure_moonraker_config_payload(dict(data), node, request)
     url = f"http://{node.ip_address}:{node.agent_port}/instances/create"
@@ -816,11 +786,7 @@ async def proxy_create_instance(node_id: int, request: Request, data: dict = Bod
         raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")
 
 async def get_node_for_proxy(node_id: int, db: AsyncSession):
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
-    return node
+    return await get_node_or_404(node_id, db)
 
 async def proxy_node_get(node: Node, path: str, timeout: int = 5):
     url = f"http://{node.ip_address}:{node.agent_port}{path}"
@@ -869,10 +835,7 @@ async def proxy_software_check(node_id: int, db: AsyncSession = Depends(get_db))
 @router.get("/{node_id}/storage/check")
 async def proxy_storage_check(node_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """Proxied endpoint to check NFS status on a node"""
-    result = await db.execute(select(Node).where(Node.id == node_id))
-    node = result.scalar_one_or_none()
-    if not node:
-        raise HTTPException(status_code=404, detail="Node not found")
+    node = await get_node_or_404(node_id, db)
 
     url = f"http://{node.ip_address}:{node.agent_port}/storage/check"
     try:

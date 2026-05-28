@@ -80,7 +80,7 @@ const FileManager = ({ addToast }) => {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-2xl font-bold">File Manager</h2>
       </div>
 

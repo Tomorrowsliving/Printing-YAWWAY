@@ -1,0 +1,59 @@
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: klipper_farm
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d klipper_farm"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  storage-init:
+    image: alpine:latest
+    command: >
+      sh -c "
+      mkdir -p /storage/printers /storage/gcodes /storage/configs /storage/backups /storage/uploads /storage/logs &&
+      chmod -R 777 /storage &&
+      echo 'Development storage initialised'
+      "
+    volumes:
+      - ${DEV_STORAGE_ROOT:-./storage-dev}:/storage
+    restart: "no"
+
+  backend:
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://user:password@db/klipper_farm
+      STORAGE_ROOT: /mnt/klipper-farm
+      PRINTERS_PATH: /mnt/klipper-farm/printers
+      BACKUP_PATH: /mnt/klipper-farm/backups
+      NFS_EXPORT_PATH: /exports
+      NFS_CLIENT_MOUNT: /mnt/klipper-farm
+      NFS_PERMITTED: "*"
+      NFS_SYNC: "true"
+      AGENT_PORT: "${AGENT_PORT:-8001}"
+      BACKEND_PUBLIC_URL: "${DEV_PUBLIC_URL:-}"
+    volumes:
+      - ${DEV_STORAGE_ROOT:-./storage-dev}:/mnt/klipper-farm
+    depends_on:
+      db:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${DEV_FRONTEND_PORT:-3000}:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

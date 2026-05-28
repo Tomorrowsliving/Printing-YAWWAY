@@ -14,13 +14,17 @@ export const useStatusWebSocket = (onMessage) => {
     const url = getWsUrl();
     ws.current = new WebSocket(url);
 
-    ws.current.onopen = () => console.log('WebSocket Connected');
     ws.current.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (onMessage) onMessage(data);
+      try {
+        const data = JSON.parse(event.data);
+        if (onMessage) onMessage(data);
+      } catch (error) {
+        if (process.env.NODE_ENV !== 'production') {
+          console.error('Invalid WebSocket payload:', error);
+        }
+      }
     };
     ws.current.onerror = (error) => console.error('WebSocket Error:', error);
-    ws.current.onclose = () => console.log('WebSocket Disconnected');
 
     return () => {
       if (ws.current) ws.current.close();

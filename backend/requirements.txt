@@ -16,3 +16,4 @@ alembic
 requests
 ipaddress
 httpx
+pytest
