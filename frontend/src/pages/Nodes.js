@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { Server, HardDrive, RefreshCw, Plus, Loader2, Layers, Edit, Trash2, ArrowUpCircle, Search, Power, Settings2, Info, Activity, Thermometer, Clock, Cpu, ArrowLeftRight } from 'lucide-react';
+import { Server, HardDrive, RefreshCw, Plus, Loader2, Layers, Edit, Trash2, ArrowUpCircle, Search, Power, Settings2, Info, Activity, Thermometer, Clock, Cpu, ArrowLeftRight, Usb } from 'lucide-react';
 import { nodeService } from '../services/api';
 import { Modal } from '../components/UI';
 import axios from 'axios';
@@ -119,6 +119,7 @@ const NodeOverview = ({ addToast }) => {
   const [nodes, setNodes] = useState([]);
   const [storageStatus, setStorageStatus] = useState({});
   const [hardwareStatus, setHardwareStatus] = useState({});
+  const [nodeInventory, setNodeInventory] = useState({});
   const [nfsInfo, setNfsInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -281,6 +282,18 @@ const NodeOverview = ({ addToast }) => {
       // Fetch storage status for each online node
       nodeData.filter(n => n.online).forEach(node => {
           fetchNodeStorage(node);
+          Promise.allSettled([
+            axios.get(`/api/nodes/${node.id}/usb`),
+            axios.get(`/api/nodes/${node.id}/instances`)
+          ]).then(([usbRes, instanceRes]) => {
+            setNodeInventory(prev => ({
+              ...prev,
+              [node.id]: {
+                usb_devices: usbRes.status === 'fulfilled' ? usbRes.value.data : (node.usb_devices || []),
+                service_instances: instanceRes.status === 'fulfilled' ? instanceRes.value.data : (node.service_instances || []),
+              }
+            }));
+          });
       });
     } catch (err) {
       console.error("Error fetching nodes:", err);
@@ -579,6 +592,17 @@ const NodeOverview = ({ addToast }) => {
           const diskPercent = hardware.root_disk?.percent;
           const diskSubtext = hardware.root_disk ? `${formatMb(hardware.root_disk.free_mb)} free` : null;
           const healthFreshness = hardware.checked_at ? `Updated ${formatLastSeen(hardware.checked_at)}` : 'Waiting for live sample';
+          const inventory = nodeInventory[node.id] || {};
+          const usbDevices = inventory.usb_devices || node.usb_devices || [];
+          const serviceInstances = inventory.service_instances || node.service_instances || [];
+          const warnings = [
+            /zero 2/i.test(node.model || '') ? 'Pi Zero 2 W: avoid webcams or multiple printers on this node.' : null,
+            Number(temperature || 0) >= 75 ? 'High CPU temperature.' : null,
+            Number(cpuUsage || 0) >= 85 ? 'High CPU load.' : null,
+            Number(ramUsage || 0) >= 85 ? 'Low RAM headroom.' : null,
+            node.approved && storageStatus[node.id] && !storage.nfs_available ? 'NFS mount unavailable.' : null,
+            serviceInstances.some(instance => String(instance.active || instance.status || '').toLowerCase().includes('failed')) ? 'One or more services are failed.' : null,
+          ].filter(Boolean);
 
           return (
           <div key={node.id} className={`bg-slate-800 border rounded-xl p-5 space-y-4 transition-all duration-300 ease-out ${node.approved ? 'border-slate-700' : 'border-blue-500 shadow-lg shadow-blue-900/10'}`}>
@@ -709,6 +733,50 @@ const NodeOverview = ({ addToast }) => {
               <div className={`p-2 rounded-lg text-[10px] border ${node.last_update_status === 'failed' ? 'bg-red-500/5 border-red-500/20 text-red-400' : 'bg-blue-500/5 border-blue-500/20 text-blue-400'}`}>
                 <p className="font-bold uppercase mb-0.5">Last Update: {node.last_update_status}</p>
                 <p className="opacity-80 italic line-clamp-1">{node.last_update_message}</p>
+              </div>
+            )}
+
+            {isAdvancedMode && (
+              <div className="rounded-lg border border-slate-700/60 bg-slate-900/30 p-3 space-y-3">
+                <div>
+                  <div className="flex items-center gap-2 mb-2">
+                    <Usb size={14} className="text-purple-300" />
+                    <p className="text-[10px] font-bold uppercase text-slate-400">USB Serial Devices</p>
+                  </div>
+                  {usbDevices.length > 0 ? (
+                    <div className="space-y-1">
+                      {usbDevices.slice(0, 4).map((device, index) => (
+                        <p key={`${device.id || device.path}-${index}`} className="truncate font-mono text-[10px] text-slate-400" title={device.path || device.id}>
+                          {device.id || device.path}
+                        </p>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[10px] text-orange-300">No serial devices reported.</p>
+                  )}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 mb-2">
+                    <Layers size={14} className="text-green-300" />
+                    <p className="text-[10px] font-bold uppercase text-slate-400">Services</p>
+                  </div>
+                  {serviceInstances.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {serviceInstances.map((instance) => (
+                        <span key={instance.name} className={`rounded-md border px-2 py-1 text-[9px] font-bold uppercase ${String(instance.active || instance.status).toLowerCase().includes('failed') ? 'border-red-500/30 bg-red-500/10 text-red-300' : 'border-slate-700 bg-slate-950 text-slate-300'}`}>
+                          {instance.name}: {instance.active || instance.status}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[10px] text-slate-500">No Klipper or Moonraker services reported.</p>
+                  )}
+                </div>
+                {warnings.length > 0 && (
+                  <div className="rounded-lg border border-orange-500/20 bg-orange-500/10 p-2 text-[10px] text-orange-200 space-y-1">
+                    {warnings.map((warning) => <p key={warning}>{warning}</p>)}
+                  </div>
+                )}
               </div>
             )}
 

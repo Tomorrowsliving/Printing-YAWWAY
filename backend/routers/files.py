@@ -20,11 +20,14 @@ from ..utils.file_backups import (
 router = APIRouter(prefix="/files", tags=["files"])
 
 STORAGE_ROOT = os.getenv("PRINTERS_PATH", "/mnt/klipper-farm/printers")
-ALLOWED_FILE_TYPES = {"config", "gcode", "logs"}
+ALLOWED_FILE_TYPES = {"config", "moonraker", "macros", "gcode", "logs", "backups"}
 FILE_TYPE_DIRECTORIES = {
     "config": "config",
+    "moonraker": "config",
+    "macros": os.path.join("config", "macros"),
     "gcode": "gcodes",
     "logs": "logs",
+    "backups": "",
 }
 KLIPPER_CONFIG_API_URL = "https://api.github.com/repos/Klipper3d/klipper/contents/config"
 KLIPPER_RAW_CONFIG_PREFIX = "https://raw.githubusercontent.com/Klipper3d/klipper/master/config/"
@@ -39,11 +42,24 @@ class FileInfo(BaseModel):
 class SaveFileRequest(BaseModel):
     content: str
 
-def validate_storage_file_path(path: str):
-    if not is_path_within(path, STORAGE_ROOT):
+class RenameFileRequest(BaseModel):
+    path: str
+    new_name: str
+
+def _managed_root_for_path(path: str):
+    if is_path_within(path, STORAGE_ROOT):
+        return STORAGE_ROOT
+    if is_path_within(path, BACKUP_ROOT):
+        return BACKUP_ROOT
+    return None
+
+def validate_storage_file_path(path: str, allow_backups: bool = True):
+    root = _managed_root_for_path(path)
+    if not root or (root == BACKUP_ROOT and not allow_backups):
         raise HTTPException(status_code=403, detail="Access denied")
-    if is_backup_filename(os.path.basename(path)):
+    if root == STORAGE_ROOT and is_backup_filename(os.path.basename(path)):
         raise HTTPException(status_code=400, detail="Backup files are managed from the Backups section")
+    return root
 
 def storage_subdir_for_file_type(file_type: str):
     if file_type not in ALLOWED_FILE_TYPES:
@@ -86,28 +102,36 @@ async def get_klipper_example_content(path: str):
 
 @router.get("/{printer_slug}/{file_type}", response_model=List[FileInfo])
 async def list_files(printer_slug: str, file_type: str):
-    target_path = os.path.join(STORAGE_ROOT, printer_slug, storage_subdir_for_file_type(file_type))
-    if not is_path_within(target_path, STORAGE_ROOT):
+    if file_type == "backups":
+        target_path = os.path.join(BACKUP_ROOT, "file-edits", printer_slug)
+        root = BACKUP_ROOT
+    else:
+        target_path = os.path.join(STORAGE_ROOT, printer_slug, storage_subdir_for_file_type(file_type))
+        root = STORAGE_ROOT
+
+    if not is_path_within(target_path, root):
         raise HTTPException(status_code=403, detail="Access denied")
 
     if not os.path.exists(target_path):
-        # Create directory if it doesn't exist to make it easier for user
         os.makedirs(target_path, exist_ok=True)
 
     files = []
-    for item in os.listdir(target_path):
-        if is_backup_filename(item):
-            continue
-
-        item_path = os.path.join(target_path, item)
-        stats = os.stat(item_path)
-        files.append(FileInfo(
-            name=item,
-            path=item_path,
-            type="file" if os.path.isfile(item_path) else "directory",
-            size=stats.st_size,
-            last_modified=stats.st_mtime
-        ))
+    for dirpath, dirnames, filenames in os.walk(target_path):
+        dirnames[:] = [name for name in dirnames if not name.startswith(".")]
+        for item in filenames:
+            if file_type != "backups" and is_backup_filename(item):
+                continue
+            if file_type == "moonraker" and not item.lower().startswith("moonraker"):
+                continue
+            item_path = os.path.join(dirpath, item)
+            stats = os.stat(item_path)
+            files.append(FileInfo(
+                name=os.path.relpath(item_path, target_path).replace(os.sep, "/"),
+                path=item_path,
+                type="file",
+                size=stats.st_size,
+                last_modified=stats.st_mtime
+            ))
     return files
 
 @router.get("/read")
@@ -122,7 +146,7 @@ async def read_file(path: str):
 
 @router.post("/save")
 async def save_file(path: str, req: SaveFileRequest, db: AsyncSession = Depends(get_db)):
-    validate_storage_file_path(path)
+    validate_storage_file_path(path, allow_backups=False)
 
     backup_path, pruned_paths = create_file_edit_backup(path)
     if backup_path:
@@ -150,6 +174,8 @@ async def save_file(path: str, req: SaveFileRequest, db: AsyncSession = Depends(
 
 @router.post("/upload")
 async def upload_file(printer_slug: str, file_type: str, file: UploadFile = File(...)):
+    if file_type == "backups":
+        raise HTTPException(status_code=400, detail="Upload restore archives from the Backups section")
     target_dir = os.path.join(STORAGE_ROOT, printer_slug, storage_subdir_for_file_type(file_type))
     if not is_path_within(target_dir, STORAGE_ROOT):
         raise HTTPException(status_code=403, detail="Access denied")
@@ -165,6 +191,25 @@ async def upload_file(printer_slug: str, file_type: str, file: UploadFile = File
         shutil.copyfileobj(file.file, buffer)
 
     return {"filename": filename, "status": "success"}
+
+@router.post("/rename")
+async def rename_file(req: RenameFileRequest):
+    validate_storage_file_path(req.path, allow_backups=False)
+    if not os.path.exists(req.path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    new_name = os.path.basename(req.new_name or "")
+    if not new_name or new_name != req.new_name.strip() or is_backup_filename(new_name):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    target_path = os.path.join(os.path.dirname(req.path), new_name)
+    if not is_path_within(target_path, os.path.dirname(req.path)):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if os.path.exists(target_path):
+        raise HTTPException(status_code=409, detail="A file with that name already exists")
+
+    os.rename(req.path, target_path)
+    return {"status": "success", "path": target_path, "filename": new_name}
 
 @router.get("/download")
 async def download_file(path: str):

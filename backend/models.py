@@ -35,6 +35,8 @@ class Node(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     printers = relationship("Printer", back_populates="node")
+    usb_devices = relationship("UsbDevice", back_populates="node", cascade="all, delete-orphan")
+    service_instances = relationship("ServiceInstance", back_populates="node", cascade="all, delete-orphan")
 
 class Printer(Base):
     __tablename__ = "printers"
@@ -59,6 +61,32 @@ class Printer(Base):
 
     node = relationship("Node", back_populates="printers", lazy="selectin")
     notes = relationship("PrinterNote", back_populates="printer", uselist=False)
+    slicer_profiles = relationship("SlicerProfile", back_populates="printer")
+    slicer_jobs = relationship("SlicerJob", back_populates="printer")
+
+class UsbDevice(Base):
+    __tablename__ = "usb_devices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    node_id = Column(Integer, ForeignKey("nodes.id"), index=True)
+    device_id = Column(String)
+    path = Column(String)
+    last_seen = Column(DateTime(timezone=True), server_default=func.now())
+
+    node = relationship("Node", back_populates="usb_devices")
+
+class ServiceInstance(Base):
+    __tablename__ = "service_instances"
+
+    id = Column(Integer, primary_key=True, index=True)
+    node_id = Column(Integer, ForeignKey("nodes.id"), index=True)
+    name = Column(String, index=True)
+    status = Column(String)
+    active = Column(String)
+    service_type = Column(String)
+    last_seen = Column(DateTime(timezone=True), server_default=func.now())
+
+    node = relationship("Node", back_populates="service_instances")
 
 class PrinterNote(Base):
     __tablename__ = "printer_notes"
@@ -131,3 +159,49 @@ class FileRecord(Base):
     size = Column(Integer)
     last_modified = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class SlicerProfile(Base):
+    __tablename__ = "slicer_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    profile_type = Column(String, index=True)  # printer, filament, process
+    engine = Column(String, default="orca")
+    printer_id = Column(Integer, ForeignKey("printers.id"), nullable=True)
+    data = Column(JSON, default=dict)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    printer = relationship("Printer", back_populates="slicer_profiles")
+
+class SlicerModel(Base):
+    __tablename__ = "slicer_models"
+
+    id = Column(Integer, primary_key=True, index=True)
+    filename = Column(String)
+    file_path = Column(String)
+    size = Column(Integer)
+    source_format = Column(String)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class SlicerJob(Base):
+    __tablename__ = "slicer_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    model_id = Column(Integer, ForeignKey("slicer_models.id"))
+    printer_id = Column(Integer, ForeignKey("printers.id"))
+    printer_profile_id = Column(Integer, ForeignKey("slicer_profiles.id"), nullable=True)
+    filament_profile_id = Column(Integer, ForeignKey("slicer_profiles.id"), nullable=True)
+    process_profile_id = Column(Integer, ForeignKey("slicer_profiles.id"), nullable=True)
+    engine = Column(String, default="orca")
+    status = Column(String, default="queued")  # queued, running, completed, failed, cancelled
+    message = Column(Text)
+    output_path = Column(String)
+    estimated_time = Column(String)
+    filament_used_mm = Column(Float)
+    command = Column(JSON)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    model = relationship("SlicerModel")
+    printer = relationship("Printer", back_populates="slicer_jobs")

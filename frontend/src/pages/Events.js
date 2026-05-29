@@ -9,6 +9,10 @@ const Events = ({ addToast }) => {
   const [loading, setLoading] = useState(true);
   const [filterType, setFilterType] = useState('');
   const [filterSeverity, setFilterSeverity] = useState('');
+  const [filterPrinter, setFilterPrinter] = useState('');
+  const [filterNode, setFilterNode] = useState('');
+  const [printers, setPrinters] = useState([]);
+  const [nodes, setNodes] = useState([]);
 
   const fetchEvents = useCallback(async () => {
     setLoading(true);
@@ -16,6 +20,8 @@ const Events = ({ addToast }) => {
       const params = {};
       if (filterType) params.event_type = filterType;
       if (filterSeverity) params.severity = filterSeverity;
+      if (filterPrinter) params.printer_id = filterPrinter;
+      if (filterNode) params.node_id = filterNode;
 
       const res = await axios.get(`/api/events`, { params });
       setEvents(Array.isArray(res.data) ? res.data : []);
@@ -24,11 +30,20 @@ const Events = ({ addToast }) => {
     } finally {
       setLoading(false);
     }
-  }, [filterType, filterSeverity]);
+  }, [filterType, filterSeverity, filterPrinter, filterNode]);
 
   useEffect(() => {
     fetchEvents();
   }, [fetchEvents]);
+
+  useEffect(() => {
+    Promise.all([axios.get('/api/printers'), axios.get('/api/nodes')])
+      .then(([printerRes, nodeRes]) => {
+        setPrinters(Array.isArray(printerRes.data) ? printerRes.data : []);
+        setNodes(Array.isArray(nodeRes.data) ? nodeRes.data : []);
+      })
+      .catch(() => {});
+  }, []);
 
   const getSeverityIcon = (severity) => {
     if (!severity) return <Info className="text-slate-500" size={18} />;
@@ -67,6 +82,26 @@ const Events = ({ addToast }) => {
             <option value="backup">Backup</option>
             <option value="status_change">Status Change</option>
             <option value="error">Error</option>
+          </select>
+        </div>
+        <div className="flex items-center space-x-2">
+          <select
+            value={filterPrinter}
+            onChange={(e) => setFilterPrinter(e.target.value)}
+            className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-sm outline-none focus:border-blue-500"
+          >
+            <option value="">All Printers</option>
+            {printers.map(printer => <option key={printer.id} value={printer.id}>{printer.name}</option>)}
+          </select>
+        </div>
+        <div className="flex items-center space-x-2">
+          <select
+            value={filterNode}
+            onChange={(e) => setFilterNode(e.target.value)}
+            className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-sm outline-none focus:border-blue-500"
+          >
+            <option value="">All Nodes</option>
+            {nodes.map(node => <option key={node.id} value={node.id}>{node.name || node.hostname}</option>)}
           </select>
         </div>
         <div className="flex items-center space-x-2">

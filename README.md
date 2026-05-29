@@ -34,6 +34,30 @@ Create a central server to manage printer profiles, configs, G-code storage, nod
 4. Run `docker-compose up -d`.
 5. Access the dashboard at `http://YOUR_SERVER_IP`.
 
+### Optional Local Slicer Engine
+
+The dashboard supports a server-side OrcaSlicer workflow, but OrcaSlicer is not bundled with this project. OrcaSlicer is AGPL-3.0 software, so the safer default is to install it as an external engine from the official release page and point the dashboard at it.
+
+Recommended install on the dashboard server:
+
+```bash
+sudo bash scripts/install-orca-slicer.sh --storage-root /path/to/dashboard/storage
+```
+
+For the current live Portainer-style deployment, that is usually:
+
+```bash
+sudo bash scripts/install-orca-slicer.sh --storage-root /data/compose/16/storage
+```
+
+The helper downloads the official Linux AppImage from GitHub, extracts it into `tools/orca-slicer` inside shared storage, creates a headless wrapper, and writes `settings/slicer.json` with:
+
+```text
+/mnt/klipper-farm/tools/orca-slicer/orca-slicer
+```
+
+Open **Slicer** in the dashboard and press **Refresh** after installing. OrcaSlicer is a desktop AppImage, so the backend image includes the headless GUI/runtime libraries it needs; leave at least a couple of GB free on the Docker host before rebuilding.
+
 ### Node Agent (on Raspberry Pi)
 
 1. Ensure Python 3.9+ is installed.

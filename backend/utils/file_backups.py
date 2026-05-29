@@ -10,6 +10,7 @@ FILE_EDIT_BACKUP_TYPE = "file-edit"
 FILE_EDIT_BACKUP_DIR = "file-edits"
 BACKUP_SETTINGS_FILE = "backup-settings.json"
 DEFAULT_FILE_BACKUP_LIMIT = 5
+DEFAULT_FARM_BACKUP_RETENTION = 14
 
 
 def _safe_int(value, default):
@@ -40,13 +41,21 @@ def should_create_edit_backup(path):
 
 def get_backup_settings():
     default_limit = _safe_int(os.getenv("FILE_BACKUP_LIMIT"), DEFAULT_FILE_BACKUP_LIMIT)
-    settings = {"file_backup_limit": max(0, default_limit)}
+    settings = {
+        "file_backup_limit": max(0, default_limit),
+        "automatic_enabled": os.getenv("BACKUP_AUTOMATIC_ENABLED", "true").lower() not in ("0", "false", "no"),
+        "scheduled_time": os.getenv("BACKUP_SCHEDULED_TIME", "02:00"),
+        "farm_backup_retention": max(1, _safe_int(os.getenv("FARM_BACKUP_RETENTION"), DEFAULT_FARM_BACKUP_RETENTION)),
+    }
     settings_path = os.path.join(BACKUP_ROOT, BACKUP_SETTINGS_FILE)
 
     try:
         with open(settings_path, "r") as f:
             saved = json.load(f)
             settings["file_backup_limit"] = max(0, _safe_int(saved.get("file_backup_limit"), settings["file_backup_limit"]))
+            settings["automatic_enabled"] = bool(saved.get("automatic_enabled", settings["automatic_enabled"]))
+            settings["scheduled_time"] = str(saved.get("scheduled_time") or settings["scheduled_time"])
+            settings["farm_backup_retention"] = max(1, _safe_int(saved.get("farm_backup_retention"), settings["farm_backup_retention"]))
     except FileNotFoundError:
         pass
     except (OSError, json.JSONDecodeError):
@@ -55,9 +64,15 @@ def get_backup_settings():
     return settings
 
 
-def save_backup_settings(file_backup_limit):
+def save_backup_settings(file_backup_limit, automatic_enabled=None, scheduled_time=None, farm_backup_retention=None):
     os.makedirs(BACKUP_ROOT, exist_ok=True)
-    settings = {"file_backup_limit": max(0, _safe_int(file_backup_limit, DEFAULT_FILE_BACKUP_LIMIT))}
+    current = get_backup_settings()
+    settings = {
+        "file_backup_limit": max(0, _safe_int(file_backup_limit, current["file_backup_limit"])),
+        "automatic_enabled": current["automatic_enabled"] if automatic_enabled is None else bool(automatic_enabled),
+        "scheduled_time": scheduled_time or current["scheduled_time"],
+        "farm_backup_retention": max(1, _safe_int(farm_backup_retention, current["farm_backup_retention"])),
+    }
     settings_path = os.path.join(BACKUP_ROOT, BACKUP_SETTINGS_FILE)
     with open(settings_path, "w") as f:
         json.dump(settings, f, indent=2)

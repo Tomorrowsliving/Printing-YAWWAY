@@ -5,9 +5,12 @@ from typing import List, Optional
 import os
 import shutil
 import datetime
+import asyncio
+import json
+import zipfile
 from pydantic import BaseModel
-from ..database import get_db
-from ..models import Backup, Event, Printer
+from ..database import AsyncSessionLocal, get_db
+from ..models import Assignment, Backup, Event, Node, Printer, PrinterNote, ServiceInstance
 from ..schemas import Backup as BackupSchema
 from ..utils.file_backups import (
     FILE_EDIT_BACKUP_TYPE,
@@ -31,6 +34,9 @@ ALL_PRINTERS_SLUG = "__all_printers__"
 
 class BackupSettingsRequest(BaseModel):
     file_backup_limit: int
+    automatic_enabled: bool = True
+    scheduled_time: str = "02:00"
+    farm_backup_retention: int = 14
 
 def _label_from_slug(slug: str):
     return slug.replace("-", " ").replace("_", " ").title()
@@ -129,31 +135,86 @@ async def get_settings():
 
 @router.post("/settings")
 async def update_settings(req: BackupSettingsRequest, db: AsyncSession = Depends(get_db)):
-    settings = save_backup_settings(req.file_backup_limit)
+    settings = save_backup_settings(
+        req.file_backup_limit,
+        automatic_enabled=req.automatic_enabled,
+        scheduled_time=req.scheduled_time,
+        farm_backup_retention=req.farm_backup_retention,
+    )
     pruned_paths = prune_all_file_edit_backups(settings["file_backup_limit"])
     if pruned_paths:
         await db.execute(delete(Backup).where(Backup.file_path.in_(pruned_paths)))
     await db.flush()
     return {**settings, "pruned": len(pruned_paths)}
 
-@router.post("/create")
-async def create_backup(db: AsyncSession = Depends(get_db)):
+def _json_default(value):
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.isoformat()
+    return str(value)
+
+def _row_to_dict(obj):
+    return {column.name: getattr(obj, column.name) for column in obj.__table__.columns}
+
+async def _metadata_manifest(db: AsyncSession):
+    tables = {
+        "printers": Printer,
+        "nodes": Node,
+        "assignments": Assignment,
+        "printer_notes": PrinterNote,
+        "service_instances": ServiceInstance,
+    }
+    manifest = {
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "schema": 1,
+        "tables": {},
+    }
+    for name, model in tables.items():
+        result = await db.execute(select(model))
+        manifest["tables"][name] = [_row_to_dict(row) for row in result.scalars().all()]
+    return manifest
+
+def _prune_farm_backups(retention: int):
+    if retention <= 0 or not os.path.isdir(BACKUP_PATH):
+        return []
+    candidates = [
+        os.path.join(BACKUP_PATH, name)
+        for name in os.listdir(BACKUP_PATH)
+        if name.endswith(".zip") and (name.startswith("backup_") or name.startswith("scheduled_"))
+    ]
+    candidates.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    removed = []
+    for path in candidates[retention:]:
+        try:
+            os.remove(path)
+            removed.append(path)
+        except OSError:
+            pass
+    return removed
+
+async def _create_farm_backup(db: AsyncSession, source: str = "manual"):
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"backup_{timestamp}.zip"
+    prefix = "scheduled" if source == "scheduled" else "backup"
+    filename = f"{prefix}_{timestamp}.zip"
     file_path = os.path.join(BACKUP_PATH, filename)
 
     try:
-        # Simple backup logic: zip the printers directory
-        # In a real farm, this would also include a DB dump
         if not os.path.exists(BACKUP_PATH):
             os.makedirs(BACKUP_PATH)
 
-        shutil.make_archive(file_path.replace(".zip", ""), 'zip', PRINTERS_PATH)
+        manifest = await _metadata_manifest(db)
+        with zipfile.ZipFile(file_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.json", json.dumps(manifest, indent=2, default=_json_default))
+            if os.path.isdir(PRINTERS_PATH):
+                for dirpath, _, filenames in os.walk(PRINTERS_PATH):
+                    for file_name in filenames:
+                        source_path = os.path.join(dirpath, file_name)
+                        rel_path = os.path.relpath(source_path, PRINTERS_PATH).replace(os.sep, "/")
+                        archive.write(source_path, f"printers/{rel_path}")
 
         backup = Backup(
             filename=filename,
             file_path=file_path,
-            backup_type="manual",
+            backup_type="farm" if source == "scheduled" else "manual",
             status="success"
         )
         db.add(backup)
@@ -161,12 +222,14 @@ async def create_backup(db: AsyncSession = Depends(get_db)):
         event = Event(
             severity="info",
             event_type="backup",
-            message=f"Manual backup created: {filename}"
+            message=f"{source.title()} backup created: {filename}",
+            details={"source": source, "manifest_tables": list(manifest["tables"].keys())},
         )
         db.add(event)
 
+        removed = _prune_farm_backups(get_backup_settings()["farm_backup_retention"])
         await db.flush()
-        return {"status": "success", "filename": filename}
+        return {"status": "success", "filename": filename, "pruned": len(removed)}
     except Exception as e:
         backup = Backup(
             filename=filename,
@@ -176,8 +239,37 @@ async def create_backup(db: AsyncSession = Depends(get_db)):
             error_message=str(e)
         )
         db.add(backup)
+        db.add(Event(
+            severity="error",
+            event_type="backup_failed",
+            message=f"{source.title()} backup failed: {filename}",
+            details={"error": str(e)},
+        ))
         await db.flush()
         raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")
+
+@router.post("/create")
+async def create_backup(db: AsyncSession = Depends(get_db)):
+    return await _create_farm_backup(db, "manual")
+
+async def scheduled_backup_loop():
+    last_run_date = None
+    while True:
+        try:
+            settings = get_backup_settings()
+            if settings.get("automatic_enabled"):
+                now = datetime.datetime.now()
+                scheduled = str(settings.get("scheduled_time") or "02:00")
+                hour, minute = [int(part) for part in scheduled.split(":", 1)]
+                due = now.hour == hour and now.minute == minute
+                if due and last_run_date != now.date():
+                    async with AsyncSessionLocal() as db:
+                        await _create_farm_backup(db, "scheduled")
+                        await db.commit()
+                    last_run_date = now.date()
+        except Exception:
+            pass
+        await asyncio.sleep(30)
 
 @router.post("/restore/{backup_id}")
 async def restore_backup(backup_id: int, db: AsyncSession = Depends(get_db)):
@@ -198,8 +290,17 @@ async def restore_backup(backup_id: int, db: AsyncSession = Depends(get_db)):
             await db.flush()
             return {"status": "success", "message": "File restore complete", "path": restored_path}
 
-        # Restore logic: unzip back to printers directory
-        shutil.unpack_archive(backup.file_path, PRINTERS_PATH)
+        if backup.backup_type in ("manual", "farm", "klipper-farm"):
+            with zipfile.ZipFile(backup.file_path, "r") as archive:
+                for item in archive.infolist():
+                    if not item.filename.startswith("printers/") or item.is_dir():
+                        continue
+                    target = os.path.join(PRINTERS_PATH, item.filename[len("printers/"):])
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    with archive.open(item) as source, open(target, "wb") as dest:
+                        shutil.copyfileobj(source, dest)
+        else:
+            shutil.unpack_archive(backup.file_path, PRINTERS_PATH)
 
         event = Event(
             severity="warning",

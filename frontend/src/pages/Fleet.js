@@ -296,6 +296,17 @@ const Fleet = ({ addToast }) => {
     }
   };
 
+  const handleEmergencyStop = async (printer) => {
+    if (!window.confirm(`Emergency stop ${printer.name}?`)) return;
+    try {
+      await axios.post(`/api/printers/${printer.id}/emergency-stop`);
+      addToast('Emergency stop sent', 'success');
+      fetchPrinters();
+    } catch (err) {
+      addToast(err.response?.data?.detail || 'Emergency stop failed', 'error');
+    }
+  };
+
   const handleDeletePrinter = async (printer) => {
     if (!window.confirm(`Delete ${printer.name || 'this printer'} from the fleet?`)) return;
 
@@ -468,13 +479,17 @@ const Fleet = ({ addToast }) => {
                 <div className="py-4">
                   <div className="flex justify-between items-end mb-1">
                     <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{printer.status || 'offline'}</span>
+                    {printer.progress != null && <span className="text-[10px] font-bold text-blue-300">{printer.progress}%</span>}
                   </div>
                   <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden">
                     <div
                       className={`h-full ${getStatusColor(printer.status)} transition-all duration-500`}
-                      style={{ width: printer.status === 'printing' ? '45%' : printer.status === 'offline' ? '0%' : '100%' }}
+                      style={{ width: printer.status === 'printing' ? `${Math.max(1, Math.min(100, printer.progress || 0))}%` : printer.status === 'offline' ? '0%' : '100%' }}
                     ></div>
                   </div>
+                  <p className="mt-2 min-h-4 truncate text-[11px] text-slate-500">
+                    {printer.active_gcode ? `Active G-code: ${printer.active_gcode}` : 'No active G-code'}
+                  </p>
                 </div>
 
                 <div className="flex space-x-2">
@@ -485,7 +500,7 @@ const Fleet = ({ addToast }) => {
                     <RefreshCw size={12} className="mr-1" /> RESTART
                   </button>
                   <button
-                    onClick={() => addToast("Emergency Stop placeholder", "info")}
+                    onClick={() => handleEmergencyStop(printer)}
                     className="px-3 bg-red-900/20 hover:bg-red-900/40 py-2 rounded-lg text-red-500 transition-colors" title="Emergency Stop"
                   >
                     <ShieldAlert size={16} />

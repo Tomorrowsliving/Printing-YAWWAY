@@ -94,6 +94,9 @@ class InstanceCreate(BaseModel):
     backend_ip: Optional[str] = None
     node_ip: Optional[str] = None
 
+class EmergencyStopRequest(BaseModel):
+    moonraker_port: Optional[int] = None
+
 class MoonrakerRepairRequest(BaseModel):
     printer_slug: str
     moonraker_port: int
@@ -1154,7 +1157,7 @@ WantedBy=multi-user.target
     return {"status": "success", "message": f"Instance {data.printer_slug} created and started."}
 
 def validate_service_name(service: str):
-    if not (service.startswith("klipper-") or service.startswith("moonraker-")):
+    if not re.match(r"^(klipper|moonraker)-[A-Za-z0-9_.-]+(?:\.service)?$", service or ""):
         raise HTTPException(status_code=403, detail="Unauthorised service name")
 
 @app.post("/instances/start")
@@ -1174,6 +1177,43 @@ async def restart_instance(service: str = Body(..., embed=True)):
     validate_service_name(service)
     subprocess.run(["sudo", "systemctl", "restart", service])
     return {"status": "restarted"}
+
+@app.get("/logs/{instance}")
+async def get_instance_logs(instance: str, lines: int = 200):
+    validate_service_name(instance)
+    safe_lines = max(20, min(int(lines or 200), 1000))
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", instance, "-n", str(safe_lines), "--no-pager", "--output", "short-iso"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return {
+            "service": instance,
+            "lines": safe_lines,
+            "returncode": result.returncode,
+            "output": result.stdout,
+            "error": result.stderr,
+        }
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="Timed out reading service logs")
+
+@app.post("/emergency-stop")
+async def emergency_stop(req: EmergencyStopRequest):
+    if not req.moonraker_port:
+        raise HTTPException(status_code=400, detail="moonraker_port is required")
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(f"http://127.0.0.1:{req.moonraker_port}/printer/emergency_stop", json={}, timeout=5)
+        if res.status_code >= 400:
+            raise HTTPException(status_code=502, detail=f"Moonraker returned HTTP {res.status_code}: {res.text}")
+        logger.warning("Emergency stop sent through Moonraker port %s", req.moonraker_port)
+        return {"status": "success", "moonraker_port": req.moonraker_port}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Emergency stop failed: {e}")
 
 @app.post("/instances/config-helper/apply")
 async def apply_klipper_config_helper(data: KlipperConfigHelperRequest):

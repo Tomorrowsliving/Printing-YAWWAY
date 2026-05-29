@@ -1,12 +1,13 @@
 import React from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Server, FileText, Database, Settings, History, FileCode } from 'lucide-react';
+import { LayoutDashboard, Server, FileText, Database, Settings, History, FileCode, Scissors } from 'lucide-react';
 
 const Sidebar = () => {
   const navItems = [
     { name: 'Fleet', icon: LayoutDashboard, path: '/' },
     { name: 'Nodes', icon: Server, path: '/nodes' },
     { name: 'G-code Hub', icon: FileCode, path: '/gcode' },
+    { name: 'Slicer', icon: Scissors, path: '/slicer' },
     { name: 'Files', icon: FileText, path: '/files' },
     { name: 'Backups', icon: Database, path: '/backups' },
     { name: 'Events', icon: History, path: '/events' },
@@ -41,7 +42,7 @@ const Sidebar = () => {
 
 const Layout = ({ children }) => {
   const location = useLocation();
-  const widePage = location.pathname.startsWith('/printers/') || location.pathname === '/gcode';
+  const widePage = location.pathname.startsWith('/printers/') || location.pathname === '/gcode' || location.pathname === '/slicer';
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex">

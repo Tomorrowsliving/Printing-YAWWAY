@@ -20,6 +20,7 @@ import {
   RotateCcw,
   ArrowUp,
   ArrowDown,
+  Copy,
 } from 'lucide-react';
 import { printerService } from '../services/api';
 import ConfigHelperCard from '../components/ConfigHelperCard';
@@ -194,6 +195,7 @@ const PrinterDetail = ({ addToast }) => {
   const [mainsailFrameNonce, setMainsailFrameNonce] = useState(0);
   const previousMainsailUrl = useRef('');
   const previousMainsailReady = useRef(false);
+  const profileInitialisedFor = useRef('');
   const [layoutOpen, setLayoutOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(() => {
     const params = new URLSearchParams(window.location.search);
@@ -206,11 +208,35 @@ const PrinterDetail = ({ addToast }) => {
       return defaultLayout();
     }
   });
+  const [profileForm, setProfileForm] = useState({});
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [serviceTemplates, setServiceTemplates] = useState(null);
+  const [logs, setLogs] = useState('');
+  const [logService, setLogService] = useState('');
+  const [logsLoading, setLogsLoading] = useState(false);
 
   const fetchPrinter = useCallback(async () => {
     try {
       const res = await printerService.getPrinterDetail(id);
       setPrinter(res.data);
+      if (profileInitialisedFor.current !== String(res.data?.id)) {
+        setProfileForm({
+          model: res.data?.notes?.model || '',
+          bed_size: res.data?.notes?.bed_size || '',
+          nozzle_size: res.data?.notes?.nozzle_size || '',
+          hotend: res.data?.notes?.hotend || '',
+          extruder: res.data?.notes?.extruder || '',
+          probe_type: res.data?.notes?.probe_type || '',
+          board_type: res.data?.notes?.board_type || '',
+          mcu_serial: res.data?.notes?.mcu_serial || res.data?.mcu_serial || '',
+          slicer_profile_notes: res.data?.notes?.slicer_profile_notes || '',
+          known_issues: res.data?.notes?.known_issues || '',
+          maintenance_notes: res.data?.notes?.maintenance_notes || '',
+          last_serviced_date: res.data?.notes?.last_serviced_date ? String(res.data.notes.last_serviced_date).slice(0, 10) : '',
+        });
+        setLogService(res.data?.klipper_service_name || `klipper-${res.data?.slug}`);
+        profileInitialisedFor.current = String(res.data?.id);
+      }
     } catch (err) {
       if (err.response?.status === 404) {
         try {
@@ -273,9 +299,20 @@ const PrinterDetail = ({ addToast }) => {
     const targetMap = {
       'Restart Klipper': 'klipper',
       'Restart Moonraker': 'moonraker',
-      'Firmware Restart': 'all',
+      'Firmware Restart': 'firmware',
       'Power Cycle': 'all'
     };
+
+    if (name === 'Emergency Stop') {
+      if (!window.confirm('Send emergency stop to this printer?')) return;
+      try {
+        await axios.post(`/api/printers/${id}/emergency-stop`);
+        addToast('Emergency stop sent', 'success');
+      } catch (err) {
+        addToast(err.response?.data?.detail || 'Emergency stop failed', 'error');
+      }
+      return;
+    }
 
     const target = targetMap[name];
     if (!target) {
@@ -290,6 +327,52 @@ const PrinterDetail = ({ addToast }) => {
       addToast(`${name} initiated`, "success");
     } catch (err) {
       addToast(err.response?.data?.detail || "Action failed", "error");
+    }
+  };
+
+  const savePrinterProfile = async () => {
+    setProfileSaving(true);
+    try {
+      const payload = {
+        ...profileForm,
+        last_serviced_date: profileForm.last_serviced_date ? new Date(profileForm.last_serviced_date).toISOString() : null,
+      };
+      await axios.put(`/api/printers/${id}/notes`, payload);
+      addToast('Printer profile saved', 'success');
+      profileInitialisedFor.current = '';
+      await fetchPrinter();
+    } catch (err) {
+      addToast(err.response?.data?.detail || 'Failed to save printer profile', 'error');
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  const loadServiceTemplates = async () => {
+    try {
+      const res = await axios.get(`/api/printers/${id}/service-templates`);
+      setServiceTemplates(res.data);
+      addToast('Service templates generated', 'success');
+    } catch (err) {
+      addToast(err.response?.data?.detail || 'Failed to generate service templates', 'error');
+    }
+  };
+
+  const copyText = async (text, label = 'Text') => {
+    await navigator.clipboard.writeText(text);
+    addToast(`${label} copied`, 'success');
+  };
+
+  const loadLogs = async () => {
+    if (!printer?.assigned_node_id || !logService) return;
+    setLogsLoading(true);
+    try {
+      const res = await axios.get(`/api/nodes/${printer.assigned_node_id}/logs/${encodeURIComponent(logService)}`);
+      setLogs(res.data?.output || res.data?.error || '');
+    } catch (err) {
+      addToast(err.response?.data?.detail || 'Failed to load logs', 'error');
+    } finally {
+      setLogsLoading(false);
     }
   };
 
@@ -786,6 +869,101 @@ const PrinterDetail = ({ addToast }) => {
               <p className="mb-1 text-[9px] font-bold uppercase tracking-widest text-slate-500">Configuration</p>
               <p className="truncate font-mono text-[11px] text-blue-300">{printer.config_path || '--'}</p>
               <Link to="/files" className="mt-1 block text-[11px] font-bold text-slate-300 hover:text-blue-300">Manage Files</Link>
+            </div>
+          </div>
+          <div className="mt-5 grid grid-cols-1 gap-5 xl:grid-cols-2">
+            <div className="rounded-lg border border-slate-700 bg-slate-900 p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <h4 className="text-sm font-bold">Printer Profile</h4>
+                <button onClick={savePrinterProfile} disabled={profileSaving} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold hover:bg-blue-700 disabled:opacity-50">
+                  {profileSaving ? <RefreshCw size={14} className="animate-spin" /> : <FileText size={14} />}
+                  Save
+                </button>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                {[
+                  ['model', 'Model'],
+                  ['bed_size', 'Bed Size'],
+                  ['nozzle_size', 'Nozzle'],
+                  ['hotend', 'Hotend'],
+                  ['extruder', 'Extruder'],
+                  ['probe_type', 'Probe'],
+                  ['board_type', 'Board'],
+                  ['mcu_serial', 'MCU Serial'],
+                ].map(([field, label]) => (
+                  <label key={field} className="space-y-1">
+                    <span className="text-[9px] font-bold uppercase tracking-widest text-slate-500">{label}</span>
+                    <input
+                      value={profileForm[field] || ''}
+                      onChange={(event) => setProfileForm((current) => ({ ...current, [field]: event.target.value }))}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                    />
+                  </label>
+                ))}
+                <label className="space-y-1">
+                  <span className="text-[9px] font-bold uppercase tracking-widest text-slate-500">Last Serviced</span>
+                  <input
+                    type="date"
+                    value={profileForm.last_serviced_date || ''}
+                    onChange={(event) => setProfileForm((current) => ({ ...current, last_serviced_date: event.target.value }))}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                  />
+                </label>
+              </div>
+              {[
+                ['slicer_profile_notes', 'Slicer Notes'],
+                ['known_issues', 'Known Issues'],
+                ['maintenance_notes', 'Maintenance Notes'],
+              ].map(([field, label]) => (
+                <label key={field} className="block space-y-1">
+                  <span className="text-[9px] font-bold uppercase tracking-widest text-slate-500">{label}</span>
+                  <textarea
+                    value={profileForm[field] || ''}
+                    onChange={(event) => setProfileForm((current) => ({ ...current, [field]: event.target.value }))}
+                    rows={3}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                  />
+                </label>
+              ))}
+            </div>
+
+            <div className="rounded-lg border border-slate-700 bg-slate-900 p-4 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h4 className="text-sm font-bold">Services & Logs</h4>
+                <button onClick={loadServiceTemplates} className="inline-flex items-center gap-2 rounded-lg bg-slate-800 px-3 py-2 text-xs font-bold text-slate-200 hover:bg-slate-700">
+                  <FileText size={14} />
+                  Templates
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <select value={logService} onChange={(event) => setLogService(event.target.value)} className="min-w-56 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm">
+                  <option value={printer.klipper_service_name || `klipper-${printer.slug}`}>Klipper</option>
+                  <option value={printer.moonraker_service_name || `moonraker-${printer.slug}`}>Moonraker</option>
+                </select>
+                <button onClick={loadLogs} disabled={logsLoading || !printer.assigned_node_id} className="inline-flex items-center gap-2 rounded-lg bg-green-600 px-3 py-2 text-xs font-bold hover:bg-green-700 disabled:opacity-50">
+                  {logsLoading ? <RefreshCw size={14} className="animate-spin" /> : <FileText size={14} />}
+                  Logs
+                </button>
+              </div>
+              {logs && (
+                <pre className="max-h-64 overflow-auto rounded-lg border border-slate-700 bg-black/40 p-3 text-[11px] text-slate-300 whitespace-pre-wrap">{logs}</pre>
+              )}
+              {serviceTemplates && (
+                <div className="space-y-3">
+                  {serviceTemplates.files.map((file) => (
+                    <div key={file.filename} className="rounded-lg border border-slate-700 bg-slate-950">
+                      <div className="flex items-center justify-between gap-2 border-b border-slate-700 px-3 py-2">
+                        <span className="font-mono text-xs font-bold text-slate-300">{file.filename}</span>
+                        <button onClick={() => copyText(file.content, file.filename)} className="inline-flex items-center gap-1 rounded-md bg-slate-800 px-2 py-1 text-[10px] font-bold text-blue-300 hover:bg-slate-700">
+                          <Copy size={12} />
+                          Copy
+                        </button>
+                      </div>
+                      <pre className="max-h-48 overflow-auto p-3 text-[11px] text-slate-400 whitespace-pre-wrap">{file.content}</pre>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>

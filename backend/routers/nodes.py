@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, delete, update
+from sqlalchemy.orm import selectinload
 from typing import List, Optional
 from ..database import AsyncSessionLocal, get_db
-from ..models import Node, Event, Printer
+from ..models import Node, Event, Printer, ServiceInstance, UsbDevice
 from ..schemas import NodeCreate, NodeHeartbeat, Node as NodeSchema
 from ..utils.network_settings import get_effective_dashboard_host, host_from_url
 import datetime
@@ -23,6 +24,52 @@ AUTO_MOUNT_IN_FLIGHT = set()
 AUTO_MOUNT_LAST_ATTEMPT = {}
 AUTO_MOUNT_THROTTLE_SECONDS = 300
 NODE_OPERATION_STATES = {}
+
+def _normalise_service_name(name: str):
+    name = clean_string(name)
+    if not name:
+        return None
+    return name if name.endswith(".service") else f"{name}.service"
+
+def _service_type(name: str):
+    if name.startswith("klipper-"):
+        return "klipper"
+    if name.startswith("moonraker-"):
+        return "moonraker"
+    return "other"
+
+def _safe_service_name(service: str):
+    service = _normalise_service_name(service)
+    if not service or not (service.startswith("klipper-") or service.startswith("moonraker-")):
+        raise HTTPException(status_code=403, detail="Unauthorised service name")
+    return service
+
+async def persist_node_inventory(db: AsyncSession, node_id: int, usb_devices=None, service_instances=None):
+    now = utcnow()
+
+    if usb_devices is not None:
+        await db.execute(delete(UsbDevice).where(UsbDevice.node_id == node_id))
+        for item in usb_devices if isinstance(usb_devices, list) else []:
+            device_id = clean_string(item.get("id") or item.get("device_id") or item.get("name"))
+            path = clean_string(item.get("path"))
+            if not device_id and not path:
+                continue
+            db.add(UsbDevice(node_id=node_id, device_id=device_id, path=path, last_seen=now))
+
+    if service_instances is not None:
+        await db.execute(delete(ServiceInstance).where(ServiceInstance.node_id == node_id))
+        for item in service_instances if isinstance(service_instances, list) else []:
+            name = _normalise_service_name(item.get("name") or item.get("service"))
+            if not name:
+                continue
+            db.add(ServiceInstance(
+                node_id=node_id,
+                name=name,
+                status=clean_string(item.get("status")),
+                active=clean_string(item.get("active")),
+                service_type=_service_type(name),
+                last_seen=now,
+            ))
 
 def is_local_ip(ip: str) -> bool:
     try:
@@ -268,6 +315,20 @@ def ensure_moonraker_config_payload(data: dict, node: Node, request: Request):
 def serialize_node(node):
     """Utility to serialize SQLAlchemy Node model to dict to avoid MissingGreenlet errors"""
     active_operation = get_node_operation(node.id)
+    usb_devices = [
+        {"id": device.device_id, "path": device.path, "last_seen": device.last_seen}
+        for device in (node.__dict__.get("usb_devices") or [])
+    ]
+    service_instances = [
+        {
+            "name": instance.name,
+            "status": instance.status,
+            "active": instance.active,
+            "service_type": instance.service_type,
+            "last_seen": instance.last_seen,
+        }
+        for instance in (node.__dict__.get("service_instances") or [])
+    ]
     return {
         "id": node.id,
         "node_uuid": node.node_uuid,
@@ -294,6 +355,8 @@ def serialize_node(node):
         "active_operation_message": active_operation.get("message") if active_operation else None,
         "active_operation_started_at": active_operation.get("started_at") if active_operation else None,
         "active_operation_expires_at": active_operation.get("expires_at") if active_operation else None,
+        "usb_devices": usb_devices,
+        "service_instances": service_instances,
         "status": node.status,
         "created_at": node.created_at,
         "updated_at": node.updated_at,
@@ -361,13 +424,24 @@ async def update_node(node_id: int, node_in: NodeCreate, request: Request, db: A
 
 @router.get("/", response_model=List[NodeSchema])
 async def list_nodes(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Node).order_by(Node.hostname))
+    result = await db.execute(
+        select(Node)
+        .options(selectinload(Node.usb_devices), selectinload(Node.service_instances))
+        .order_by(Node.hostname)
+    )
     nodes = result.scalars().all()
     return [serialize_node(n) for n in nodes]
 
 @router.get("/{node_id}", response_model=NodeSchema)
 async def get_node(node_id: int, db: AsyncSession = Depends(get_db)):
-    node = await get_node_or_404(node_id, db)
+    result = await db.execute(
+        select(Node)
+        .options(selectinload(Node.usb_devices), selectinload(Node.service_instances))
+        .where(Node.id == node_id)
+    )
+    node = result.scalar_one_or_none()
+    if not node:
+        raise HTTPException(status_code=404, detail="Node not found")
     return serialize_node(node)
 
 @router.delete("/{node_id}")
@@ -456,6 +530,8 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
         await db.flush() # Ensure node.id is populated
         db.add(Event(node_id=node.id, severity="info", event_type="node_discovered", message=f"New node discovered: {node.hostname}"))
 
+    await db.flush()
+    await persist_node_inventory(db, node.id, hb.usb_devices, hb.service_instances)
     await db.commit()
     await db.refresh(node)
     schedule_auto_mount_node_storage(node, request, "heartbeat")
@@ -721,11 +797,56 @@ async def get_node_usb(node_id: int, db: AsyncSession = Depends(get_db)):
         async with httpx.AsyncClient() as client:
             res = await client.get(url, timeout=5)
         if res.status_code == 200:
-            return res.json()
+            data = res.json()
+            await persist_node_inventory(db, node.id, data, None)
+            await db.commit()
+            return data
         else:
             raise HTTPException(status_code=502, detail=f"Node agent returned {res.status_code}")
     except Exception as e:
         logger.error(f"Failed to fetch USB from node {node.hostname}: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")
+
+@router.get("/{node_id}/instances")
+async def get_node_instances(node_id: int, db: AsyncSession = Depends(get_db)):
+    """Proxied endpoint to fetch Klipper/Moonraker service instances from a node-agent."""
+    node = await get_node_or_404(node_id, db)
+    url = f"http://{node.ip_address}:{node.agent_port}/instances"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=5)
+        if res.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Node agent returned {res.status_code}")
+        data = res.json()
+        if isinstance(data, dict) and data.get("error"):
+            raise HTTPException(status_code=502, detail=data["error"])
+        await persist_node_inventory(db, node.id, None, data)
+        await db.commit()
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch instances from node {node.hostname}: {e}")
+        raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")
+
+@router.get("/{node_id}/logs/{service_name}")
+async def get_node_service_logs(node_id: int, service_name: str, lines: int = 200, db: AsyncSession = Depends(get_db)):
+    """Fetch recent journal logs for a safe Klipper or Moonraker service."""
+    node = await get_node_or_404(node_id, db)
+    service = _safe_service_name(service_name)
+    url = f"http://{node.ip_address}:{node.agent_port}/logs/{service}"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, params={"lines": max(20, min(lines, 1000))}, timeout=10)
+        if res.status_code == 404:
+            raise HTTPException(status_code=404, detail="Node-agent does not support logs yet. Update node-agent.")
+        if res.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Node agent returned {res.status_code}")
+        return res.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch logs from node {node.hostname}: {e}")
         raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")
 
 @router.post("/{node_id}/storage/mount")

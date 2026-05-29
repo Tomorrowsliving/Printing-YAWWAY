@@ -9,7 +9,9 @@ const Assignments = ({ addToast }) => {
   const [nodes, setNodes] = useState([]);
   const [selectedPrinter, setSelectedPrinter] = useState(null);
   const [targetNode, setTargetNode] = useState('');
+  const [preflight, setPreflight] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [checking, setChecking] = useState(false);
   const [dataLoading, setDataLoading] = useState(true);
 
   useEffect(() => {
@@ -36,26 +38,59 @@ const Assignments = ({ addToast }) => {
     if (!selectedPrinter || !targetNode) return;
 
     const targetNodeObj = nodes.find(n => n.id === parseInt(targetNode));
-    if (targetNodeObj && !targetNodeObj.online) {
-      return addToast("Target node is offline. Cannot migrate.", "error");
+    setChecking(true);
+    let check = preflight;
+    try {
+      const res = await axios.post('/api/assignments/check', {
+        printer_id: selectedPrinter.id,
+        target_node_id: parseInt(targetNode)
+      });
+      check = res.data;
+      setPreflight(check);
+    } catch (err) {
+      addToast(err.response?.data?.detail || 'Migration preflight failed', 'error');
+      setChecking(false);
+      return;
+    } finally {
+      setChecking(false);
     }
 
-    if (!window.confirm(`Are you sure you want to migrate ${selectedPrinter.name} to ${targetNodeObj.hostname}?`)) return;
+    const warningText = check?.warnings?.length ? `\n\nWarnings:\n${check.warnings.join('\n')}` : '';
+    if (!window.confirm(`Migrate ${selectedPrinter.name} to ${targetNodeObj.hostname}?${warningText}`)) return;
 
     setLoading(true);
     try {
       await axios.post(`/api/assignments/migrate`, {
         printer_id: selectedPrinter.id,
-        target_node_id: parseInt(targetNode)
+        target_node_id: parseInt(targetNode),
+        confirmed: true
       });
       addToast(`Successfully migrated ${selectedPrinter.name}`, "success");
       fetchData();
       setSelectedPrinter(null);
       setTargetNode('');
+      setPreflight(null);
     } catch (err) {
       addToast(err.response?.data?.detail || "Migration failed", "error");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const runPreflight = async () => {
+    if (!selectedPrinter || !targetNode) return;
+    setChecking(true);
+    try {
+      const res = await axios.post('/api/assignments/check', {
+        printer_id: selectedPrinter.id,
+        target_node_id: parseInt(targetNode)
+      });
+      setPreflight(res.data);
+    } catch (err) {
+      setPreflight(null);
+      addToast(err.response?.data?.detail || 'Preflight failed', 'error');
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -79,7 +114,7 @@ const Assignments = ({ addToast }) => {
             {printers.map(printer => (
               <button
                 key={printer.id}
-                onClick={() => setSelectedPrinter(printer)}
+                onClick={() => { setSelectedPrinter(printer); setTargetNode(''); setPreflight(null); }}
                 className={`w-full flex items-center justify-between p-4 rounded-xl border transition-all text-left ${
                   selectedPrinter?.id === printer.id
                     ? 'bg-blue-600/10 border-blue-600 text-blue-400 shadow-inner shadow-blue-900/10'
@@ -119,9 +154,9 @@ const Assignments = ({ addToast }) => {
                 </div>
                 <div className="text-center flex-1">
                   <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest mb-1">Target</p>
-                  <select
-                    value={targetNode}
-                    onChange={(e) => setTargetNode(e.target.value)}
+                <select
+                  value={targetNode}
+                    onChange={(e) => { setTargetNode(e.target.value); setPreflight(null); }}
                     className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 mt-1 text-sm outline-none w-full text-blue-400 font-bold text-center focus:border-blue-500 transition-colors"
                   >
                     <option value="">Select Node...</option>
@@ -131,6 +166,34 @@ const Assignments = ({ addToast }) => {
                   </select>
                 </div>
               </div>
+
+              {targetNode && (
+                <div className="space-y-3">
+                  <button
+                    onClick={runPreflight}
+                    disabled={checking}
+                    className="w-full bg-slate-700 hover:bg-slate-600 disabled:opacity-50 py-3 rounded-xl font-bold transition-all flex items-center justify-center space-x-3"
+                  >
+                    {checking ? <Loader2 className="animate-spin" size={18} /> : <AlertCircle size={18} />}
+                    <span>Run Preflight</span>
+                  </button>
+                  {preflight && (
+                    <div className={`rounded-xl border p-4 text-sm ${preflight.can_migrate ? 'bg-green-500/5 border-green-500/20 text-green-200' : 'bg-orange-500/5 border-orange-500/20 text-orange-200'}`}>
+                      <div className="grid grid-cols-2 gap-3 text-xs">
+                        <div><span className="font-bold uppercase text-slate-500">Target</span><p>{preflight.target_online ? 'Online' : 'Not ready'}</p></div>
+                        <div><span className="font-bold uppercase text-slate-500">MCU</span><p>{preflight.target_has_expected_mcu ? 'Found' : 'Not found'}</p></div>
+                        <div><span className="font-bold uppercase text-slate-500">Old Node</span><p>{preflight.old_online ? 'Reachable' : 'Offline or none'}</p></div>
+                        <div><span className="font-bold uppercase text-slate-500">USB Devices</span><p>{preflight.usb_devices?.length || 0}</p></div>
+                      </div>
+                      {preflight.warnings?.length > 0 && (
+                        <div className="mt-3 space-y-1 text-xs">
+                          {preflight.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="bg-blue-500/5 border border-blue-500/10 p-4 rounded-xl flex items-start space-x-3">
                 <AlertCircle size={20} className="text-blue-400 mt-0.5 shrink-0" />

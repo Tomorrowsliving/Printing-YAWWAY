@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Mail, ShieldCheck, Save, Send, Loader2, HardDrive, Check, X, Copy } from 'lucide-react';
+import { Mail, ShieldCheck, Save, Send, Loader2, HardDrive, Check, X, Copy, Scissors } from 'lucide-react';
 import axios from 'axios';
 import NetworkSetupPanel from '../components/NetworkSetupPanel';
 
@@ -16,9 +16,12 @@ const Settings = ({ addToast }) => {
   const [isTesting, setIsTesting] = useState(false);
   const [nfsStatus, setNfsStatus] = useState(null);
   const [nfsLoading, setNfsLoading] = useState(true);
+  const [slicerSettings, setSlicerSettings] = useState({ orca_binary_path: '' });
+  const [slicerSaving, setSlicerSaving] = useState(false);
 
   useEffect(() => {
     fetchNfsStatus();
+    fetchSlicerSettings();
   }, []);
 
   const fetchNfsStatus = async () => {
@@ -32,10 +35,35 @@ const Settings = ({ addToast }) => {
     }
   };
 
+  const fetchSlicerSettings = async () => {
+    try {
+      const res = await axios.get('/api/slicer/settings');
+      setSlicerSettings(res.data || { orca_binary_path: '' });
+    } catch (err) {}
+  };
+
+  const saveSlicerSettings = async () => {
+    setSlicerSaving(true);
+    try {
+      await axios.post('/api/slicer/settings', slicerSettings);
+      addToast('Slicer settings saved', 'success');
+    } catch (err) {
+      addToast('Failed to save slicer settings', 'error');
+    } finally {
+      setSlicerSaving(false);
+    }
+  };
+
   const handleSaveSettings = async () => {
     setIsSaving(true);
     try {
-      await axios.post(`/api/settings/email`, smtp);
+      await axios.post(`/api/settings/email`, {
+        host: smtp.host,
+        port: Number(smtp.port) || 587,
+        user: smtp.user,
+        password: smtp.pass,
+        from_email: smtp.from
+      });
       addToast("Settings saved successfully", "success");
     } catch (err) {
       addToast("Failed to save settings", "error");
@@ -48,7 +76,10 @@ const Settings = ({ addToast }) => {
     if (!testEmail) return addToast("Enter a test email address", "info");
     setIsTesting(true);
     try {
-      await axios.post(`/api/notifications/test`, { email: testEmail, config: smtp });
+      await axios.post(`/api/notifications/test`, {
+        email: testEmail,
+        config: { host: smtp.host, port: Number(smtp.port) || 587, user: smtp.user, password: smtp.pass, from_email: smtp.from }
+      });
       addToast("Test email sent!", "success");
     } catch (err) {
       addToast("Failed to send test email", "error");
@@ -132,6 +163,33 @@ const Settings = ({ addToast }) => {
              </div>
           </div>
         )}
+      </div>
+
+      <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 space-y-5 shadow-sm">
+        <div className="flex items-center space-x-2 border-b border-slate-700 pb-3">
+          <Scissors size={20} className="text-orange-300" />
+          <h3 className="font-bold text-lg">Local Slicer</h3>
+        </div>
+        <div className="space-y-1">
+          <label className="text-[10px] font-bold text-slate-500 uppercase">OrcaSlicer Binary Path</label>
+          <input
+            type="text"
+            value={slicerSettings.orca_binary_path || ''}
+            onChange={(e) => setSlicerSettings({ ...slicerSettings, orca_binary_path: e.target.value })}
+            placeholder="/usr/local/bin/orca-slicer"
+            className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-sm font-mono outline-none focus:border-blue-500 transition-colors"
+          />
+        </div>
+        <div className="flex justify-end">
+          <button
+            onClick={saveSlicerSettings}
+            disabled={slicerSaving}
+            className="flex items-center justify-center space-x-2 bg-orange-600 hover:bg-orange-700 disabled:opacity-50 px-6 py-2 rounded-lg font-bold transition-colors text-sm shadow-lg shadow-orange-900/20"
+          >
+            {slicerSaving ? <Loader2 className="animate-spin" size={18} /> : <Save size={18} />}
+            <span>Save Slicer</span>
+          </button>
+        </div>
       </div>
 
       <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 space-y-6 shadow-sm">

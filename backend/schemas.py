@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional, List
+from typing import Any, Optional, List
 from datetime import datetime
 
 class NodeBase(BaseModel):
@@ -49,6 +49,8 @@ class Node(NodeBase):
     active_operation_message: Optional[str] = None
     active_operation_started_at: Optional[datetime] = None
     active_operation_expires_at: Optional[datetime] = None
+    usb_devices: List[dict] = Field(default_factory=list)
+    service_instances: List[dict] = Field(default_factory=list)
     last_seen: Optional[datetime]
     created_at: datetime
     updated_at: Optional[datetime]
@@ -77,6 +79,8 @@ class Printer(PrinterBase):
     status: str
     status_message: Optional[str] = None
     moonraker_warnings: List[str] = Field(default_factory=list)
+    active_gcode: Optional[str] = None
+    progress: Optional[float] = None
     last_seen: Optional[datetime]
     created_at: datetime
     updated_at: Optional[datetime]
@@ -85,6 +89,27 @@ class Printer(PrinterBase):
 
 class PrinterDetail(Printer):
     node: Optional[Node] = None
+    notes: Optional[dict] = None
+
+class PrinterNoteBase(BaseModel):
+    model: Optional[str] = None
+    bed_size: Optional[str] = None
+    nozzle_size: Optional[str] = None
+    hotend: Optional[str] = None
+    extruder: Optional[str] = None
+    probe_type: Optional[str] = None
+    board_type: Optional[str] = None
+    mcu_serial: Optional[str] = None
+    slicer_profile_notes: Optional[str] = None
+    known_issues: Optional[str] = None
+    maintenance_notes: Optional[str] = None
+    last_serviced_date: Optional[datetime] = None
+
+class PrinterNote(PrinterNoteBase):
+    id: int
+    printer_id: int
+
+    model_config = ConfigDict(from_attributes=True)
 
 class EventBase(BaseModel):
     printer_id: Optional[int] = None
@@ -114,5 +139,58 @@ class BackupBase(BaseModel):
 class Backup(BackupBase):
     id: int
     created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class SlicerSettings(BaseModel):
+    orca_binary_path: Optional[str] = None
+
+class SlicerProfileBase(BaseModel):
+    name: str
+    profile_type: str
+    engine: str = "orca"
+    printer_id: Optional[int] = None
+    data: dict[str, Any] = Field(default_factory=dict)
+
+class SlicerProfile(SlicerProfileBase):
+    id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+class SlicerModel(BaseModel):
+    id: int
+    filename: str
+    file_path: str
+    size: Optional[int] = None
+    source_format: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class SlicerJobCreate(BaseModel):
+    model_id: int
+    printer_id: int
+    printer_profile_id: Optional[int] = None
+    filament_profile_id: Optional[int] = None
+    process_profile_id: Optional[int] = None
+
+class SlicerJob(BaseModel):
+    id: int
+    model_id: int
+    printer_id: int
+    printer_profile_id: Optional[int] = None
+    filament_profile_id: Optional[int] = None
+    process_profile_id: Optional[int] = None
+    engine: str
+    status: str
+    message: Optional[str] = None
+    output_path: Optional[str] = None
+    estimated_time: Optional[str] = None
+    filament_used_mm: Optional[float] = None
+    command: Optional[list[str] | dict[str, Any]] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)

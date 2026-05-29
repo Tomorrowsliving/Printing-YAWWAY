@@ -176,6 +176,7 @@ async def probe_printer_runtime(printer, client: Optional[httpx.AsyncClient] = N
 
     url = f"http://{printer.node.ip_address}:{printer.moonraker_port}/server/info"
     printer_info_url = f"http://{printer.node.ip_address}:{printer.moonraker_port}/printer/info"
+    objects_url = f"http://{printer.node.ip_address}:{printer.moonraker_port}/printer/objects/query?print_stats&virtual_sdcard"
     if client is None:
         async with httpx.AsyncClient() as scoped_client:
             return await probe_printer_runtime(printer, scoped_client)
@@ -206,10 +207,28 @@ async def probe_printer_runtime(printer, client: Optional[httpx.AsyncClient] = N
             "status": "offline",
             "status_message": status_message.strip(),
             "moonraker_warnings": warnings,
+            "active_gcode": None,
+            "progress": None,
         }
 
+        try:
+            objects_res = await client.get(objects_url, timeout=1.5)
+            if objects_res.status_code == 200:
+                objects_payload = objects_res.json().get("result", objects_res.json())
+                objects_status = objects_payload.get("status", {})
+                print_stats = objects_status.get("print_stats", {})
+                virtual_sdcard = objects_status.get("virtual_sdcard", {})
+                runtime["active_gcode"] = print_stats.get("filename")
+                progress = virtual_sdcard.get("progress")
+                if progress is not None:
+                    runtime["progress"] = round(float(progress) * 100, 1)
+                if str(print_stats.get("state", "")).lower() == "printing":
+                    runtime["status"] = "printing"
+        except Exception:
+            pass
+
         if klippy_state == "ready":
-            runtime["status"] = "idle"
+            runtime["status"] = runtime["status"] if runtime["status"] == "printing" else "idle"
             return runtime
         if klippy_state in ("error", "shutdown"):
             runtime["status"] = "error"
@@ -252,6 +271,8 @@ def serialize_printer(printer, include_node=False, runtime_override=None, status
         "status": runtime.get("status") or (status_override if status_override is not None else printer.status),
         "status_message": runtime.get("status_message") or "",
         "moonraker_warnings": runtime.get("moonraker_warnings") or [],
+        "active_gcode": runtime.get("active_gcode"),
+        "progress": runtime.get("progress"),
         "last_seen": printer.last_seen,
         "assigned_node_id": printer.assigned_node_id,
         "created_at": printer.created_at,
@@ -259,7 +280,103 @@ def serialize_printer(printer, include_node=False, runtime_override=None, status
     }
     if include_node and printer.node:
         data["node"] = serialize_node(printer.node)
+    if printer.__dict__.get("notes"):
+        data["notes"] = serialize_printer_note(printer.notes)
     return data
+
+def serialize_printer_note(note: PrinterNote | None):
+    if not note:
+        return None
+    return {
+        "id": note.id,
+        "printer_id": note.printer_id,
+        "model": note.model,
+        "bed_size": note.bed_size,
+        "nozzle_size": note.nozzle_size,
+        "hotend": note.hotend,
+        "extruder": note.extruder,
+        "probe_type": note.probe_type,
+        "board_type": note.board_type,
+        "mcu_serial": note.mcu_serial,
+        "slicer_profile_notes": note.slicer_profile_notes,
+        "known_issues": note.known_issues,
+        "maintenance_notes": note.maintenance_notes,
+        "last_serviced_date": note.last_serviced_date,
+    }
+
+class PrinterNoteRequest(BaseModel):
+    model: Optional[str] = None
+    bed_size: Optional[str] = None
+    nozzle_size: Optional[str] = None
+    hotend: Optional[str] = None
+    extruder: Optional[str] = None
+    probe_type: Optional[str] = None
+    board_type: Optional[str] = None
+    mcu_serial: Optional[str] = None
+    slicer_profile_notes: Optional[str] = None
+    known_issues: Optional[str] = None
+    maintenance_notes: Optional[str] = None
+    last_serviced_date: Optional[datetime.datetime] = None
+
+def render_service_templates(printer: Printer):
+    slug = printer.slug
+    config_path = printer.config_path or posixpath.join("/mnt/klipper-farm/printers", slug, "config")
+    gcode_path = printer.gcode_path or posixpath.join("/mnt/klipper-farm/printers", slug, "gcodes")
+    logs_path = posixpath.join(posixpath.dirname(gcode_path.rstrip("/")), "logs")
+    moonraker_port = printer.moonraker_port or 7125
+    printer_cfg = posixpath.join(config_path, "printer.cfg")
+    moonraker_conf = posixpath.join(config_path, "moonraker.conf")
+    socket_path = f"/tmp/klippy_{slug}"
+    klipper_service = printer.klipper_service_name or f"klipper-{slug}.service"
+    moonraker_service = printer.moonraker_service_name or f"moonraker-{slug}.service"
+
+    if not klipper_service.endswith(".service"):
+        klipper_service = f"{klipper_service}.service"
+    if not moonraker_service.endswith(".service"):
+        moonraker_service = f"{moonraker_service}.service"
+
+    klipper_unit = f"""[Unit]
+Description=Klipper for {slug}
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/klippy-env/bin/python /opt/klipper/klippy/klippy.py {printer_cfg} -l {posixpath.join(logs_path, "klippy.log")} -a {socket_path}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+"""
+    moonraker_unit = f"""[Unit]
+Description=Moonraker for {slug}
+After=network.target {klipper_service}
+Requires={klipper_service}
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/moonraker-env/bin/python /opt/moonraker/moonraker/moonraker.py -c {moonraker_conf} -d {posixpath.dirname(config_path.rstrip("/"))}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+"""
+    return {
+        "klipper_service": klipper_service,
+        "moonraker_service": moonraker_service,
+        "moonraker_port": moonraker_port,
+        "config_path": config_path,
+        "gcode_path": gcode_path,
+        "logs_path": logs_path,
+        "socket_path": socket_path,
+        "files": [
+            {"filename": klipper_service, "content": klipper_unit},
+            {"filename": moonraker_service, "content": moonraker_unit},
+        ],
+    }
 
 async def get_printer_and_assigned_node(printer_id: int, db: AsyncSession):
     result = await db.execute(
@@ -738,7 +855,7 @@ async def get_printer_detail(printer_id: int, db: AsyncSession = Depends(get_db)
     """Extended endpoint that explicitly loads the assigned node"""
     result = await db.execute(
         select(Printer)
-        .options(selectinload(Printer.node))
+        .options(selectinload(Printer.node), selectinload(Printer.notes))
         .where(Printer.id == printer_id)
     )
     printer = result.scalar_one_or_none()
@@ -749,6 +866,50 @@ async def get_printer_detail(printer_id: int, db: AsyncSession = Depends(get_db)
     data = serialize_printer(printer, include_node=True, runtime_override=runtime)
 
     return data
+
+@router.get("/{printer_id}/notes")
+async def get_printer_notes(printer_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Printer).options(selectinload(Printer.notes)).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(status_code=404, detail="Printer not found")
+    if not printer.notes:
+        note = PrinterNote(printer_id=printer.id, mcu_serial=printer.expected_mcu_serial)
+        db.add(note)
+        await db.flush()
+        return serialize_printer_note(note)
+    return serialize_printer_note(printer.notes)
+
+@router.put("/{printer_id}/notes")
+async def update_printer_notes(printer_id: int, req: PrinterNoteRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Printer).options(selectinload(Printer.notes)).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(status_code=404, detail="Printer not found")
+
+    note = printer.notes or PrinterNote(printer_id=printer.id)
+    for field, value in req.model_dump(exclude_unset=True).items():
+        setattr(note, field, value)
+    db.add(note)
+
+    if req.mcu_serial is not None:
+        printer.mcu_serial = req.mcu_serial
+    db.add(Event(
+        printer_id=printer.id,
+        severity="info",
+        event_type="printer_profile",
+        message=f"Printer profile updated for {printer.name}",
+    ))
+    await db.flush()
+    return serialize_printer_note(note)
+
+@router.get("/{printer_id}/service-templates")
+async def get_printer_service_templates(printer_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(status_code=404, detail="Printer not found")
+    return render_service_templates(printer)
 
 @router.get("/{printer_id}/runtime")
 async def get_printer_runtime_snapshot(printer_id: int, db: AsyncSession = Depends(get_db)):
@@ -1225,6 +1386,20 @@ async def restart_printer_services(printer_id: int, target: str = Body(..., embe
     """Remote restart for specific printer services (klipper, moonraker, or both)"""
     printer, node = await get_printer_and_assigned_node(printer_id, db)
 
+    if target == "firmware":
+        if not printer.moonraker_port:
+            raise HTTPException(status_code=400, detail="Printer Moonraker port is missing")
+        result = await _send_gcode_script(node, printer.moonraker_port, "FIRMWARE_RESTART", timeout=10.0)
+        db.add(Event(
+            printer_id=printer.id,
+            node_id=node.id,
+            severity="warning",
+            event_type="firmware_restart",
+            message=f"Firmware restart requested for printer {printer.name}",
+        ))
+        await db.commit()
+        return {"status": "success", "result": result}
+
     services = []
     if target == "klipper" or target == "all":
         services.append(f"klipper-{printer.slug}")
@@ -1252,6 +1427,23 @@ async def restart_printer_services(printer_id: int, target: str = Body(..., embe
     await db.commit()
 
     return {"status": "success", "results": results}
+
+@router.post("/{printer_id}/emergency-stop")
+async def emergency_stop_printer(printer_id: int, db: AsyncSession = Depends(get_db)):
+    printer, node = await get_printer_and_assigned_node(printer_id, db)
+    if not printer.moonraker_port:
+        raise HTTPException(status_code=400, detail="Printer Moonraker port is missing")
+
+    result = await post_moonraker_json(node, printer.moonraker_port, "/printer/emergency_stop", {}, timeout=5.0)
+    db.add(Event(
+        printer_id=printer.id,
+        node_id=node.id,
+        severity="critical",
+        event_type="emergency_stop",
+        message=f"Emergency stop sent to printer {printer.name}",
+    ))
+    await db.commit()
+    return {"status": "success", "result": result}
 
 @router.post("/{printer_id}/repair-moonraker")
 async def repair_printer_moonraker(printer_id: int, request: Request, db: AsyncSession = Depends(get_db)):

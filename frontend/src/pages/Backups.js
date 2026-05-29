@@ -169,6 +169,38 @@ const Backups = ({ addToast }) => {
             className="w-36 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500"
           />
         </div>
+        <div className="space-y-1">
+          <label className="text-[10px] font-bold text-slate-500 uppercase">Daily Backup</label>
+          <label className="h-10 flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-3 text-sm">
+            <input
+              type="checkbox"
+              checked={Boolean(settings.automatic_enabled)}
+              onChange={(e) => setSettings({ ...settings, automatic_enabled: e.target.checked })}
+              className="accent-blue-500"
+            />
+            <span>{settings.automatic_enabled ? 'Enabled' : 'Disabled'}</span>
+          </label>
+        </div>
+        <div className="space-y-1">
+          <label className="text-[10px] font-bold text-slate-500 uppercase">Run Time</label>
+          <input
+            type="time"
+            value={settings.scheduled_time || '02:00'}
+            onChange={(e) => setSettings({ ...settings, scheduled_time: e.target.value })}
+            className="w-36 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500"
+          />
+        </div>
+        <div className="space-y-1">
+          <label className="text-[10px] font-bold text-slate-500 uppercase">Farm Retention</label>
+          <input
+            type="number"
+            min="1"
+            max="365"
+            value={settings.farm_backup_retention || 14}
+            onChange={(e) => setSettings({ ...settings, farm_backup_retention: parseInt(e.target.value, 10) || 14 })}
+            className="w-36 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500"
+          />
+        </div>
         <button
           onClick={handleSaveSettings}
           disabled={settingsLoading}
