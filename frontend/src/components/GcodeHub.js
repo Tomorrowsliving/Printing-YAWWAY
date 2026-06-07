@@ -53,18 +53,15 @@ const parseWords = (line) => {
 };
 
 const parsePreview = (content) => {
-  let absoluteXY = true;
-  let absoluteE = true;
-  let units = 1;
-  let x = null;
-  let y = null;
-  let z = 0;
-  let e = 0;
-  const segments = [];
+  const lines = content.split(/\r?\n/);
+  const maxExtrudeSegments = 180000;
+  const maxTravelSegments = 25000;
+  const emptyBounds = () => ({ minX: null, maxX: null, minY: null, maxY: null, minZ: null, maxZ: null });
+  const motionBounds = emptyBounds();
+  const extrusionBounds = emptyBounds();
   const layers = new Set();
-  const bounds = { minX: null, maxX: null, minY: null, maxY: null, minZ: null, maxZ: null };
 
-  const updateBounds = (nextX, nextY, nextZ) => {
+  const updateBounds = (bounds, nextX, nextY, nextZ) => {
     if (nextX === null || nextY === null || nextZ === null) return;
     bounds.minX = bounds.minX === null ? nextX : Math.min(bounds.minX, nextX);
     bounds.maxX = bounds.maxX === null ? nextX : Math.max(bounds.maxX, nextX);
@@ -72,88 +69,138 @@ const parsePreview = (content) => {
     bounds.maxY = bounds.maxY === null ? nextY : Math.max(bounds.maxY, nextY);
     bounds.minZ = bounds.minZ === null ? nextZ : Math.min(bounds.minZ, nextZ);
     bounds.maxZ = bounds.maxZ === null ? nextZ : Math.max(bounds.maxZ, nextZ);
-    layers.add(nextZ.toFixed(3));
   };
 
-  content.split(/\r?\n/).forEach((rawLine) => {
-    const line = stripComment(rawLine).toUpperCase();
-    if (!line) return;
-    const words = parseWords(line);
-    const gcode = words.G;
+  const parseMoves = (onMove) => {
+    let absoluteXY = true;
+    let absoluteE = true;
+    let units = 1;
+    let x = null;
+    let y = null;
+    let z = 0;
+    let e = 0;
 
-    if (gcode === 20) {
-      units = 25.4;
-      return;
-    }
-    if (gcode === 21) {
-      units = 1;
-      return;
-    }
-    if (gcode === 90) {
-      absoluteXY = true;
-      return;
-    }
-    if (gcode === 91) {
-      absoluteXY = false;
-      return;
-    }
-    if (words.M === 82) {
-      absoluteE = true;
-      return;
-    }
-    if (words.M === 83) {
-      absoluteE = false;
-      return;
-    }
+    lines.forEach((rawLine) => {
+      const line = stripComment(rawLine).toUpperCase();
+      if (!line) return;
+      const words = parseWords(line);
+      const gcode = words.G;
 
-    if (gcode === 92) {
-      if (Number.isFinite(words.X)) x = words.X * units;
-      if (Number.isFinite(words.Y)) y = words.Y * units;
-      if (Number.isFinite(words.Z)) z = words.Z * units;
-      if (Number.isFinite(words.E)) e = words.E;
-      return;
-    }
+      if (gcode === 20) {
+        units = 25.4;
+        return;
+      }
+      if (gcode === 21) {
+        units = 1;
+        return;
+      }
+      if (gcode === 90) {
+        absoluteXY = true;
+        return;
+      }
+      if (gcode === 91) {
+        absoluteXY = false;
+        return;
+      }
+      if (words.M === 82) {
+        absoluteE = true;
+        return;
+      }
+      if (words.M === 83) {
+        absoluteE = false;
+        return;
+      }
 
-    if (gcode !== 0 && gcode !== 1) return;
+      if (gcode === 92) {
+        if (Number.isFinite(words.X)) x = words.X * units;
+        if (Number.isFinite(words.Y)) y = words.Y * units;
+        if (Number.isFinite(words.Z)) z = words.Z * units;
+        if (Number.isFinite(words.E)) e = words.E;
+        return;
+      }
 
-    const startX = x;
-    const startY = y;
-    const startZ = z;
-    let nextX = x;
-    let nextY = y;
-    let nextZ = z;
-    if (Number.isFinite(words.X)) {
-      const value = words.X * units;
-      nextX = absoluteXY || x === null ? value : x + value;
-    }
-    if (Number.isFinite(words.Y)) {
-      const value = words.Y * units;
-      nextY = absoluteXY || y === null ? value : y + value;
-    }
-    if (Number.isFinite(words.Z)) {
-      const value = words.Z * units;
-      nextZ = absoluteXY || z === null ? value : z + value;
-    }
+      if (gcode !== 0 && gcode !== 1) return;
 
-    let extruding = false;
-    if (Number.isFinite(words.E)) {
-      const nextE = absoluteE ? words.E : e + words.E;
-      extruding = absoluteE ? nextE > e : words.E > 0;
-      e = nextE;
-    }
+      const startX = x;
+      const startY = y;
+      const startZ = z;
+      let nextX = x;
+      let nextY = y;
+      let nextZ = z;
+      if (Number.isFinite(words.X)) {
+        const value = words.X * units;
+        nextX = absoluteXY || x === null ? value : x + value;
+      }
+      if (Number.isFinite(words.Y)) {
+        const value = words.Y * units;
+        nextY = absoluteXY || y === null ? value : y + value;
+      }
+      if (Number.isFinite(words.Z)) {
+        const value = words.Z * units;
+        nextZ = absoluteXY || z === null ? value : z + value;
+      }
 
-    const moved = startX !== nextX || startY !== nextY || startZ !== nextZ;
-    if (startX !== null && startY !== null && nextX !== null && nextY !== null && moved && segments.length < 80000) {
-      segments.push({ startX, startY, startZ, endX: nextX, endY: nextY, endZ: nextZ, extruding });
-    }
+      let extruding = false;
+      if (Number.isFinite(words.E)) {
+        const nextE = absoluteE ? words.E : e + words.E;
+        extruding = absoluteE ? nextE > e : words.E > 0;
+        e = nextE;
+      }
 
-    x = nextX;
-    y = nextY;
-    z = nextZ;
-    updateBounds(x, y, z);
+      const moved = startX !== nextX || startY !== nextY || startZ !== nextZ;
+      if (startX !== null && startY !== null && nextX !== null && nextY !== null && moved) {
+        onMove({ startX, startY, startZ, endX: nextX, endY: nextY, endZ: nextZ, extruding });
+      }
+
+      x = nextX;
+      y = nextY;
+      z = nextZ;
+    });
+  };
+
+  let extrusionCount = 0;
+  let travelCount = 0;
+  parseMoves((segment) => {
+    updateBounds(motionBounds, segment.startX, segment.startY, segment.startZ);
+    updateBounds(motionBounds, segment.endX, segment.endY, segment.endZ);
+    if (segment.extruding) {
+      extrusionCount += 1;
+      updateBounds(extrusionBounds, segment.startX, segment.startY, segment.startZ);
+      updateBounds(extrusionBounds, segment.endX, segment.endY, segment.endZ);
+      layers.add(segment.endZ.toFixed(3));
+    } else {
+      travelCount += 1;
+    }
   });
 
-  return { bounds, segments, layerCount: layers.size };
+  const extrudeStride = Math.max(1, Math.ceil(extrusionCount / maxExtrudeSegments));
+  const travelStride = Math.max(1, Math.ceil(travelCount / maxTravelSegments));
+  const segments = [];
+  let extrudeIndex = 0;
+  let travelIndex = 0;
+
+  parseMoves((segment) => {
+    if (segment.extruding) {
+      extrudeIndex += 1;
+      if ((extrudeIndex - 1) % extrudeStride === 0) {
+        segments.push(segment);
+      }
+    } else {
+      travelIndex += 1;
+      if ((travelIndex - 1) % travelStride === 0) {
+        segments.push(segment);
+      }
+    }
+  });
+
+  const bounds = extrusionBounds.minX !== null ? extrusionBounds : motionBounds;
+  return {
+    bounds,
+    segments,
+    layerCount: layers.size,
+    sampled: extrudeStride > 1 || travelStride > 1,
+    totalExtrusionSegments: extrusionCount,
+  };
 };
 
 const VIEW_PRESETS = {
@@ -252,7 +299,7 @@ const GcodeScene = ({ preview, showTravel, viewPreset, interactionMode }) => {
     }
 
     const bounds = normaliseBounds(preview.bounds);
-    const verticalScale = bounds.height < 4 ? 8 : bounds.height < 20 ? 4 : 2;
+    const verticalScale = 1;
     const scene = new THREE.Scene();
     scene.background = new THREE.Color('#020617');
 
@@ -486,17 +533,58 @@ const GcodeHub = ({ addToast }) => {
     [files, selectedPath]
   );
 
-  const filteredFiles = useMemo(() => {
+  const fileGroups = useMemo(() => {
+    const groups = new Map();
+    files.forEach((file) => {
+      const key = file.group_key || `file:${file.path}`;
+      if (!groups.has(key)) {
+        groups.set(key, {
+          key,
+          label: file.group_label || file.relative_path,
+          variants: [],
+          last_modified: file.last_modified,
+        });
+      }
+      const group = groups.get(key);
+      group.variants.push(file);
+      group.last_modified = Math.max(group.last_modified || 0, file.last_modified || 0);
+    });
+
+    return Array.from(groups.values())
+      .map((group) => {
+        const sortedVariants = [...group.variants].sort((a, b) => String(a.source_printer_name).localeCompare(String(b.source_printer_name)));
+        const selectedVariant = sortedVariants.find((file) => file.path === selectedPath);
+        const primary = selectedVariant || sortedVariants[0];
+        return {
+          ...group,
+          variants: sortedVariants,
+          primary,
+          analysis: primary?.analysis,
+          compatible_printer_ids: Array.from(new Set(sortedVariants.flatMap((file) => file.compatible_printer_ids || []))),
+        };
+      })
+      .sort((a, b) => (b.last_modified || 0) - (a.last_modified || 0));
+  }, [files, selectedPath]);
+
+  const selectedGroup = useMemo(
+    () => fileGroups.find((group) => group.variants.some((file) => file.path === selectedPath)) || null,
+    [fileGroups, selectedPath]
+  );
+
+  const filteredGroups = useMemo(() => {
     const normalizedSearch = search.trim().toLowerCase();
-    return files.filter((file) => {
-      const matchesSource = sourceFilter === 'all' || String(file.source_printer_id) === sourceFilter;
+    return fileGroups.filter((group) => {
+      const matchesSource = sourceFilter === 'all' || group.variants.some((file) => String(file.source_printer_id) === sourceFilter);
       const matchesSearch = !normalizedSearch
-        || file.name.toLowerCase().includes(normalizedSearch)
-        || file.relative_path.toLowerCase().includes(normalizedSearch)
-        || file.source_printer_name.toLowerCase().includes(normalizedSearch);
+        || group.label.toLowerCase().includes(normalizedSearch)
+        || group.variants.some((file) => (
+          file.name.toLowerCase().includes(normalizedSearch)
+          || file.relative_path.toLowerCase().includes(normalizedSearch)
+          || file.source_printer_name.toLowerCase().includes(normalizedSearch)
+        ));
       return matchesSource && matchesSearch;
     });
-  }, [files, search, sourceFilter]);
+  }, [fileGroups, search, sourceFilter]);
 
   const compatibility = useMemo(() => {
     const rows = selectedFile?.target_statuses || [];
@@ -706,23 +794,27 @@ const GcodeHub = ({ addToast }) => {
               <div className="flex h-48 items-center justify-center">
                 <Loader2 size={28} className="animate-spin text-blue-400" />
               </div>
-            ) : filteredFiles.length === 0 ? (
+            ) : filteredGroups.length === 0 ? (
               <div className="p-10 text-center text-xs italic text-slate-600">No G-code files found.</div>
             ) : (
-              filteredFiles.map((file) => (
+              filteredGroups.map((group) => (
                 <button
-                  key={file.path}
-                  onClick={() => setSelectedPath(file.path)}
-                  className={`w-full border-b border-slate-700/70 px-4 py-3 text-left transition-colors hover:bg-slate-700/40 ${selectedFile?.path === file.path ? 'bg-blue-500/10' : ''}`}
+                  key={group.key}
+                  onClick={() => setSelectedPath(group.primary.path)}
+                  className={`w-full border-b border-slate-700/70 px-4 py-3 text-left transition-colors hover:bg-slate-700/40 ${selectedGroup?.key === group.key ? 'bg-blue-500/10' : ''}`}
                 >
                   <div className="flex items-start gap-3">
                     <FileCode size={18} className="mt-0.5 shrink-0 text-cyan-300" />
                     <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-bold text-slate-100">{file.relative_path}</p>
-                      <p className="mt-1 truncate text-[10px] text-slate-500">{file.source_printer_name} - {formatBytes(file.size)} - {formatBounds(file.analysis)}</p>
-                      <p className="mt-1 text-[10px] text-slate-600">{formatDate(file.last_modified)}</p>
+                      <p className="truncate text-sm font-bold text-slate-100">{group.label}</p>
+                      <p className="mt-1 truncate text-[10px] text-slate-500">
+                        {group.variants.length === 1 ? group.primary.source_printer_name : `${group.variants.length} printer variants`}
+                        {' - '}
+                        {formatBounds(group.analysis)}
+                      </p>
+                      <p className="mt-1 text-[10px] text-slate-600">{formatDate(group.last_modified)}</p>
                     </div>
-                    <span className="rounded-md bg-green-500/10 px-1.5 py-0.5 text-[9px] font-bold text-green-300">{file.compatible_printer_ids.length}</span>
+                    <span className="rounded-md bg-green-500/10 px-1.5 py-0.5 text-[9px] font-bold text-green-300">{group.compatible_printer_ids.length}</span>
                   </div>
                 </button>
               ))
@@ -749,9 +841,28 @@ const GcodeHub = ({ addToast }) => {
         <div className="space-y-4 rounded-xl border border-slate-700 bg-slate-800 p-4">
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Selected File</p>
-            <p className="mt-2 break-all text-sm font-bold text-slate-100">{selectedFile?.relative_path || 'None'}</p>
-            {selectedFile && <p className="mt-1 text-xs text-slate-500">{selectedFile.source_printer_name}</p>}
+            <p className="mt-2 break-all text-sm font-bold text-slate-100">{selectedGroup?.label || selectedFile?.relative_path || 'None'}</p>
+            {selectedFile && <p className="mt-1 text-xs text-slate-500">{selectedFile.source_printer_name} variant</p>}
           </div>
+
+          {selectedGroup && selectedGroup.variants.length > 1 && (
+            <div className="rounded-lg border border-slate-700 bg-slate-900 p-3">
+              <p className="mb-3 text-[10px] font-bold uppercase tracking-widest text-slate-500">Printer Variants</p>
+              <div className="space-y-2">
+                {selectedGroup.variants.map((variant) => (
+                  <button
+                    key={variant.path}
+                    type="button"
+                    onClick={() => setSelectedPath(variant.path)}
+                    className={`flex w-full items-center justify-between gap-2 rounded-lg border px-2.5 py-2 text-left text-xs ${variant.path === selectedPath ? 'border-blue-500/40 bg-blue-500/10 text-blue-100' : 'border-slate-800 bg-slate-950/60 text-slate-300 hover:border-slate-600'}`}
+                  >
+                    <span className="min-w-0 flex-1 truncate font-semibold">{variant.source_printer_name}</span>
+                    <span className="shrink-0 text-[9px] font-bold uppercase text-slate-500">{formatBytes(variant.size)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="rounded-lg border border-slate-700 bg-slate-900 p-3">
             <div className="mb-3 flex items-center justify-between">

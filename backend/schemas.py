@@ -175,6 +175,15 @@ class SlicerJobCreate(BaseModel):
     printer_profile_id: Optional[int] = None
     filament_profile_id: Optional[int] = None
     process_profile_id: Optional[int] = None
+    centre_on_bed: bool = True
+
+class SlicerBatchJobCreate(BaseModel):
+    model_id: int
+    printer_ids: List[int]
+    printer_profile_id: Optional[int] = None
+    filament_profile_id: Optional[int] = None
+    process_profile_id: Optional[int] = None
+    centre_on_bed: bool = True
 
 class SlicerJob(BaseModel):
     id: int

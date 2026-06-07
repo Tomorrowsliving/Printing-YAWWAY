@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
@@ -7,13 +8,15 @@ import datetime
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from ..database import AsyncSessionLocal, get_db
 from ..models import Event, Printer, SlicerJob, SlicerModel, SlicerProfile
-from ..schemas import SlicerJob as SlicerJobSchema
+from ..schemas import SlicerBatchJobCreate, SlicerJob as SlicerJobSchema
 from ..schemas import SlicerJobCreate, SlicerProfile as SlicerProfileSchema, SlicerProfileBase, SlicerSettings
 from ..schemas import SlicerModel as SlicerModelSchema
 from ..utils.file_backups import PRINTERS_ROOT, is_path_within
@@ -50,6 +53,23 @@ def _safe_filename(filename: str):
     return name
 
 
+def _safe_stem(value: str):
+    stem = Path(value or "slice").stem
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._-")
+    return stem or "slice"
+
+
+def _unique_gcode_path(output_dir: str, model: SlicerModel, printer: Printer):
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    base = f"{_safe_stem(model.filename)}_{printer.slug}_{timestamp}"
+    candidate = os.path.join(output_dir, f"{base}.gcode")
+    counter = 2
+    while os.path.exists(candidate):
+        candidate = os.path.join(output_dir, f"{base}_{counter}.gcode")
+        counter += 1
+    return candidate
+
+
 def _settings():
     try:
         with open(SLICER_SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -72,17 +92,86 @@ def _printer_gcode_dir(printer: Printer):
     return printer.gcode_path or os.path.join(PRINTERS_ROOT, printer.slug, "gcodes")
 
 
+def _profile_config_paths(profile: Optional[SlicerProfile]):
+    if not profile or not isinstance(profile.data, dict):
+        return []
+    config_file = profile.data.get("config_file")
+    if isinstance(config_file, list):
+        raw_paths = [str(item) for item in config_file]
+    else:
+        raw_paths = re.split(r"[;\n]+", str(config_file or ""))
+    return [path.strip() for path in raw_paths if path and path.strip()]
+
+
 def _profile_extra_args(profile: Optional[SlicerProfile]):
     if not profile or not isinstance(profile.data, dict):
         return []
     args = []
-    config_file = profile.data.get("config_file")
-    if config_file:
-        args.extend(["--load-settings", str(config_file)])
     extra_args = profile.data.get("extra_args")
     if isinstance(extra_args, list):
-        args.extend([str(item) for item in extra_args])
+        for item in extra_args:
+            args.extend(shlex.split(str(item)))
     return args
+
+
+def _find_inherited_profile(path: Path, inherited_name: str):
+    names = [inherited_name]
+    if not inherited_name.endswith(".json"):
+        names.append(f"{inherited_name}.json")
+    for name in names:
+        candidate = path.parent / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _flatten_orca_profile(path: str, work_dir: str):
+    source = Path(path)
+    if source.suffix.lower() != ".json" or not source.exists():
+        return str(source)
+
+    seen = set()
+
+    def merge(current: Path):
+        resolved = current.resolve()
+        if resolved in seen:
+            raise RuntimeError(f"Profile inheritance loop detected at {current}")
+        seen.add(resolved)
+        with open(current, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Invalid Orca profile file: {current}")
+
+        inherited_name = data.get("inherits")
+        parent = _find_inherited_profile(current, inherited_name) if inherited_name else None
+        if parent:
+            merged = merge(parent)
+            merged.update(data)
+            merged.pop("inherits", None)
+            return merged
+        return data
+
+    merged_profile = merge(source)
+    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", source.stem).strip("._-") or "profile"
+    target = Path(work_dir) / f"{safe_stem}.flattened.json"
+    with open(target, "w", encoding="utf-8") as f:
+        json.dump(merged_profile, f, indent=2)
+    return str(target)
+
+
+def _profile_files(profile: Optional[SlicerProfile], work_dir: str):
+    return [_flatten_orca_profile(path, work_dir) for path in _profile_config_paths(profile)]
+
+
+def _orca_error_message(output: str):
+    message = (output or "OrcaSlicer failed").strip()[:2000]
+    if "Relative extruder addressing requires resetting the extruder position" in message:
+        return (
+            f"{message}\n\n"
+            "OrcaSlicer did not receive a complete printer profile. Select printer, material and process "
+            "profiles that point to Orca JSON profiles, or import a 3MF that already contains slicer settings."
+        )
+    return message
 
 
 def _extract_gcode_metadata(path: str):
@@ -256,6 +345,17 @@ async def delete_model(model_id: int, db: AsyncSession = Depends(get_db)):
     return {"status": "success"}
 
 
+@router.get("/models/{model_id}/download")
+async def download_model(model_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(SlicerModel).where(SlicerModel.id == model_id))
+    row = result.scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Model not found")
+    if not row.file_path or not is_path_within(row.file_path, MODELS_ROOT) or not os.path.exists(row.file_path):
+        raise HTTPException(status_code=404, detail="Model file not found")
+    return FileResponse(row.file_path, filename=row.filename, media_type="application/octet-stream")
+
+
 @router.get("/jobs", response_model=list[SlicerJobSchema])
 async def list_jobs(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(SlicerJob).order_by(desc(SlicerJob.created_at)).limit(100))
@@ -271,6 +371,69 @@ async def get_job(job_id: int, db: AsyncSession = Depends(get_db)):
     return job
 
 
+async def _queue_slicer_job(
+    db: AsyncSession,
+    model: SlicerModel,
+    printer: Printer,
+    printer_profile_id: Optional[int],
+    filament_profile_id: Optional[int],
+    process_profile_id: Optional[int],
+    centre_on_bed: bool,
+    slice_group_id: str,
+):
+    if model.source_format == "stl" and not (printer_profile_id and filament_profile_id and process_profile_id):
+        raise HTTPException(
+            status_code=400,
+            detail="STL slicing needs printer, material and process profiles. Add or select Orca profiles first.",
+        )
+
+    job = SlicerJob(
+        model_id=model.id,
+        printer_id=printer.id,
+        printer_profile_id=printer_profile_id,
+        filament_profile_id=filament_profile_id,
+        process_profile_id=process_profile_id,
+        engine="orca",
+        status="queued",
+        message="Queued for OrcaSlicer",
+        command={"centre_on_bed": centre_on_bed, "slice_group_id": slice_group_id},
+    )
+    db.add(job)
+    db.add(Event(printer_id=printer.id, severity="info", event_type="slicer_job_queued", message=f"Queued slice for {model.filename}"))
+    await db.flush()
+    asyncio.create_task(run_slicer_job(job.id))
+    return job
+
+
+async def _resolve_profile_id(db: AsyncSession, requested_id: Optional[int], profile_type: str, printer_id: int):
+    if requested_id:
+        result = await db.execute(select(SlicerProfile).where(SlicerProfile.id == requested_id))
+        profile = result.scalar_one_or_none()
+        if not profile:
+            raise HTTPException(status_code=404, detail=f"{profile_type.title()} profile not found")
+        if profile.profile_type != profile_type:
+            raise HTTPException(status_code=400, detail=f"Profile {profile.name} is not a {profile_type} profile")
+        if not profile.printer_id or profile.printer_id == printer_id:
+            return profile.id
+
+        fallback = (await db.execute(
+            select(SlicerProfile)
+            .where(SlicerProfile.profile_type == profile_type, SlicerProfile.printer_id == printer_id)
+            .order_by(SlicerProfile.name)
+        )).scalars().first()
+        return fallback.id if fallback else None
+
+    fallback = (await db.execute(
+        select(SlicerProfile)
+        .where(
+            SlicerProfile.profile_type == profile_type,
+            (SlicerProfile.printer_id == printer_id) | (SlicerProfile.printer_id.is_(None)),
+        )
+        .order_by(SlicerProfile.printer_id.is_(None), SlicerProfile.name)
+    )).scalars().first()
+    return fallback.id if fallback else None
+
+
 @router.post("/jobs", response_model=SlicerJobSchema)
 async def create_job(req: SlicerJobCreate, db: AsyncSession = Depends(get_db)):
     model = (await db.execute(select(SlicerModel).where(SlicerModel.id == req.model_id))).scalar_one_or_none()
@@ -280,21 +443,70 @@ async def create_job(req: SlicerJobCreate, db: AsyncSession = Depends(get_db)):
     if not printer:
         raise HTTPException(status_code=404, detail="Printer not found")
 
-    job = SlicerJob(
-        model_id=req.model_id,
-        printer_id=req.printer_id,
-        printer_profile_id=req.printer_profile_id,
-        filament_profile_id=req.filament_profile_id,
-        process_profile_id=req.process_profile_id,
-        engine="orca",
-        status="queued",
-        message="Queued for OrcaSlicer",
+    return await _queue_slicer_job(
+        db,
+        model,
+        printer,
+        req.printer_profile_id,
+        req.filament_profile_id,
+        req.process_profile_id,
+        req.centre_on_bed,
+        f"slicer-job-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}-{req.model_id}-{req.printer_id}",
     )
-    db.add(job)
-    db.add(Event(printer_id=printer.id, severity="info", event_type="slicer_job_queued", message=f"Queued slice for {model.filename}"))
-    await db.flush()
-    asyncio.create_task(run_slicer_job(job.id))
-    return job
+
+
+@router.post("/jobs/batch", response_model=list[SlicerJobSchema])
+async def create_batch_jobs(req: SlicerBatchJobCreate, db: AsyncSession = Depends(get_db)):
+    model = (await db.execute(select(SlicerModel).where(SlicerModel.id == req.model_id))).scalar_one_or_none()
+    if not model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    printer_ids = list(dict.fromkeys(req.printer_ids))
+    if not printer_ids:
+        raise HTTPException(status_code=400, detail="Select at least one printer")
+
+    result = await db.execute(select(Printer).where(Printer.id.in_(printer_ids)).order_by(Printer.name))
+    printers = result.scalars().all()
+    if len(printers) != len(printer_ids):
+        raise HTTPException(status_code=404, detail="One or more printers were not found")
+
+    slice_group_id = f"slicer-batch-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}-{req.model_id}"
+    planned_jobs = []
+    missing_profiles = []
+    for printer in printers:
+        printer_profile_id = await _resolve_profile_id(db, req.printer_profile_id, "printer", printer.id)
+        filament_profile_id = await _resolve_profile_id(db, req.filament_profile_id, "filament", printer.id)
+        process_profile_id = await _resolve_profile_id(db, req.process_profile_id, "process", printer.id)
+        if model.source_format == "stl":
+            missing = []
+            if not printer_profile_id:
+                missing.append("printer")
+            if not filament_profile_id:
+                missing.append("material")
+            if not process_profile_id:
+                missing.append("process")
+            if missing:
+                missing_profiles.append(f"{printer.name}: {', '.join(missing)}")
+        planned_jobs.append((printer, printer_profile_id, filament_profile_id, process_profile_id))
+
+    if missing_profiles:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing Orca profiles for {', '.join(missing_profiles)}",
+        )
+
+    jobs = []
+    for printer, printer_profile_id, filament_profile_id, process_profile_id in planned_jobs:
+        jobs.append(await _queue_slicer_job(
+            db,
+            model,
+            printer,
+            printer_profile_id,
+            filament_profile_id,
+            process_profile_id,
+            req.centre_on_bed,
+            slice_group_id,
+        ))
+    return jobs
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=SlicerJobSchema)
@@ -322,6 +534,9 @@ async def run_slicer_job(job_id: int):
             printer_profile = (await db.execute(select(SlicerProfile).where(SlicerProfile.id == job.printer_profile_id))).scalar_one_or_none() if job.printer_profile_id else None
             filament_profile = (await db.execute(select(SlicerProfile).where(SlicerProfile.id == job.filament_profile_id))).scalar_one_or_none() if job.filament_profile_id else None
             process_profile = (await db.execute(select(SlicerProfile).where(SlicerProfile.id == job.process_profile_id))).scalar_one_or_none() if job.process_profile_id else None
+            job_options = job.command if isinstance(job.command, dict) else {}
+            centre_on_bed = bool(job_options.get("centre_on_bed", True))
+            slice_group_id = job_options.get("slice_group_id") or f"slicer-job-{job_id}"
 
             binary = _settings().get("orca_binary_path")
             if not binary or not os.path.exists(binary):
@@ -332,44 +547,64 @@ async def run_slicer_job(job_id: int):
                 raise RuntimeError("Printer G-code path is outside managed printer storage")
             os.makedirs(output_dir, exist_ok=True)
 
-            before = {path for path in Path(output_dir).glob("*.gcode")}
-            command = [
-                binary,
-                "--slice",
-                "0",
-                "--export-gcode",
-                "--outputdir",
-                output_dir,
-                *_profile_extra_args(printer_profile),
-                *_profile_extra_args(filament_profile),
-                *_profile_extra_args(process_profile),
-                model.file_path,
-            ]
-            job.status = "running"
-            job.message = "Running OrcaSlicer"
-            job.command = command
-            await db.commit()
+            tmp_root = os.path.join(STORAGE_ROOT, "tmp")
+            os.makedirs(tmp_root, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=f"slicer-job-{job_id}-", dir=tmp_root) as profile_work_dir:
+                job_output_dir = os.path.join(profile_work_dir, "output")
+                os.makedirs(job_output_dir, exist_ok=True)
+                settings_files = [
+                    *_profile_files(printer_profile, profile_work_dir),
+                    *_profile_files(process_profile, profile_work_dir),
+                ]
+                filament_files = _profile_files(filament_profile, profile_work_dir)
+                extra_args = [
+                    *_profile_extra_args(printer_profile),
+                    *_profile_extra_args(filament_profile),
+                    *_profile_extra_args(process_profile),
+                ]
 
-            def _run():
-                return subprocess.run(command, capture_output=True, text=True, timeout=1800)
+                command = [
+                    binary,
+                    "--slice",
+                    "0",
+                    "--outputdir",
+                    job_output_dir,
+                ]
+                if centre_on_bed:
+                    command.extend(["--arrange", "1", "--ensure-on-bed"])
+                if settings_files:
+                    command.extend(["--load-settings", ";".join(settings_files)])
+                if filament_files:
+                    command.extend(["--load-filaments", ";".join(filament_files)])
+                command.extend(extra_args)
+                command.append(model.file_path)
 
-            result = await asyncio.to_thread(_run)
-            if result.returncode != 0:
-                raise RuntimeError((result.stderr or result.stdout or "OrcaSlicer failed").strip()[:2000])
+                job.status = "running"
+                job.message = "Running OrcaSlicer"
+                job.command = command
+                await db.commit()
 
-            after = {path for path in Path(output_dir).glob("*.gcode")}
-            new_files = sorted(after - before, key=lambda path: path.stat().st_mtime, reverse=True)
-            if not new_files:
-                new_files = sorted(Path(output_dir).glob("*.gcode"), key=lambda path: path.stat().st_mtime, reverse=True)
-            if not new_files:
-                raise RuntimeError("OrcaSlicer completed but no G-code file was found")
+                def _run():
+                    return subprocess.run(command, capture_output=True, text=True, timeout=1800)
 
-            output_path = str(new_files[0])
+                result = await asyncio.to_thread(_run)
+                if result.returncode != 0:
+                    raise RuntimeError(_orca_error_message(result.stderr or result.stdout))
+
+                generated_files = sorted(Path(job_output_dir).glob("*.gcode"), key=lambda path: path.stat().st_mtime, reverse=True)
+                if not generated_files:
+                    raise RuntimeError("OrcaSlicer completed but no G-code file was found")
+
+                output_path = _unique_gcode_path(output_dir, model, printer)
+                shutil.move(str(generated_files[0]), output_path)
             metadata = _extract_gcode_metadata(output_path)
             meta_path = f"{output_path}.meta.json"
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump({
+                    "slice_group_id": slice_group_id,
+                    "source_model_id": model.id,
                     "source_model": model.filename,
+                    "target_printer_id": printer.id,
                     "target_printer": printer.name,
                     "profiles": {
                         "printer": printer_profile.name if printer_profile else None,

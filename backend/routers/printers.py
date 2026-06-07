@@ -6,6 +6,7 @@ from sqlalchemy.orm import selectinload
 from typing import Any, Dict, List, Optional
 import asyncio
 import httpx
+import json
 import os
 import posixpath
 import re
@@ -589,6 +590,17 @@ def _gcode_fit_status(analysis: dict, bed_bounds: Optional[dict]):
         return {"status": "fits", "message": "Fits bed"}
     return {"status": "too_large", "message": "Outside bed bounds"}
 
+def _read_gcode_metadata(path: str):
+    meta_path = f"{path}.meta.json"
+    if not os.path.exists(meta_path) or not is_path_within(meta_path, PRINTERS_ROOT):
+        return {}
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
 def _serialize_gcode_target(printer: Printer):
     bed_bounds = _printer_bed_bounds(printer)
     return {
@@ -605,6 +617,7 @@ def _serialize_gcode_target(printer: Printer):
 def _serialize_gcode_file(path: str, source_printer: Printer, target_printers: List[Printer]):
     stat = os.stat(path)
     analysis = _analyse_gcode_file(path)
+    metadata = _read_gcode_metadata(path)
     target_statuses = []
     compatible_printer_ids = []
     for target in target_printers:
@@ -626,6 +639,9 @@ def _serialize_gcode_file(path: str, source_printer: Printer, target_printers: L
         "size": stat.st_size,
         "last_modified": stat.st_mtime,
         "analysis": analysis,
+        "metadata": metadata,
+        "group_key": f"slicer:{metadata['slice_group_id']}" if metadata.get("slice_group_id") else f"file:{path}",
+        "group_label": metadata.get("source_model") if metadata.get("slice_group_id") else os.path.basename(path),
         "compatible_printer_ids": compatible_printer_ids,
         "target_statuses": target_statuses,
     }
