@@ -12,6 +12,7 @@ import {
   Layers3,
   Loader2,
   Move3D,
+  Package,
   Play,
   Plus,
   RefreshCw,
@@ -72,6 +73,7 @@ const Slicer = ({ addToast }) => {
   const [health, setHealth] = useState(null);
   const [models, setModels] = useState([]);
   const [profiles, setProfiles] = useState([]);
+  const [spools, setSpools] = useState([]);
   const [jobs, setJobs] = useState([]);
   const [installInfo, setInstallInfo] = useState(null);
   const [profileForm, setProfileForm] = useState(emptyProfile);
@@ -81,6 +83,7 @@ const Slicer = ({ addToast }) => {
     printer_profile_id: '',
     filament_profile_id: '',
     process_profile_id: '',
+    filament_spool_id: '',
     centre_on_bed: true,
     slice_for_all_printers: false,
   });
@@ -91,12 +94,13 @@ const Slicer = ({ addToast }) => {
   const [startingJob, setStartingJob] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [printerRes, settingsRes, healthRes, modelRes, profileRes, jobRes, installRes] = await Promise.all([
+    const [printerRes, settingsRes, healthRes, modelRes, profileRes, spoolRes, jobRes, installRes] = await Promise.all([
       axios.get('/api/printers'),
       axios.get('/api/slicer/settings'),
       axios.get('/api/slicer/health'),
       axios.get('/api/slicer/models'),
       axios.get('/api/slicer/profiles'),
+      axios.get('/api/filaments/spools'),
       axios.get('/api/slicer/jobs'),
       axios.get('/api/slicer/install-info'),
     ]);
@@ -105,6 +109,7 @@ const Slicer = ({ addToast }) => {
     setHealth(healthRes.data || null);
     setModels(modelRes.data || []);
     setProfiles(profileRes.data || []);
+    setSpools(spoolRes.data || []);
     setJobs(jobRes.data || []);
     setInstallInfo(installRes.data || null);
   }, []);
@@ -154,6 +159,21 @@ const Slicer = ({ addToast }) => {
     });
   }, [profiles, jobForm.printer_id]);
 
+  useEffect(() => {
+    setJobForm((current) => {
+      if (current.filament_spool_id && spools.some((spool) => String(spool.id) === String(current.filament_spool_id))) {
+        return current;
+      }
+      const loaded = spools.find((spool) => (
+        spool.status === 'active'
+        && spool.printer_id
+        && String(spool.printer_id) === String(current.printer_id)
+      ));
+      const active = spools.find((spool) => spool.status === 'active');
+      return { ...current, filament_spool_id: String((loaded || active)?.id || '') };
+    });
+  }, [spools, jobForm.printer_id]);
+
   const groupedProfiles = useMemo(() => ({
     printer: profiles.filter((profile) => profile.profile_type === 'printer'),
     filament: profiles.filter((profile) => profile.profile_type === 'filament'),
@@ -173,6 +193,10 @@ const Slicer = ({ addToast }) => {
   const stlNeedsProfiles = selectedModel?.source_format === 'stl';
   const missingProfiles = stlNeedsProfiles && (!jobForm.printer_profile_id || !jobForm.filament_profile_id || !jobForm.process_profile_id);
   const latestJob = jobs[0] || null;
+  const selectedSpool = useMemo(
+    () => spools.find((spool) => String(spool.id) === String(jobForm.filament_spool_id)) || null,
+    [jobForm.filament_spool_id, spools]
+  );
 
   const saveSettings = async () => {
     setSavingSettings(true);
@@ -282,6 +306,7 @@ const Slicer = ({ addToast }) => {
         printer_profile_id: jobForm.printer_profile_id ? Number(jobForm.printer_profile_id) : null,
         filament_profile_id: jobForm.filament_profile_id ? Number(jobForm.filament_profile_id) : null,
         process_profile_id: jobForm.process_profile_id ? Number(jobForm.process_profile_id) : null,
+        filament_spool_id: jobForm.filament_spool_id ? Number(jobForm.filament_spool_id) : null,
         centre_on_bed: Boolean(jobForm.centre_on_bed),
       };
       if (targetPrinterIds.length > 1) {
@@ -466,6 +491,38 @@ const Slicer = ({ addToast }) => {
               {profileSelect('printer', jobForm.printer_profile_id, 'printer_profile_id')}
               {profileSelect('filament', jobForm.filament_profile_id, 'filament_profile_id')}
               {profileSelect('process', jobForm.process_profile_id, 'process_profile_id')}
+              <label className="space-y-1">
+                <span className="text-[10px] font-bold uppercase text-slate-500">Filament spool</span>
+                <select
+                  value={jobForm.filament_spool_id}
+                  onChange={(event) => setJobForm({ ...jobForm, filament_spool_id: event.target.value })}
+                  className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm outline-none focus:border-blue-500"
+                >
+                  <option value="">No spool tracking</option>
+                  {spools.filter((spool) => spool.status === 'active').map((spool) => (
+                    <option key={spool.id} value={spool.id}>
+                      {spool.name} - {Math.round(spool.remaining_weight_g)}g left
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {selectedSpool && (
+                <div className="rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2">
+                  <div className="mb-2 flex items-center justify-between gap-3 text-[10px] font-bold uppercase text-slate-500">
+                    <span className="inline-flex items-center gap-1">
+                      <Package size={12} />
+                      {selectedSpool.material}
+                    </span>
+                    <span>{Math.round(selectedSpool.remaining_weight_g)}g / {Math.round(selectedSpool.initial_weight_g)}g</span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                    <div
+                      className={`h-full rounded-full ${selectedSpool.remaining_percent < 15 ? 'bg-red-400' : selectedSpool.remaining_percent < 30 ? 'bg-orange-400' : 'bg-green-400'}`}
+                      style={{ width: `${Math.max(0, Math.min(100, selectedSpool.remaining_percent))}%` }}
+                    />
+                  </div>
+                </div>
+              )}
               <label className={`flex cursor-pointer items-center gap-3 rounded-lg border px-3 py-2.5 ${jobForm.centre_on_bed ? 'border-blue-500/30 bg-blue-500/10' : 'border-slate-700 bg-slate-950/70'}`}>
                 <input
                   type="checkbox"

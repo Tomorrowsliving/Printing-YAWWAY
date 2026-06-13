@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Printer, Play, AlertTriangle, ExternalLink, Settings as SettingsIcon,
   RefreshCw, Plus, Loader2, ChevronRight, ChevronLeft, Server, Usb, Check, ShieldAlert, Upload, Book, FileCode, Trash2
@@ -52,6 +52,7 @@ const Fleet = ({ addToast }) => {
   const [selectedExample, setSelectedNodeExample] = useState(null);
 
   const [formData, setFormData] = useState(defaultFormData);
+  const activeInstallJob = softwareStatus?.install_job || softwareStatus?.job;
 
   useEffect(() => {
     fetchPrinters();
@@ -121,17 +122,18 @@ const Fleet = ({ addToast }) => {
     } catch (err) {}
   };
 
-  const checkSoftware = async (nodeId) => {
-    setSoftwareLoading(true);
+  const checkSoftware = useCallback(async (nodeId, options = {}) => {
+    const { background = false, quiet = false } = options;
+    if (!background) setSoftwareLoading(true);
     try {
       const res = await axios.get(`/api/nodes/${nodeId}/software/status`);
       setSoftwareStatus(res.data);
     } catch (err) {
-      addToast("Failed to check software status on node", "error");
+      if (!quiet) addToast("Failed to check software status on node", "error");
     } finally {
-      setSoftwareLoading(false);
+      if (!background) setSoftwareLoading(false);
     }
-  };
+  }, [addToast]);
 
   const installSoftware = async (nodeId, type) => {
     if (!nodeId) return;
@@ -144,13 +146,22 @@ const Fleet = ({ addToast }) => {
     };
     try {
       const res = await axios.post(`/api/nodes/${nodeId}/software/install/${type}`);
-      if (res.data?.status) {
-        setSoftwareStatus(res.data.status);
+      const nextStatus = res.data?.status && typeof res.data.status === 'object' ? { ...res.data.status } : {};
+      const job = res.data?.job || res.data?.install_job || nextStatus.install_job;
+      if (job) {
+        nextStatus.install_job = job;
+      }
+
+      if (Object.keys(nextStatus).length > 0) {
+        setSoftwareStatus(prev => ({ ...(prev || {}), ...nextStatus }));
       } else {
         await checkSoftware(nodeId);
       }
+
       if (res.data?.success === false) {
         addToast(res.data.message || `${labels[type]} install failed`, "error");
+      } else if (res.data?.accepted || job?.status === 'running') {
+        addToast(`${labels[type]} install started`, "info");
       } else {
         addToast(`${labels[type]} installed successfully`, "success");
       }
@@ -161,6 +172,17 @@ const Fleet = ({ addToast }) => {
       setSoftwareLoading(false);
     }
   };
+
+  useEffect(() => {
+    const nodeId = formData.assigned_node_id;
+    if (!nodeId || activeInstallJob?.status !== 'running') return undefined;
+
+    const interval = setInterval(() => {
+      checkSoftware(nodeId, { background: true, quiet: true });
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [formData.assigned_node_id, activeInstallJob?.id, activeInstallJob?.status, checkSoftware]);
 
   const fetchMcus = async (nodeId) => {
     setMcuLoading(true);
@@ -398,13 +420,16 @@ const Fleet = ({ addToast }) => {
   const onlineNodes = nodes.filter(n => n.online);
   const selectedNode = nodes.find(n => n.id === formData.assigned_node_id);
   const mainsailUrl = selectedNode?.ip_address ? `http://${selectedNode.ip_address}` : null;
+  const installJob = activeInstallJob;
+  const installJobRunning = installJob?.status === 'running';
+  const installJobLogs = Array.isArray(installJob?.log) ? installJob.log.slice(-5) : [];
   const runtimeInstalledCount = ['klipper_installed', 'moonraker_installed', 'mainsail_installed']
     .filter(key => softwareStatus?.[key]).length;
-  const runtimeLabel = runtimeInstalledCount === 3 ? 'Installed' : runtimeInstalledCount === 0 ? 'Not Installed' : 'Partial';
+  const runtimeLabel = installJobRunning ? 'Installing' : runtimeInstalledCount === 3 ? 'Installed' : runtimeInstalledCount === 0 ? 'Not Installed' : 'Partial';
   const runtimeReady = Boolean(softwareStatus?.klipper_installed && softwareStatus?.moonraker_installed);
   const nfsReady = Boolean(storageCheck?.nfs_available || (storageCheck?.mounted && storageCheck?.writable));
   const statusClass = (ok) => ok ? 'text-green-500' : 'text-red-400';
-  const runtimeClass = runtimeLabel === 'Installed' ? 'text-green-500' : runtimeLabel === 'Partial' ? 'text-orange-400' : 'text-red-400';
+  const runtimeClass = installJobRunning ? 'text-blue-400' : runtimeLabel === 'Installed' ? 'text-green-500' : runtimeLabel === 'Partial' ? 'text-orange-400' : 'text-red-400';
   const filteredExamples = examples.filter(example =>
     example.name.toLowerCase().includes(exampleFilter.trim().toLowerCase())
   );
@@ -420,8 +445,11 @@ const Fleet = ({ addToast }) => {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold">Fleet Overview</h2>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h2 className="text-2xl font-bold">Printers</h2>
+          <p className="text-xs text-slate-500 mt-1">Printer status, assigned controller, print progress, and quick controls.</p>
+        </div>
         <button
           onClick={() => { setStep(1); setIsModalOpen(true); }}
           className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-bold transition-colors shadow-lg"
@@ -597,14 +625,43 @@ const Fleet = ({ addToast }) => {
                 </div>
               )}
 
+              {installJob && (
+                <div className={`rounded-xl border p-3 space-y-2 ${installJob.status === 'failed' ? 'bg-red-950/20 border-red-500/30' : installJob.status === 'completed' ? 'bg-green-950/20 border-green-500/30' : 'bg-blue-950/20 border-blue-500/30'}`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Install Progress</p>
+                      <p className="text-sm font-bold text-slate-100 capitalize">{installJob.kind || installJob.component || 'Runtime'} - {installJob.status || 'running'}</p>
+                    </div>
+                    {installJobRunning ? <Loader2 size={16} className="animate-spin text-blue-300 shrink-0" /> : <Check size={16} className="text-green-300 shrink-0" />}
+                  </div>
+                  {installJob.message && <p className="text-[11px] text-slate-300 leading-relaxed">{installJob.message}</p>}
+                  {installJob.current_command && (
+                    <div className="rounded-lg bg-slate-950/70 border border-slate-800 px-3 py-2">
+                      <p className="text-[9px] font-bold uppercase text-slate-500 mb-1">Current Command</p>
+                      <p className="text-[10px] font-mono text-blue-200 truncate">{installJob.current_command}</p>
+                    </div>
+                  )}
+                  {installJobLogs.length > 0 && (
+                    <div className="rounded-lg bg-slate-950/70 border border-slate-800 px-3 py-2 space-y-1">
+                      <p className="text-[9px] font-bold uppercase text-slate-500">Recent Log</p>
+                      {installJobLogs.map((entry, index) => (
+                        <p key={`${entry.timestamp || 'log'}-${index}`} className="text-[10px] text-slate-400 leading-tight truncate">
+                          {entry.message}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {softwareStatus && runtimeInstalledCount < 3 && (
                 <button
                   onClick={() => installSoftware(formData.assigned_node_id, 'runtime')}
-                  disabled={softwareLoading}
+                  disabled={softwareLoading || installJobRunning}
                   className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 px-4 py-2 rounded-lg font-bold text-sm flex items-center justify-center space-x-2"
                 >
-                  {softwareLoading ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
-                  <span>Install Printer Runtime</span>
+                  {(softwareLoading || installJobRunning) ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
+                  <span>{installJobRunning ? 'Install running' : 'Install Printer Runtime'}</span>
                 </button>
               )}
 
@@ -617,10 +674,10 @@ const Fleet = ({ addToast }) => {
 
               {advancedInstallOpen && (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <button disabled={softwareLoading} onClick={() => installSoftware(formData.assigned_node_id, 'klipper')} className="bg-slate-800 hover:bg-slate-700 disabled:opacity-60 border border-slate-700 px-3 py-2 rounded-lg text-[10px] font-bold text-slate-300">Install Klipper only</button>
-                  <button disabled={softwareLoading} onClick={() => installSoftware(formData.assigned_node_id, 'moonraker')} className="bg-slate-800 hover:bg-slate-700 disabled:opacity-60 border border-slate-700 px-3 py-2 rounded-lg text-[10px] font-bold text-slate-300">Install Moonraker only</button>
-                  <button disabled={softwareLoading} onClick={() => installSoftware(formData.assigned_node_id, 'mainsail')} className="bg-slate-800 hover:bg-slate-700 disabled:opacity-60 border border-slate-700 px-3 py-2 rounded-lg text-[10px] font-bold text-slate-300">Install Mainsail only</button>
-                  <button disabled={softwareLoading} onClick={() => installSoftware(formData.assigned_node_id, 'runtime')} className="bg-slate-800 hover:bg-slate-700 disabled:opacity-60 border border-slate-700 px-3 py-2 rounded-lg text-[10px] font-bold text-slate-300">Reinstall/Repair runtime</button>
+                  <button disabled={softwareLoading || installJobRunning} onClick={() => installSoftware(formData.assigned_node_id, 'klipper')} className="bg-slate-800 hover:bg-slate-700 disabled:opacity-60 border border-slate-700 px-3 py-2 rounded-lg text-[10px] font-bold text-slate-300">Install Klipper only</button>
+                  <button disabled={softwareLoading || installJobRunning} onClick={() => installSoftware(formData.assigned_node_id, 'moonraker')} className="bg-slate-800 hover:bg-slate-700 disabled:opacity-60 border border-slate-700 px-3 py-2 rounded-lg text-[10px] font-bold text-slate-300">Install Moonraker only</button>
+                  <button disabled={softwareLoading || installJobRunning} onClick={() => installSoftware(formData.assigned_node_id, 'mainsail')} className="bg-slate-800 hover:bg-slate-700 disabled:opacity-60 border border-slate-700 px-3 py-2 rounded-lg text-[10px] font-bold text-slate-300">Install Mainsail only</button>
+                  <button disabled={softwareLoading || installJobRunning} onClick={() => installSoftware(formData.assigned_node_id, 'runtime')} className="bg-slate-800 hover:bg-slate-700 disabled:opacity-60 border border-slate-700 px-3 py-2 rounded-lg text-[10px] font-bold text-slate-300">Reinstall/Repair runtime</button>
                 </div>
               )}
             </div>
@@ -655,7 +712,7 @@ const Fleet = ({ addToast }) => {
                <button onClick={() => setStep(2)} className="text-slate-500 font-bold flex items-center hover:text-white transition-colors"><ChevronLeft size={18} /> Back</button>
                <div className="flex space-x-2">
                   <button onClick={() => { checkSoftware(formData.assigned_node_id); checkStorage(formData.assigned_node_id); fetchMcus(formData.assigned_node_id); }} className="p-2 bg-slate-700 rounded-lg text-slate-300 hover:text-white transition-colors"><RefreshCw size={16} /></button>
-                  <button disabled={!runtimeReady || !nfsReady} onClick={() => setStep(4)} className="bg-blue-600 disabled:bg-slate-700 px-6 py-2 rounded-lg font-bold flex items-center">Next <ChevronRight size={18} /></button>
+                  <button disabled={installJobRunning || !runtimeReady || !nfsReady} onClick={() => setStep(4)} className="bg-blue-600 disabled:bg-slate-700 px-6 py-2 rounded-lg font-bold flex items-center">Next <ChevronRight size={18} /></button>
                </div>
             </div>
           </div>

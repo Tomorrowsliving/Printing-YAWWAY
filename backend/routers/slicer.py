@@ -15,10 +15,11 @@ import tempfile
 from pathlib import Path
 
 from ..database import AsyncSessionLocal, get_db
-from ..models import Event, Printer, SlicerJob, SlicerModel, SlicerProfile
+from ..models import Event, FilamentSpool, Printer, SlicerJob, SlicerModel, SlicerProfile
 from ..schemas import SlicerBatchJobCreate, SlicerJob as SlicerJobSchema
 from ..schemas import SlicerJobCreate, SlicerProfile as SlicerProfileSchema, SlicerProfileBase, SlicerSettings
 from ..schemas import SlicerModel as SlicerModelSchema
+from ..utils.filament import estimate_usage_g, extract_gcode_filament_metadata
 from ..utils.file_backups import PRINTERS_ROOT, is_path_within
 
 router = APIRouter(prefix="/slicer", tags=["slicer"])
@@ -175,24 +176,15 @@ def _orca_error_message(output: str):
 
 
 def _extract_gcode_metadata(path: str):
-    metadata = {"estimated_time": None, "filament_used_mm": None}
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for _, line in zip(range(500), f):
-                lower = line.lower()
-                if metadata["estimated_time"] is None and ("estimated printing time" in lower or "estimated print time" in lower):
-                    metadata["estimated_time"] = line.split(":", 1)[-1].strip(" ;\n\r\t")
-                if metadata["filament_used_mm"] is None and "filament used [mm]" in lower:
-                    raw = line.split("=", 1)[-1].strip(" ;\n\r\t")
-                    try:
-                        metadata["filament_used_mm"] = float(raw)
-                    except ValueError:
-                        pass
-                if all(value is not None for value in metadata.values()):
-                    break
-    except OSError:
-        pass
-    return metadata
+    metadata = extract_gcode_filament_metadata(path)
+    return {
+        "estimated_time": metadata.get("estimated_time"),
+        "filament_used_mm": metadata.get("filament_used_mm"),
+        "filament_used_cm3": metadata.get("filament_used_cm3"),
+        "filament_used_g": metadata.get("filament_used_g"),
+        "filament_diameter_mm": metadata.get("filament_diameter_mm"),
+        "filament_density_g_cm3": metadata.get("filament_density_g_cm3"),
+    }
 
 
 @router.get("/settings", response_model=SlicerSettings)
@@ -378,6 +370,7 @@ async def _queue_slicer_job(
     printer_profile_id: Optional[int],
     filament_profile_id: Optional[int],
     process_profile_id: Optional[int],
+    filament_spool_id: Optional[int],
     centre_on_bed: bool,
     slice_group_id: str,
 ):
@@ -386,6 +379,10 @@ async def _queue_slicer_job(
             status_code=400,
             detail="STL slicing needs printer, material and process profiles. Add or select Orca profiles first.",
         )
+    if filament_spool_id:
+        spool = (await db.execute(select(FilamentSpool).where(FilamentSpool.id == filament_spool_id))).scalar_one_or_none()
+        if not spool:
+            raise HTTPException(status_code=404, detail="Filament spool not found")
 
     job = SlicerJob(
         model_id=model.id,
@@ -396,7 +393,11 @@ async def _queue_slicer_job(
         engine="orca",
         status="queued",
         message="Queued for OrcaSlicer",
-        command={"centre_on_bed": centre_on_bed, "slice_group_id": slice_group_id},
+        command={
+            "centre_on_bed": centre_on_bed,
+            "slice_group_id": slice_group_id,
+            "filament_spool_id": filament_spool_id,
+        },
     )
     db.add(job)
     db.add(Event(printer_id=printer.id, severity="info", event_type="slicer_job_queued", message=f"Queued slice for {model.filename}"))
@@ -450,6 +451,7 @@ async def create_job(req: SlicerJobCreate, db: AsyncSession = Depends(get_db)):
         req.printer_profile_id,
         req.filament_profile_id,
         req.process_profile_id,
+        req.filament_spool_id,
         req.centre_on_bed,
         f"slicer-job-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}-{req.model_id}-{req.printer_id}",
     )
@@ -503,6 +505,7 @@ async def create_batch_jobs(req: SlicerBatchJobCreate, db: AsyncSession = Depend
             printer_profile_id,
             filament_profile_id,
             process_profile_id,
+            req.filament_spool_id,
             req.centre_on_bed,
             slice_group_id,
         ))
@@ -537,6 +540,10 @@ async def run_slicer_job(job_id: int):
             job_options = job.command if isinstance(job.command, dict) else {}
             centre_on_bed = bool(job_options.get("centre_on_bed", True))
             slice_group_id = job_options.get("slice_group_id") or f"slicer-job-{job_id}"
+            filament_spool_id = job_options.get("filament_spool_id")
+            filament_spool = (await db.execute(
+                select(FilamentSpool).where(FilamentSpool.id == filament_spool_id)
+            )).scalar_one_or_none() if filament_spool_id else None
 
             binary = _settings().get("orca_binary_path")
             if not binary or not os.path.exists(binary):
@@ -581,7 +588,7 @@ async def run_slicer_job(job_id: int):
 
                 job.status = "running"
                 job.message = "Running OrcaSlicer"
-                job.command = command
+                job.command = {"argv": command, "options": job_options}
                 await db.commit()
 
                 def _run():
@@ -598,6 +605,9 @@ async def run_slicer_job(job_id: int):
                 output_path = _unique_gcode_path(output_dir, model, printer)
                 shutil.move(str(generated_files[0]), output_path)
             metadata = _extract_gcode_metadata(output_path)
+            usage_g = estimate_usage_g(metadata, filament_spool)
+            if usage_g is not None:
+                metadata["filament_used_g"] = round(usage_g, 3)
             meta_path = f"{output_path}.meta.json"
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump({
@@ -611,6 +621,8 @@ async def run_slicer_job(job_id: int):
                         "filament": filament_profile.name if filament_profile else None,
                         "process": process_profile.name if process_profile else None,
                     },
+                    "filament_spool_id": filament_spool.id if filament_spool else None,
+                    "filament_spool": filament_spool.name if filament_spool else None,
                     **metadata,
                 }, f, indent=2)
 

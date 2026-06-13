@@ -8,6 +8,7 @@ import PrinterDetail from './pages/PrinterDetail';
 import Files from './pages/Files';
 import GcodeHub from './components/GcodeHub';
 import Slicer from './pages/Slicer';
+import Filament from './pages/Filament';
 import Assignments from './pages/Assignments';
 import Events from './pages/Events';
 import Backups from './pages/Backups';
@@ -60,6 +61,7 @@ const AppRoutes = ({ addToast }) => {
       <Route path="/assignments" element={<Navigate to="/nodes/assignments" replace />} />
       <Route path="/gcode" element={<GcodeHub addToast={addToast} />} />
       <Route path="/slicer" element={<Slicer addToast={addToast} />} />
+      <Route path="/filament" element={<Filament addToast={addToast} />} />
       <Route path="/files" element={<Files addToast={addToast} />} />
       <Route path="/backups" element={<Backups addToast={addToast} />} />
       <Route path="/events" element={<Events addToast={addToast} />} />

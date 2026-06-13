@@ -63,6 +63,7 @@ class Printer(Base):
     notes = relationship("PrinterNote", back_populates="printer", uselist=False)
     slicer_profiles = relationship("SlicerProfile", back_populates="printer")
     slicer_jobs = relationship("SlicerJob", back_populates="printer")
+    filament_spools = relationship("FilamentSpool", back_populates="printer")
 
 class UsbDevice(Base):
     __tablename__ = "usb_devices"
@@ -159,6 +160,46 @@ class FileRecord(Base):
     size = Column(Integer)
     last_modified = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class FilamentSpool(Base):
+    __tablename__ = "filament_spools"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    material = Column(String, default="PLA", index=True)
+    brand = Column(String)
+    colour = Column(String)
+    diameter_mm = Column(Float, default=1.75)
+    density_g_cm3 = Column(Float, default=1.24)
+    initial_weight_g = Column(Float, default=1000.0)
+    remaining_weight_g = Column(Float, default=1000.0)
+    empty_spool_weight_g = Column(Float, default=0.0)
+    printer_id = Column(Integer, ForeignKey("printers.id"), nullable=True, index=True)
+    status = Column(String, default="active", index=True)  # active, empty, archived
+    notes = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    printer = relationship("Printer", back_populates="filament_spools", lazy="selectin")
+    usage_records = relationship("FilamentUsage", back_populates="spool", cascade="all, delete-orphan")
+
+class FilamentUsage(Base):
+    __tablename__ = "filament_usage"
+
+    id = Column(Integer, primary_key=True, index=True)
+    spool_id = Column(Integer, ForeignKey("filament_spools.id"), index=True)
+    printer_id = Column(Integer, ForeignKey("printers.id"), nullable=True, index=True)
+    slicer_job_id = Column(Integer, ForeignKey("slicer_jobs.id"), nullable=True)
+    gcode_path = Column(String)
+    usage_g = Column(Float)
+    usage_mm = Column(Float)
+    reason = Column(String, default="print_started")
+    note = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    spool = relationship("FilamentSpool", back_populates="usage_records")
+    printer = relationship("Printer")
+    slicer_job = relationship("SlicerJob")
 
 class SlicerProfile(Base):
     __tablename__ = "slicer_profiles"

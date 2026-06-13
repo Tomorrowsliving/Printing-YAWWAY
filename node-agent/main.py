@@ -8,6 +8,8 @@ import logging
 import shutil
 import json
 import re
+import threading
+import uuid
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Any, Dict, List, Optional
@@ -145,25 +147,91 @@ MOONRAKER_OPTIONAL_SYSTEM_PACKAGES = [
     "python3-libcamera",
 ]
 
+SOFTWARE_INSTALL_JOB = None
+SOFTWARE_INSTALL_LOCK = threading.RLock()
+SOFTWARE_JOB_CONTEXT = threading.local()
+
+def iso_now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+def software_job_snapshot():
+    with SOFTWARE_INSTALL_LOCK:
+        if not SOFTWARE_INSTALL_JOB:
+            return None
+        job = dict(SOFTWARE_INSTALL_JOB)
+        job["log"] = list(SOFTWARE_INSTALL_JOB.get("log", []))[-80:]
+        return job
+
+def update_software_job(**updates):
+    job_id = getattr(SOFTWARE_JOB_CONTEXT, "job_id", None)
+    if not job_id:
+        return
+    with SOFTWARE_INSTALL_LOCK:
+        if not SOFTWARE_INSTALL_JOB or SOFTWARE_INSTALL_JOB.get("id") != job_id:
+            return
+        SOFTWARE_INSTALL_JOB.update(updates)
+        SOFTWARE_INSTALL_JOB["updated_at"] = iso_now()
+
+def append_software_job_log(message, level="info", command=None):
+    job_id = getattr(SOFTWARE_JOB_CONTEXT, "job_id", None)
+    if not job_id:
+        return
+    entry = {
+        "timestamp": iso_now(),
+        "level": level,
+        "message": message,
+    }
+    if command:
+        entry["command"] = command
+    with SOFTWARE_INSTALL_LOCK:
+        if not SOFTWARE_INSTALL_JOB or SOFTWARE_INSTALL_JOB.get("id") != job_id:
+            return
+        SOFTWARE_INSTALL_JOB.setdefault("log", []).append(entry)
+        SOFTWARE_INSTALL_JOB["updated_at"] = entry["timestamp"]
+        if len(SOFTWARE_INSTALL_JOB["log"]) > 250:
+            SOFTWARE_INSTALL_JOB["log"] = SOFTWARE_INSTALL_JOB["log"][-250:]
+
+def set_software_job_component(component, message):
+    update_software_job(component=component, message=message, current_command="")
+    append_software_job_log(message)
+
 def run_checked(command, timeout=None):
-    logger.info("Running command: %s", " ".join(command))
-    return subprocess.run(
-        command,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    command_text = " ".join(command)
+    logger.info("Running command: %s", command_text)
+    update_software_job(current_command=command_text)
+    append_software_job_log(f"Running {command_text}", command=command_text)
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        append_software_job_log(f"Completed {command_text}", level="success", command=command_text)
+        update_software_job(current_command="")
+        return result
+    except Exception as e:
+        append_software_job_log(f"Failed {command_text}: {e}", level="error", command=command_text)
+        update_software_job(current_command="")
+        raise
 
 def run_best_effort(command, timeout=None):
-    logger.info("Running command: %s", " ".join(command))
-    return subprocess.run(
+    command_text = " ".join(command)
+    logger.info("Running command: %s", command_text)
+    update_software_job(current_command=command_text)
+    append_software_job_log(f"Running {command_text}", command=command_text)
+    result = subprocess.run(
         command,
         check=False,
         capture_output=True,
         text=True,
         timeout=timeout,
     )
+    level = "success" if result.returncode == 0 else "warning"
+    append_software_job_log(f"Finished {command_text} with exit code {result.returncode}", level=level, command=command_text)
+    update_software_job(current_command="")
+    return result
 
 def has_root_privileges():
     return hasattr(os, "geteuid") and os.geteuid() == 0
@@ -694,7 +762,7 @@ def render_bed_probe_block(bed_probe):
     if probe_count_x >= 4 and probe_count_y >= 4:
         mesh_lines.append("algorithm: bicubic")
 
-    return "\n".join(probe_lines) + "\n\n" + "\n".join(mesh_lines) + "\n"
+    return "\n\n".join(["\n".join(probe_lines), "\n".join(mesh_lines)]) + "\n"
 
 def build_config_helper_patch(content, data: KlipperConfigHelperRequest):
     changes = []
@@ -1353,14 +1421,8 @@ async def repair_moonraker_instance(data: MoonrakerRepairRequest):
         "changes": changes,
     }
 
-@app.get("/software/status")
-@app.get("/software/check")
-async def check_software():
-    return get_software_status()
-
-@app.post("/software/install/klipper")
-@app.post("/software/install-klipper")
-async def install_klipper():
+def install_klipper_sync():
+    set_software_job_component("klipper", "Installing Klipper runtime dependencies and Python environment.")
     try:
         run_checked(["sudo", "apt-get", "update", "--allow-releaseinfo-change"], timeout=180)
         run_checked(["sudo", "apt-get", "install", "-y", "git", "python3", "python3-venv", "python3-pip", "build-essential"], timeout=600)
@@ -1390,9 +1452,8 @@ async def install_klipper():
     except Exception as e:
         return {"success": False, "message": str(e), "status": get_software_status()}
 
-@app.post("/software/install/moonraker")
-@app.post("/software/install-moonraker")
-async def install_moonraker():
+def install_moonraker_sync():
+    set_software_job_component("moonraker", "Installing Moonraker dependencies and Python environment.")
     try:
         install_moonraker_system_dependencies()
         if not os.path.exists(MOONRAKER_PATH):
@@ -1425,8 +1486,8 @@ async def install_moonraker():
     except Exception as e:
         return {"success": False, "message": str(e), "status": get_software_status()}
 
-@app.post("/software/install/mainsail")
-async def install_mainsail():
+def install_mainsail_sync():
+    set_software_job_component("mainsail", "Installing Mainsail and nginx.")
     try:
         run_checked(["sudo", "apt-get", "update", "--allow-releaseinfo-change"], timeout=180)
         run_checked(["sudo", "apt-get", "install", "-y", "nginx", "unzip", "wget", "curl", "ca-certificates"], timeout=600)
@@ -1467,15 +1528,14 @@ async def install_mainsail():
     except Exception as e:
         return {"success": False, "message": str(e), "status": get_software_status()}
 
-@app.post("/software/install/runtime")
-async def install_printer_runtime():
+def install_printer_runtime_sync():
     steps = []
     for component, installer in (
-        ("klipper", install_klipper),
-        ("moonraker", install_moonraker),
-        ("mainsail", install_mainsail),
+        ("klipper", install_klipper_sync),
+        ("moonraker", install_moonraker_sync),
+        ("mainsail", install_mainsail_sync),
     ):
-        result = await installer()
+        result = installer()
         steps.append({"component": component, **result})
         if not result.get("success"):
             return {
@@ -1492,6 +1552,116 @@ async def install_printer_runtime():
         "steps": steps,
         "status": get_software_status(),
     }
+
+async def run_software_job(job_id, runner):
+    def target():
+        SOFTWARE_JOB_CONTEXT.job_id = job_id
+        try:
+            return runner()
+        finally:
+            SOFTWARE_JOB_CONTEXT.job_id = None
+
+    try:
+        result = await asyncio.to_thread(target)
+        success = bool(result.get("success"))
+        with SOFTWARE_INSTALL_LOCK:
+            if SOFTWARE_INSTALL_JOB and SOFTWARE_INSTALL_JOB.get("id") == job_id:
+                SOFTWARE_INSTALL_JOB.update({
+                    "status": "completed" if success else "failed",
+                    "success": success,
+                    "message": result.get("message") or ("Install completed." if success else "Install failed."),
+                    "result": result,
+                    "status_snapshot": result.get("status") or get_software_status(),
+                    "current_command": "",
+                    "completed_at": iso_now(),
+                    "updated_at": iso_now(),
+                })
+        append_software_job_log(result.get("message") or "Install completed.", level="success" if success else "error")
+    except Exception as e:
+        logger.error("Software install job failed: %s", e)
+        with SOFTWARE_INSTALL_LOCK:
+            if SOFTWARE_INSTALL_JOB and SOFTWARE_INSTALL_JOB.get("id") == job_id:
+                SOFTWARE_INSTALL_JOB.update({
+                    "status": "failed",
+                    "success": False,
+                    "message": str(e),
+                    "current_command": "",
+                    "completed_at": iso_now(),
+                    "updated_at": iso_now(),
+                })
+
+async def start_software_job(kind, label, runner):
+    global SOFTWARE_INSTALL_JOB
+    with SOFTWARE_INSTALL_LOCK:
+        if SOFTWARE_INSTALL_JOB and SOFTWARE_INSTALL_JOB.get("status") == "running":
+            return {
+                "success": True,
+                "accepted": False,
+                "message": "A software install is already running.",
+                "job": software_job_snapshot(),
+                "status": get_software_status(),
+            }
+
+        job_id = str(uuid.uuid4())
+        now = iso_now()
+        SOFTWARE_INSTALL_JOB = {
+            "id": job_id,
+            "kind": kind,
+            "component": kind,
+            "status": "running",
+            "success": None,
+            "message": label,
+            "current_command": "",
+            "started_at": now,
+            "updated_at": now,
+            "completed_at": None,
+            "log": [{
+                "timestamp": now,
+                "level": "info",
+                "message": label,
+            }],
+        }
+
+    asyncio.create_task(run_software_job(job_id, runner))
+    return {
+        "success": True,
+        "accepted": True,
+        "message": label,
+        "job": software_job_snapshot(),
+        "status": get_software_status(),
+    }
+
+@app.get("/software/status")
+@app.get("/software/check")
+async def check_software():
+    status = get_software_status()
+    status["install_job"] = software_job_snapshot()
+    return status
+
+@app.get("/software/install/status")
+async def get_software_install_status():
+    return {
+        "job": software_job_snapshot(),
+        "status": get_software_status(),
+    }
+
+@app.post("/software/install/klipper")
+@app.post("/software/install-klipper")
+async def install_klipper():
+    return await start_software_job("klipper", "Klipper install started.", install_klipper_sync)
+
+@app.post("/software/install/moonraker")
+@app.post("/software/install-moonraker")
+async def install_moonraker():
+    return await start_software_job("moonraker", "Moonraker install started.", install_moonraker_sync)
+
+@app.post("/software/install/mainsail")
+async def install_mainsail():
+    return await start_software_job("mainsail", "Mainsail install started.", install_mainsail_sync)
+
+@app.post("/software/install/runtime")
+async def install_printer_runtime():
+    return await start_software_job("runtime", "Printer runtime install started.", install_printer_runtime_sync)
 
 @app.get("/storage/check")
 async def check_storage():

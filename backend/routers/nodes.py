@@ -4,7 +4,7 @@ from sqlalchemy import select, or_, delete, update
 from sqlalchemy.orm import selectinload
 from typing import List, Optional
 from ..database import AsyncSessionLocal, get_db
-from ..models import Node, Event, Printer, ServiceInstance, UsbDevice
+from ..models import Assignment, Node, Event, Printer, ServiceInstance, UsbDevice
 from ..schemas import NodeCreate, NodeHeartbeat, Node as NodeSchema
 from ..utils.network_settings import get_effective_dashboard_host, host_from_url
 import datetime
@@ -24,6 +24,25 @@ AUTO_MOUNT_IN_FLIGHT = set()
 AUTO_MOUNT_LAST_ATTEMPT = {}
 AUTO_MOUNT_THROTTLE_SECONDS = 300
 NODE_OPERATION_STATES = {}
+SOFTWARE_INSTALL_OPERATIONS = {
+    "runtime": (
+        "software_runtime_installing",
+        "Installing Klipper, Moonraker, and Mainsail. Large downloads and Python package builds can make Pi Zero nodes slow to answer.",
+    ),
+    "klipper": (
+        "software_klipper_installing",
+        "Installing Klipper runtime. The node may answer slowly while apt, git, and pip finish.",
+    ),
+    "moonraker": (
+        "software_moonraker_installing",
+        "Installing Moonraker runtime. Python package builds can take several minutes on small Pis.",
+    ),
+    "mainsail": (
+        "software_mainsail_installing",
+        "Installing Mainsail and web server packages. The node may briefly stop answering.",
+    ),
+}
+SOFTWARE_OPERATION_NAMES = {operation for operation, _message in SOFTWARE_INSTALL_OPERATIONS.values()}
 
 def _normalise_service_name(name: str):
     name = clean_string(name)
@@ -115,6 +134,61 @@ def clear_node_operation(node_id: int, operation: Optional[str] = None):
         return
     NODE_OPERATION_STATES.pop(node_id, None)
 
+def is_software_operation(state):
+    return bool(state and state.get("operation") in SOFTWARE_OPERATION_NAMES)
+
+def _kind_from_software_operation(operation: str):
+    for kind, (operation_name, _message) in SOFTWARE_INSTALL_OPERATIONS.items():
+        if operation_name == operation:
+            return kind
+    return "software"
+
+def software_job_from_operation(node_id: int, state):
+    if not is_software_operation(state):
+        return None
+    started_at = state.get("started_at") or utcnow()
+    message = state.get("message") or "Software install is running."
+    kind = _kind_from_software_operation(state.get("operation"))
+    return {
+        "id": f"node-{node_id}-{state.get('operation')}",
+        "kind": kind,
+        "component": kind,
+        "status": "running",
+        "success": None,
+        "message": message,
+        "current_command": "",
+        "started_at": started_at,
+        "updated_at": utcnow(),
+        "completed_at": None,
+        "log": [{
+            "timestamp": started_at,
+            "level": "info",
+            "message": message,
+        }],
+    }
+
+def software_install_fallback_payload(node: Node, state=None, warning: Optional[str] = None):
+    active_operation = state or get_node_operation(node.id)
+    job = software_job_from_operation(node.id, active_operation)
+    if not job:
+        return None
+    payload = {
+        "success": True,
+        "accepted": True,
+        "busy": True,
+        "message": active_operation.get("message") or "Software install is running.",
+        "job": job,
+        "install_job": job,
+        "status": {
+            "install_job": job,
+            "busy": True,
+        },
+        "active_operation": active_operation.get("operation"),
+    }
+    if warning:
+        payload["warning"] = warning
+    return payload
+
 def _storage_mount_payload(server_ip: str):
     return {
         "server": server_ip,
@@ -196,6 +270,9 @@ async def auto_mount_node_storage(node_id: int, hostname: str, ip_address: str, 
 
 def schedule_auto_mount_node_storage(node: Node, request: Optional[Request], reason: str):
     if not node or not node.approved:
+        return
+    if not node.online:
+        logger.info("Skipping storage auto-connect for %s: node is offline", node.hostname)
         return
     server_ip = get_nfs_server_host(request)
     if not server_ip:
@@ -449,7 +526,12 @@ async def delete_node(node_id: int, db: AsyncSession = Depends(get_db)):
     node = await get_node_or_404(node_id, db)
 
     node_hostname = node.hostname
+    NODE_OPERATION_STATES.pop(node_id, None)
     await db.execute(update(Printer).where(Printer.assigned_node_id == node_id).values(assigned_node_id=None))
+    await db.execute(delete(Assignment).where(Assignment.node_id == node_id))
+    await db.execute(delete(UsbDevice).where(UsbDevice.node_id == node_id))
+    await db.execute(delete(ServiceInstance).where(ServiceInstance.node_id == node_id))
+    await db.execute(update(Event).where(Event.node_id == node_id).values(node_id=None))
     await db.delete(node)
 
     event = Event(severity="warning", event_type="node_deleted", message=f"Node {node_hostname} was removed")
@@ -523,7 +605,7 @@ async def node_heartbeat(hb: NodeHeartbeat, request: Request, db: AsyncSession =
         node.status = "discovered"
 
     active_operation = get_node_operation(node.id)
-    if active_operation and active_operation.get("operation") != "nfs_mounting":
+    if active_operation and active_operation.get("operation") != "nfs_mounting" and not is_software_operation(active_operation):
         clear_node_operation(node.id)
 
     if is_new:
@@ -937,21 +1019,102 @@ async def proxy_node_post(node: Node, path: str, timeout: int = 900):
         logger.error(f"Failed to reach node {node.hostname} at {url}: {e}")
         raise HTTPException(status_code=502, detail="Node unreachable or timeout")
 
+def _merge_install_job_payload(node: Node, payload: dict):
+    payload = dict(payload or {})
+    active_operation = get_node_operation(node.id)
+    job = payload.get("job") or payload.get("install_job") or (software_job_from_operation(node.id, active_operation) if active_operation else None)
+    if job:
+        payload["job"] = job
+        payload["install_job"] = job
+        status_payload = payload.get("status") if isinstance(payload.get("status"), dict) else payload
+        if isinstance(status_payload, dict):
+            status_payload["install_job"] = job
+
+        if job.get("status") in {"completed", "failed", "cancelled"} and active_operation:
+            clear_node_operation(node.id, active_operation.get("operation"))
+    return payload
+
+async def start_node_software_install(node: Node, kind: str, paths: List[str]):
+    operation, message = SOFTWARE_INSTALL_OPERATIONS[kind]
+    set_node_operation(node.id, operation, message, ttl_seconds=7200)
+    timeout = httpx.Timeout(12.0, connect=4.0)
+
+    for index, path in enumerate(paths):
+        url = f"http://{node.ip_address}:{node.agent_port}{path}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                res = await client.post(url)
+        except httpx.ReadTimeout:
+            logger.info("Software install request to %s timed out after being sent; treating as running", url)
+            return software_install_fallback_payload(
+                node,
+                warning="The node accepted the install request but did not return a live status before the timeout.",
+            )
+        except httpx.ConnectError as e:
+            clear_node_operation(node.id, operation)
+            logger.error("Could not connect to node %s at %s: %s", node.hostname, url, e)
+            raise HTTPException(status_code=502, detail="Node unreachable")
+        except httpx.RequestError as e:
+            clear_node_operation(node.id, operation)
+            logger.error("Software install request failed for node %s at %s: %s", node.hostname, url, e)
+            raise HTTPException(status_code=502, detail="Node unreachable")
+
+        if res.status_code == 404 and index < len(paths) - 1:
+            continue
+        if res.status_code == 404:
+            clear_node_operation(node.id, operation)
+            raise HTTPException(status_code=404, detail="Node-agent does not support this endpoint. Update node-agent.")
+
+        try:
+            payload = res.json()
+        except ValueError:
+            payload = {"message": res.text}
+
+        if res.status_code >= 400:
+            clear_node_operation(node.id, operation)
+            raise HTTPException(status_code=res.status_code, detail=payload.get("message") or payload.get("detail") or "Install failed on node-agent")
+
+        payload = _merge_install_job_payload(node, payload)
+        job_status = (payload.get("job") or {}).get("status")
+        if payload.get("success") is False or job_status in {"completed", "failed", "cancelled"}:
+            clear_node_operation(node.id, operation)
+        payload["active_operation"] = operation
+        return payload
+
+    clear_node_operation(node.id, operation)
+    raise HTTPException(status_code=404, detail="Node-agent does not support this endpoint. Update node-agent.")
+
 @router.get("/{node_id}/software/status")
 async def proxy_software_status(node_id: int, db: AsyncSession = Depends(get_db)):
     """Proxied endpoint to check Klipper, Moonraker, Mainsail, and nginx status on a node"""
     node = await get_node_for_proxy(node_id, db)
     try:
-        return await proxy_node_get(node, "/software/status", timeout=5)
+        return _merge_install_job_payload(node, await proxy_node_get(node, "/software/status", timeout=5))
     except HTTPException as e:
         if e.status_code == 404:
-            return await proxy_node_get(node, "/software/check", timeout=5)
+            return _merge_install_job_payload(node, await proxy_node_get(node, "/software/check", timeout=5))
+        fallback = software_install_fallback_payload(node)
+        if fallback:
+            return fallback
         raise
 
 @router.get("/{node_id}/software/check")
 async def proxy_software_check(node_id: int, db: AsyncSession = Depends(get_db)):
     """Compatibility alias for the newer software status endpoint"""
     return await proxy_software_status(node_id, db)
+
+@router.get("/{node_id}/software/install/status")
+async def proxy_software_install_status(node_id: int, db: AsyncSession = Depends(get_db)):
+    node = await get_node_for_proxy(node_id, db)
+    try:
+        return _merge_install_job_payload(node, await proxy_node_get(node, "/software/install/status", timeout=5))
+    except HTTPException as e:
+        if e.status_code == 404:
+            return await proxy_software_status(node_id, db)
+        fallback = software_install_fallback_payload(node)
+        if fallback:
+            return fallback
+        raise
 
 @router.get("/{node_id}/storage/check")
 async def proxy_storage_check(node_id: int, request: Request, db: AsyncSession = Depends(get_db)):
@@ -983,32 +1146,22 @@ async def proxy_storage_check(node_id: int, request: Request, db: AsyncSession =
 @router.post("/{node_id}/software/install/runtime")
 async def proxy_install_runtime(node_id: int, db: AsyncSession = Depends(get_db)):
     node = await get_node_for_proxy(node_id, db)
-    return await proxy_node_post(node, "/software/install/runtime", timeout=1800)
+    return await start_node_software_install(node, "runtime", ["/software/install/runtime"])
 
 @router.post("/{node_id}/software/install/klipper")
 async def proxy_install_klipper(node_id: int, db: AsyncSession = Depends(get_db)):
     node = await get_node_for_proxy(node_id, db)
-    try:
-        return await proxy_node_post(node, "/software/install/klipper", timeout=900)
-    except HTTPException as e:
-        if e.status_code == 404:
-            return await proxy_node_post(node, "/software/install-klipper", timeout=900)
-        raise
+    return await start_node_software_install(node, "klipper", ["/software/install/klipper", "/software/install-klipper"])
 
 @router.post("/{node_id}/software/install/moonraker")
 async def proxy_install_moonraker(node_id: int, db: AsyncSession = Depends(get_db)):
     node = await get_node_for_proxy(node_id, db)
-    try:
-        return await proxy_node_post(node, "/software/install/moonraker", timeout=900)
-    except HTTPException as e:
-        if e.status_code == 404:
-            return await proxy_node_post(node, "/software/install-moonraker", timeout=900)
-        raise
+    return await start_node_software_install(node, "moonraker", ["/software/install/moonraker", "/software/install-moonraker"])
 
 @router.post("/{node_id}/software/install/mainsail")
 async def proxy_install_mainsail(node_id: int, db: AsyncSession = Depends(get_db)):
     node = await get_node_for_proxy(node_id, db)
-    return await proxy_node_post(node, "/software/install/mainsail", timeout=900)
+    return await start_node_software_install(node, "mainsail", ["/software/install/mainsail"])
 
 @router.post("/{node_id}/software/install-klipper")
 async def proxy_install_klipper_legacy(node_id: int, db: AsyncSession = Depends(get_db)):

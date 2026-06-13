@@ -175,6 +175,7 @@ class SlicerJobCreate(BaseModel):
     printer_profile_id: Optional[int] = None
     filament_profile_id: Optional[int] = None
     process_profile_id: Optional[int] = None
+    filament_spool_id: Optional[int] = None
     centre_on_bed: bool = True
 
 class SlicerBatchJobCreate(BaseModel):
@@ -183,6 +184,7 @@ class SlicerBatchJobCreate(BaseModel):
     printer_profile_id: Optional[int] = None
     filament_profile_id: Optional[int] = None
     process_profile_id: Optional[int] = None
+    filament_spool_id: Optional[int] = None
     centre_on_bed: bool = True
 
 class SlicerJob(BaseModel):
@@ -201,5 +203,60 @@ class SlicerJob(BaseModel):
     command: Optional[list[str] | dict[str, Any]] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+class FilamentSpoolBase(BaseModel):
+    name: str
+    material: str = "PLA"
+    brand: Optional[str] = None
+    colour: Optional[str] = None
+    diameter_mm: float = 1.75
+    density_g_cm3: float = 1.24
+    initial_weight_g: float = 1000.0
+    remaining_weight_g: Optional[float] = None
+    empty_spool_weight_g: float = 0.0
+    printer_id: Optional[int] = None
+    status: str = "active"
+    notes: Optional[str] = None
+
+class FilamentSpoolCreate(FilamentSpoolBase):
+    pass
+
+class FilamentSpool(FilamentSpoolBase):
+    id: int
+    remaining_weight_g: float
+    remaining_percent: float
+    used_weight_g: float
+    printer_name: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+class FilamentUsageCreate(BaseModel):
+    printer_id: Optional[int] = None
+    slicer_job_id: Optional[int] = None
+    gcode_path: Optional[str] = None
+    usage_g: float
+    usage_mm: Optional[float] = None
+    reason: str = "manual"
+    note: Optional[str] = None
+
+class FilamentAdjustment(BaseModel):
+    delta_g: float
+    note: Optional[str] = None
+
+class FilamentUsage(BaseModel):
+    id: int
+    spool_id: int
+    printer_id: Optional[int] = None
+    slicer_job_id: Optional[int] = None
+    gcode_path: Optional[str] = None
+    usage_g: float
+    usage_mm: Optional[float] = None
+    reason: str
+    note: Optional[str] = None
+    created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)

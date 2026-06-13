@@ -7,6 +7,7 @@ import {
   FileCode,
   Loader2,
   Move,
+  Package,
   Play,
   RefreshCw,
   RotateCcw,
@@ -33,6 +34,13 @@ const formatDate = (value) => {
 const formatBounds = (analysis) => {
   if (!analysis?.has_bounds) return 'Unknown bounds';
   return `${analysis.width.toFixed(1)} x ${analysis.depth.toFixed(1)} mm`;
+};
+
+const formatWeight = (value) => {
+  const grams = Number(value);
+  if (!Number.isFinite(grams) || grams <= 0) return 'Unknown';
+  if (grams >= 1000) return `${(grams / 1000).toFixed(2)} kg`;
+  return `${grams.toFixed(1)} g`;
 };
 
 const fitTone = (status) => {
@@ -516,8 +524,10 @@ const GcodeHub = ({ addToast }) => {
   const [files, setFiles] = useState([]);
   const [targets, setTargets] = useState([]);
   const [printers, setPrinters] = useState([]);
+  const [spools, setSpools] = useState([]);
   const [selectedPath, setSelectedPath] = useState('');
   const [selectedTargetIds, setSelectedTargetIds] = useState([]);
+  const [selectedSpoolId, setSelectedSpoolId] = useState('');
   const [uploadPrinterId, setUploadPrinterId] = useState('');
   const [sourceFilter, setSourceFilter] = useState('all');
   const [search, setSearch] = useState('');
@@ -598,15 +608,29 @@ const GcodeHub = ({ addToast }) => {
     [compatibility, targets]
   );
 
+  const selectedSpool = useMemo(
+    () => spools.find((spool) => String(spool.id) === String(selectedSpoolId)) || null,
+    [selectedSpoolId, spools]
+  );
+
+  const estimatedFilamentG = useMemo(
+    () => Number(selectedFile?.metadata?.filament_used_g) || null,
+    [selectedFile]
+  );
+
   const fetchGcodes = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await axios.get('/api/printers/gcodes');
+      const [res, spoolRes] = await Promise.all([
+        axios.get('/api/printers/gcodes'),
+        axios.get('/api/filaments/spools'),
+      ]);
       const nextFiles = Array.isArray(res.data.files) ? res.data.files : [];
       const nextPrinters = Array.isArray(res.data.printers) ? res.data.printers : [];
       setFiles(nextFiles);
       setTargets(Array.isArray(res.data.targets) ? res.data.targets : []);
       setPrinters(nextPrinters);
+      setSpools(Array.isArray(spoolRes.data) ? spoolRes.data : []);
       setUploadPrinterId((current) => current || String(nextPrinters[0]?.id || ''));
       setSelectedPath((current) => (
         nextFiles.some((file) => file.path === current) ? current : nextFiles[0]?.path || ''
@@ -616,6 +640,7 @@ const GcodeHub = ({ addToast }) => {
       setFiles([]);
       setTargets([]);
       setPrinters([]);
+      setSpools([]);
     } finally {
       setLoading(false);
     }
@@ -633,6 +658,7 @@ const GcodeHub = ({ addToast }) => {
     }
 
     setSelectedTargetIds([selectedFile.source_printer_id].filter(Boolean));
+    setSelectedSpoolId(selectedFile.metadata?.filament_spool_id ? String(selectedFile.metadata.filament_spool_id) : '');
     let cancelled = false;
     setContentLoading(true);
 
@@ -719,9 +745,18 @@ const GcodeHub = ({ addToast }) => {
         file_path: selectedFile.path,
         target_printer_ids: targetIds,
         only_compatible: onlyCompatible,
+        filament_spool_id: selectedSpoolId ? Number(selectedSpoolId) : null,
+        deduct_filament: true,
       });
       if (res.data.started > 0) {
-        addToast(`Started ${res.data.started} print${res.data.started === 1 ? '' : 's'}`, 'success');
+        const usageRows = (res.data.results || []).map((row) => row.filament_usage).filter((row) => row?.spool_name);
+        if (usageRows.length > 0) {
+          const totalUsed = usageRows.reduce((sum, row) => sum + (Number(row.usage_g) || 0), 0);
+          addToast(`Started ${res.data.started} print${res.data.started === 1 ? '' : 's'}; deducted ${formatWeight(totalUsed)}`, 'success');
+          await fetchGcodes();
+        } else {
+          addToast(`Started ${res.data.started} print${res.data.started === 1 ? '' : 's'}`, 'success');
+        }
       } else {
         addToast(res.data.results?.[0]?.message || 'No prints were started', 'error');
       }
@@ -861,6 +896,50 @@ const GcodeHub = ({ addToast }) => {
                   </button>
                 ))}
               </div>
+            </div>
+          )}
+
+          {selectedFile && (
+            <div className="rounded-lg border border-slate-700 bg-slate-900 p-3">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <p className="inline-flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                  <Package size={13} />
+                  Filament
+                </p>
+                <span className="text-[10px] font-bold uppercase text-slate-400">
+                  {formatWeight(estimatedFilamentG)}
+                </span>
+              </div>
+              <select
+                value={selectedSpoolId}
+                onChange={(event) => setSelectedSpoolId(event.target.value)}
+                className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-xs outline-none focus:border-blue-500"
+              >
+                <option value="">Auto: loaded spool on target</option>
+                {spools.filter((spool) => spool.status === 'active').map((spool) => (
+                  <option key={spool.id} value={spool.id}>
+                    {spool.name} - {Math.round(spool.remaining_weight_g)}g left
+                  </option>
+                ))}
+              </select>
+              {selectedSpool ? (
+                <div className="mt-3">
+                  <div className="mb-1 flex items-center justify-between text-[10px] font-bold uppercase text-slate-500">
+                    <span>{selectedSpool.material}{selectedSpool.printer_name ? ` on ${selectedSpool.printer_name}` : ''}</span>
+                    <span>{Math.round(selectedSpool.remaining_weight_g)}g left</span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                    <div
+                      className={`h-full rounded-full ${selectedSpool.remaining_percent < 15 ? 'bg-red-400' : selectedSpool.remaining_percent < 30 ? 'bg-orange-400' : 'bg-green-400'}`}
+                      style={{ width: `${Math.max(0, Math.min(100, selectedSpool.remaining_percent))}%` }}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-2 text-[10px] font-semibold uppercase text-slate-500">
+                  The backend will deduct from each target printer's loaded spool when available.
+                </p>
+              )}
             </div>
           )}
 

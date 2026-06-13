@@ -26,6 +26,22 @@ const OPERATION_DETAILS = {
   services_restarting: {
     label: 'Restarting Services',
     message: 'Printer services are restarting. Status checks may pause for a moment.'
+  },
+  software_runtime_installing: {
+    label: 'Installing Runtime',
+    message: 'Klipper, Moonraker, and Mainsail are being installed. Large downloads and Python package builds can make small Pis slow to answer.'
+  },
+  software_klipper_installing: {
+    label: 'Installing Klipper',
+    message: 'Klipper runtime is being installed. The node may answer slowly while packages and Python modules finish.'
+  },
+  software_moonraker_installing: {
+    label: 'Installing Moonraker',
+    message: 'Moonraker runtime is being installed. Python package builds can take several minutes on small Pis.'
+  },
+  software_mainsail_installing: {
+    label: 'Installing Mainsail',
+    message: 'Mainsail and the web server packages are being installed. The node may briefly stop answering.'
   }
 };
 
@@ -371,7 +387,9 @@ const NodeOverview = ({ addToast }) => {
   };
 
   const handleDeleteNode = async (nodeId) => {
-    if (!window.confirm("Remove this node?")) return;
+    const node = nodes.find(item => item.id === nodeId);
+    const nodeName = node?.name || node?.hostname || `node ${nodeId}`;
+    if (!window.confirm(`Remove ${nodeName} from the dashboard?\n\nPrinter assignments will be cleared, but printer files and configs stay in central storage.`)) return;
     setNodeAction(nodeId, 'delete');
     try {
       await nodeService.deleteNode(nodeId);
@@ -508,12 +526,21 @@ const NodeOverview = ({ addToast }) => {
     return <div className="p-12 text-center text-slate-500 animate-pulse">Initialising...</div>;
   }
 
+  const approvedNodes = nodes.filter(node => node.approved);
+  const onlineCount = nodes.filter(node => node.online).length;
+  const offlineCount = approvedNodes.filter(node => !node.online).length;
+  const storageIssueCount = approvedNodes.filter(node => {
+    const storage = storageStatus[node.id];
+    return storage && storage.nfs_available === false;
+  }).length;
+  const piZeroCount = nodes.filter(node => /zero 2/i.test(node.model || '')).length;
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h2 className="text-2xl font-bold">Nodes</h2>
-          <p className="text-xs text-slate-500 mt-1">{isAdvancedMode ? 'Advanced controls are visible.' : 'Simple controls are shown.'}</p>
+          <p className="text-xs text-slate-500 mt-1">Raspberry Pi controllers that run Klipper and Moonraker for your printers.</p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -523,7 +550,7 @@ const NodeOverview = ({ addToast }) => {
               onClick={() => updateViewMode('simple')}
               className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${!isAdvancedMode ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700'}`}
             >
-              Simple
+              Overview
             </button>
             <button
               type="button"
@@ -536,12 +563,31 @@ const NodeOverview = ({ addToast }) => {
 
           <Link to="/nodes/assignments" className="flex items-center space-x-2 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-bold text-slate-200 transition-colors hover:border-blue-500/40 hover:bg-slate-700 hover:text-blue-200">
             <ArrowLeftRight size={18} />
-            <span>Assignments</span>
+            <span>Printer Assignments</span>
           </Link>
 
           <button onClick={() => setIsModalOpen(true)} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center space-x-2 shadow-lg shadow-blue-900/20">
-            <Plus size={18} /> <span>Add Manual</span>
+            <Plus size={18} /> <span>Add Node</span>
           </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <div className="rounded-lg border border-slate-700 bg-slate-800/70 px-4 py-3">
+          <p className="text-[10px] font-bold uppercase text-slate-500">Online</p>
+          <p className="mt-1 text-xl font-bold text-green-300">{onlineCount}</p>
+        </div>
+        <div className="rounded-lg border border-slate-700 bg-slate-800/70 px-4 py-3">
+          <p className="text-[10px] font-bold uppercase text-slate-500">Offline</p>
+          <p className="mt-1 text-xl font-bold text-slate-200">{offlineCount}</p>
+        </div>
+        <div className="rounded-lg border border-slate-700 bg-slate-800/70 px-4 py-3">
+          <p className="text-[10px] font-bold uppercase text-slate-500">Storage Alerts</p>
+          <p className={`mt-1 text-xl font-bold ${storageIssueCount ? 'text-orange-300' : 'text-green-300'}`}>{storageIssueCount}</p>
+        </div>
+        <div className="rounded-lg border border-slate-700 bg-slate-800/70 px-4 py-3">
+          <p className="text-[10px] font-bold uppercase text-slate-500">Pi Zero Nodes</p>
+          <p className="mt-1 text-xl font-bold text-blue-300">{piZeroCount}</p>
         </div>
       </div>
 
@@ -553,7 +599,7 @@ const NodeOverview = ({ addToast }) => {
           const storage = storageStatus[node.id] || {};
           const storageBusy = operation?.operation === 'nfs_mounting' || nodeAction(node.id) === 'mount-nfs';
           const nodeLooksOnline = node.online || Boolean(operation);
-          const statusLabel = operation ? operation.label : node.status;
+          const statusLabel = operation ? operation.label : node.online ? 'Online' : node.approved ? 'Offline' : 'Discovered';
           const statusClass = operation
             ? 'bg-blue-900/50 text-blue-300 border border-blue-500/30'
             : node.online
@@ -675,6 +721,13 @@ const NodeOverview = ({ addToast }) => {
                 {!node.online && (
                   <p className="text-[9px] leading-relaxed text-blue-200/70">Temporarily keeping this as an in-progress node rather than marking it failed.</p>
                 )}
+              </div>
+            )}
+
+            {!node.online && !operation && (
+              <div className="rounded-lg border border-slate-700/70 bg-slate-900/35 p-3 text-[10px] text-slate-300">
+                <p className="font-bold uppercase text-slate-400">Offline</p>
+                <p className="mt-1 leading-relaxed text-slate-400">The agent is not reachable on the network. This is expected if the Pi is powered down or unplugged.</p>
               </div>
             )}
 
@@ -814,7 +867,7 @@ const NodeOverview = ({ addToast }) => {
                   <div className={`grid gap-2 ${node.agent_version ? 'grid-cols-3' : 'grid-cols-2'}`}>
                     <ActionButton
                       icon={Settings2}
-                      label="Agent"
+                      label="Restart Agent"
                       tone="blue"
                       disabled={actionDisabled}
                       busy={nodeAction(node.id) === 'restart-agent'}
@@ -823,7 +876,7 @@ const NodeOverview = ({ addToast }) => {
                     />
                     <ActionButton
                       icon={Layers}
-                      label="Services"
+                      label="Restart Services"
                       tone="green"
                       disabled={actionDisabled}
                       busy={nodeAction(node.id) === 'restart-services'}

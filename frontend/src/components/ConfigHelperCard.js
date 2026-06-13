@@ -148,13 +148,6 @@ const formatNumber = (value, digits = 2) => {
   return digits > 0 ? (text.replace(/\.?0+$/, '') || '0') : text;
 };
 
-const apiErrorMessage = (error, fallback) => {
-  const detail = error?.response?.data?.detail;
-  if (typeof detail === 'string') return detail;
-  if (detail?.message) return detail.message;
-  return fallback;
-};
-
 const getBedSize = (bedProbe, selectedMeshPreset) => {
   const presetSize = BED_PREVIEW_SIZES[selectedMeshPreset?.id];
   if (presetSize) return presetSize;
@@ -720,6 +713,8 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
   const [busy, setBusy] = useState('');
   const [preview, setPreview] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [configState, setConfigState] = useState(null);
+  const [configStateLoading, setConfigStateLoading] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -735,6 +730,36 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
       mounted = false;
     };
   }, [addToast]);
+
+  useEffect(() => {
+    if (!printer?.id) return undefined;
+    let mounted = true;
+    setConfigStateLoading(true);
+    printerService.getConfigHelperState(printer.id)
+      .then((res) => {
+        if (!mounted) return;
+        const state = res.data || {};
+        setConfigState(state);
+        if (Array.isArray(state.plugins)) {
+          setForm((current) => ({
+            ...current,
+            plugins: state.plugins,
+          }));
+        }
+      })
+      .catch((err) => {
+        if (mounted) {
+          console.error('Failed to load config helper state:', err);
+          setConfigState(null);
+        }
+      })
+      .finally(() => {
+        if (mounted) setConfigStateLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [printer?.id]);
 
   const selectedProbePreset = useMemo(
     () => presets.probe_pin_presets.find((preset) => preset.id === form.probe_preset_id),
@@ -846,75 +871,6 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
     setPreview(null);
   };
 
-  const fitMeshToProbeReach = () => {
-    const bed = getBedSize(form.bed_probe, selectedMeshPreset);
-    const margin = 5;
-    const reachMinX = clampNumber(margin, 0, bed.width - 1);
-    const reachMaxX = clampNumber(bed.width - margin, reachMinX + 1, bed.width);
-    const reachMinY = clampNumber(margin, 0, bed.height - 1);
-    const reachMaxY = clampNumber(bed.height - margin, reachMinY + 1, bed.height);
-    const nextMinX = clampNumber(toNumber(form.bed_probe.mesh_min_x), reachMinX, reachMaxX - 1);
-    const nextMinY = clampNumber(toNumber(form.bed_probe.mesh_min_y), reachMinY, reachMaxY - 1);
-
-    updateBedProbeValues({
-      mesh_min_x: roundConfigNumber(nextMinX, 1),
-      mesh_min_y: roundConfigNumber(nextMinY, 1),
-      mesh_max_x: roundConfigNumber(clampNumber(toNumber(form.bed_probe.mesh_max_x), nextMinX + 1, reachMaxX), 1),
-      mesh_max_y: roundConfigNumber(clampNumber(toNumber(form.bed_probe.mesh_max_y), nextMinY + 1, reachMaxY), 1),
-    });
-  };
-
-  const runProbeReachFinder = async () => {
-    if (!form.bed_probe.enabled) {
-      addToast('Enable the bed probe before finding probe reach', 'info');
-      return;
-    }
-
-    if (hasBlockingValidation) {
-      setSettingsOpen(true);
-      addToast('Fix config validation errors before moving the printer', 'error');
-      return;
-    }
-
-    const confirmed = window.confirm(
-      'Run probe reach finder now?\n\nThis will physically move X/Y/Z, retract before each attempt, and probe the mesh corners. Home X/Y/Z first and keep a hand near power.'
-    );
-    if (!confirmed) return;
-
-    const bed = getBedSize(form.bed_probe, selectedMeshPreset);
-    setBusy('probe-reach');
-    try {
-      const res = await printerService.findProbeReach(printer.id, {
-        bed_probe: form.bed_probe,
-        bed_width: bed.width,
-        bed_height: bed.height,
-        margin_mm: 5,
-        step_mm: 10,
-        max_attempts: 20,
-      });
-      const suggested = res.data?.suggested_bed_probe;
-      if (suggested) updateBedProbeValues(suggested);
-      setPreview({
-        changed: true,
-        changes: [
-          `Mesh min: ${formatNumber(suggested?.mesh_min_x, 1)}, ${formatNumber(suggested?.mesh_min_y, 1)}`,
-          `Mesh max: ${formatNumber(suggested?.mesh_max_x, 1)}, ${formatNumber(suggested?.mesh_max_y, 1)}`,
-          `${res.data?.successful_edges?.length || 0} edges confirmed`,
-        ],
-        warnings: [],
-        snippet: (res.data?.attempts || [])
-          .map((attempt) => `${attempt.edge || attempt.corner} #${attempt.attempt}: ${attempt.status} nozzle ${attempt.nozzle_x},${attempt.nozzle_y} probe ${attempt.probe_x},${attempt.probe_y}`)
-          .join('\n'),
-      });
-      addToast(res.data?.message || 'Probe reach finder completed', 'success');
-      await fetchRuntime();
-    } catch (err) {
-      addToast(apiErrorMessage(err, 'Probe reach finder failed'), 'error');
-    } finally {
-      setBusy('');
-    }
-  };
-
   const togglePlugin = (pluginId, checked) => {
     setForm((current) => ({
       ...current,
@@ -972,7 +928,9 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
     : 'Disabled';
   const offsetSummary = `X ${formatNumber(form.bed_probe.x_offset)} / Y ${formatNumber(form.bed_probe.y_offset)} / Z ${formatNumber(form.bed_probe.z_offset)}`;
   const meshSummary = `${formatNumber(form.bed_probe.mesh_min_x, 0)},${formatNumber(form.bed_probe.mesh_min_y, 0)} -> ${formatNumber(form.bed_probe.mesh_max_x, 0)},${formatNumber(form.bed_probe.mesh_max_y, 0)}`;
-  const pluginSummary = selectedPluginLabels.length ? selectedPluginLabels.join(', ') : 'None selected';
+  const pluginSummary = selectedPluginLabels.length
+    ? selectedPluginLabels.join(', ')
+    : (configStateLoading ? 'Checking printer.cfg' : 'None selected');
   const seriousIssue = validationIssues.find((issue) => issue.severity === 'error');
   const warningIssue = validationIssues.find((issue) => issue.severity === 'warning');
 
@@ -1120,27 +1078,6 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
                 icon={Map}
                 title="Mesh Area"
                 description="Define the reachable probing rectangle, grid density, and travel height."
-                aside={(
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={fitMeshToProbeReach}
-                      disabled={Boolean(busy)}
-                      className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-cyan-200 transition-colors hover:bg-cyan-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Fit Probe Reach
-                    </button>
-                    <button
-                      type="button"
-                      onClick={runProbeReachFinder}
-                      disabled={Boolean(busy)}
-                      className="inline-flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-emerald-200 transition-colors hover:bg-emerald-500/20 disabled:cursor-wait disabled:opacity-50"
-                    >
-                      {busy === 'probe-reach' ? <RefreshCw size={13} className="animate-spin" /> : <Crosshair size={13} />}
-                      <span>Probe Find Reach</span>
-                    </button>
-                  </div>
-                )}
               >
                 <div className={probeDisabled ? 'pointer-events-none opacity-40' : 'space-y-3'}>
                   <label className="block">
@@ -1173,15 +1110,24 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
                 title="Klipper Plugins"
                 description="Optional config sections for common Mainsail and slicer workflows."
               >
-                <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                  {presets.plugin_presets.map((plugin) => (
-                    <PluginToggle
-                      key={plugin.id}
-                      plugin={plugin}
-                      checked={form.plugins.includes(plugin.id)}
-                      onChange={(checked) => togglePlugin(plugin.id, checked)}
-                    />
-                  ))}
+                <div className="space-y-3">
+                  <div className="rounded-lg border border-slate-700/70 bg-slate-950/50 px-3 py-2 text-[11px] font-semibold text-slate-400">
+                    {configStateLoading
+                      ? 'Checking saved printer.cfg sections...'
+                      : configState?.config_exists
+                        ? `Active plugin toggles are detected from ${configState.printer_cfg_path || 'printer.cfg'}.`
+                        : 'No saved printer.cfg was found yet, so plugin toggles start empty.'}
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                    {presets.plugin_presets.map((plugin) => (
+                      <PluginToggle
+                        key={plugin.id}
+                        plugin={plugin}
+                        checked={form.plugins.includes(plugin.id)}
+                        onChange={(checked) => togglePlugin(plugin.id, checked)}
+                      />
+                    ))}
+                  </div>
                 </div>
               </Section>
             </div>

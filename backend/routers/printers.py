@@ -12,9 +12,11 @@ import posixpath
 import re
 import shutil
 from ..database import get_db
-from ..models import Assignment, Backup, Event, FileRecord, Printer, Node, PrinterNote
+from ..models import Assignment, Backup, Event, FileRecord, FilamentSpool, Printer, Node, PrinterNote
 from ..schemas import PrinterCreate, Printer as PrinterSchema, PrinterDetail
+from ..utils.filament import estimate_usage_g, extract_gcode_filament_metadata
 from ..utils.file_backups import BACKUP_ROOT, FILE_EDIT_BACKUP_TYPE, PRINTERS_ROOT, is_path_within
+from .filaments import deduct_spool_usage
 from .nodes import serialize_node, get_backend_public_host
 import datetime
 
@@ -120,18 +122,12 @@ class PrinterConfigHelperRequest(BaseModel):
     replace_existing: bool = True
     restart_services: bool = True
 
-class PrinterProbeReachRequest(BaseModel):
-    bed_probe: Dict[str, Any]
-    bed_width: float
-    bed_height: float
-    margin_mm: float = 5
-    step_mm: float = 10
-    max_attempts: int = 20
-
 class GcodePrintRequest(BaseModel):
     file_path: str
     target_printer_ids: List[int] = Field(default_factory=list)
     only_compatible: bool = False
+    filament_spool_id: Optional[int] = None
+    deduct_filament: bool = True
 
 GCODE_EXTENSIONS = (".gcode", ".gco", ".g")
 GCODE_WORD_RE = re.compile(r"([A-Z])\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))", re.IGNORECASE)
@@ -422,6 +418,14 @@ def _safe_gcode_path(path: str, root: str = PRINTERS_ROOT) -> str:
         raise HTTPException(status_code=403, detail="G-code path is outside managed printer storage")
     return os.path.abspath(path)
 
+def _printer_cfg_path(config_path: Optional[str]) -> Optional[str]:
+    if not config_path:
+        return None
+    return os.path.abspath(os.path.join(config_path, "printer.cfg") if os.path.isdir(config_path) else config_path)
+
+def _config_text_has_section(content: str, section: str) -> bool:
+    return re.search(rf"(?im)^\s*\[{re.escape(section)}\]\s*$", content) is not None
+
 def _relative_gcode_path(printer: Printer, path: str) -> str:
     gcode_dir = os.path.abspath(_printer_gcode_dir(printer))
     abs_path = _safe_gcode_path(path, gcode_dir)
@@ -601,6 +605,14 @@ def _read_gcode_metadata(path: str):
     except (OSError, json.JSONDecodeError):
         return {}
 
+def _merged_gcode_metadata(path: str):
+    metadata = _read_gcode_metadata(path)
+    parsed = extract_gcode_filament_metadata(path)
+    for key, value in parsed.items():
+        if metadata.get(key) is None:
+            metadata[key] = value
+    return metadata
+
 def _serialize_gcode_target(printer: Printer):
     bed_bounds = _printer_bed_bounds(printer)
     return {
@@ -617,7 +629,7 @@ def _serialize_gcode_target(printer: Printer):
 def _serialize_gcode_file(path: str, source_printer: Printer, target_printers: List[Printer]):
     stat = os.stat(path)
     analysis = _analyse_gcode_file(path)
-    metadata = _read_gcode_metadata(path)
+    metadata = _merged_gcode_metadata(path)
     target_statuses = []
     compatible_printer_ids = []
     for target in target_printers:
@@ -670,39 +682,11 @@ async def post_moonraker_json(node: Node, moonraker_port: int, path: str, payloa
         raise HTTPException(status_code=502, detail=f"Moonraker returned HTTP {res.status_code}: {res.text}")
     return res.json()
 
-def _float_value(data: Dict[str, Any], key: str, default: float = 0.0) -> float:
-    try:
-        value = float(data.get(key, default))
-        return value if value == value else default
-    except (TypeError, ValueError):
-        return default
-
-def _clamp(value: float, minimum: float, maximum: float) -> float:
-    return max(minimum, min(maximum, value))
-
-def _round_mm(value: float) -> float:
-    return round(float(value), 3)
-
 def _api_error_message(error: HTTPException) -> str:
     detail = error.detail
     if isinstance(detail, dict):
         return str(detail.get("message") or detail)
     return str(detail)
-
-def _is_probe_point_on_bed(x: float, y: float, bed_probe: Dict[str, Any], bed_width: float, bed_height: float, margin: float) -> bool:
-    probe_x = x + _float_value(bed_probe, "x_offset")
-    probe_y = y + _float_value(bed_probe, "y_offset")
-    return margin <= probe_x <= bed_width - margin and margin <= probe_y <= bed_height - margin
-
-async def _fetch_motion_status(node: Node, moonraker_port: int) -> Dict[str, Any]:
-    payload = await fetch_moonraker_json(
-        node,
-        moonraker_port,
-        "/printer/objects/query?toolhead&gcode_move&print_stats&webhooks",
-        timeout=5.0,
-    )
-    result = payload.get("result", payload)
-    return result.get("status", {})
 
 async def _send_gcode_script(node: Node, moonraker_port: int, script: str, timeout: float = 30.0):
     return await post_moonraker_json(
@@ -712,43 +696,6 @@ async def _send_gcode_script(node: Node, moonraker_port: int, script: str, timeo
         {"script": script},
         timeout=timeout,
     )
-
-async def _safe_retract(node: Node, moonraker_port: int, safe_z: float, lift_feed: float):
-    script = "\n".join([
-        "SAVE_GCODE_STATE NAME=KF_PROBE_REACH_ABORT",
-        "G90",
-        f"G1 Z{safe_z:.3f} F{lift_feed:.0f}",
-        "RESTORE_GCODE_STATE NAME=KF_PROBE_REACH_ABORT MOVE=0",
-    ])
-    await _send_gcode_script(node, moonraker_port, script, timeout=10.0)
-
-async def _try_probe_reach_point(
-    node: Node,
-    moonraker_port: int,
-    x: float,
-    y: float,
-    safe_z: float,
-    lift_feed: float,
-    move_feed: float,
-):
-    script = "\n".join([
-        "SAVE_GCODE_STATE NAME=KF_PROBE_REACH",
-        "G90",
-        f"G1 Z{safe_z:.3f} F{lift_feed:.0f}",
-        f"G1 X{x:.3f} Y{y:.3f} F{move_feed:.0f}",
-        "PROBE",
-        f"G1 Z{safe_z:.3f} F{lift_feed:.0f}",
-        "RESTORE_GCODE_STATE NAME=KF_PROBE_REACH MOVE=0",
-    ])
-    try:
-        response = await _send_gcode_script(node, moonraker_port, script, timeout=45.0)
-        return {"success": True, "response": response}
-    except HTTPException as probe_error:
-        try:
-            await _safe_retract(node, moonraker_port, safe_z, lift_feed)
-        except HTTPException:
-            pass
-        return {"success": False, "error": _api_error_message(probe_error)}
 
 @router.post("/", response_model=PrinterSchema)
 async def create_printer(printer_in: PrinterCreate, db: AsyncSession = Depends(get_db)):
@@ -783,6 +730,62 @@ async def list_printers(db: AsyncSession = Depends(get_db)):
 @router.get("/config-helper/presets")
 async def get_config_helper_presets():
     return CONFIG_HELPER_PRESETS
+
+@router.get("/{printer_id}/config-helper/state")
+async def get_printer_config_helper_state(printer_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(status_code=404, detail="Printer not found")
+
+    plugin_states = {plugin["id"]: False for plugin in CONFIG_HELPER_PRESETS["plugin_presets"]}
+    printer_cfg = _printer_cfg_path(printer.config_path)
+    if not printer_cfg:
+        return {
+            "config_exists": False,
+            "printer_cfg_path": None,
+            "plugins": [],
+            "plugin_states": plugin_states,
+            "bed_probe_enabled": False,
+            "bed_probe_sections": {},
+        }
+
+    if not is_path_within(printer_cfg, PRINTERS_ROOT):
+        raise HTTPException(status_code=403, detail="Printer config path is outside managed printer storage")
+
+    if not os.path.exists(printer_cfg):
+        return {
+            "config_exists": False,
+            "printer_cfg_path": printer_cfg,
+            "plugins": [],
+            "plugin_states": plugin_states,
+            "bed_probe_enabled": False,
+            "bed_probe_sections": {},
+        }
+
+    try:
+        with open(printer_cfg, "r", encoding="utf-8", errors="ignore") as handle:
+            content = handle.read()
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read printer.cfg: {exc}")
+
+    for plugin in CONFIG_HELPER_PRESETS["plugin_presets"]:
+        sections = plugin.get("sections") or []
+        plugin_states[plugin["id"]] = bool(sections) and all(_config_text_has_section(content, section) for section in sections)
+
+    bed_probe_sections = {
+        section: _config_text_has_section(content, section)
+        for section in ["bltouch", "probe", "safe_z_home", "bed_mesh"]
+    }
+
+    return {
+        "config_exists": True,
+        "printer_cfg_path": printer_cfg,
+        "plugins": [plugin_id for plugin_id, active in plugin_states.items() if active],
+        "plugin_states": plugin_states,
+        "bed_probe_enabled": any(bed_probe_sections.values()),
+        "bed_probe_sections": bed_probe_sections,
+    }
 
 @router.get("/gcodes")
 async def list_all_printer_gcodes(db: AsyncSession = Depends(get_db)):
@@ -1010,6 +1013,17 @@ async def print_printer_gcode(printer_id: int, request_data: GcodePrintRequest, 
     source_path = _safe_gcode_path(request_data.file_path, _printer_gcode_dir(source_printer))
     relative_path = _relative_gcode_path(source_printer, source_path)
     analysis = _analyse_gcode_file(source_path)
+    gcode_metadata = _merged_gcode_metadata(source_path)
+
+    requested_spool = None
+    if request_data.filament_spool_id:
+        requested_spool = (await db.execute(
+            select(FilamentSpool)
+            .options(selectinload(FilamentSpool.printer))
+            .where(FilamentSpool.id == request_data.filament_spool_id)
+        )).scalar_one_or_none()
+        if not requested_spool:
+            raise HTTPException(status_code=404, detail="Filament spool not found")
 
     target_result = await db.execute(
         select(Printer)
@@ -1069,6 +1083,9 @@ async def print_printer_gcode(printer_id: int, request_data: GcodePrintRequest, 
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
             if os.path.abspath(source_path) != target_path:
                 shutil.copy2(source_path, target_path)
+                source_meta_path = f"{source_path}.meta.json"
+                if os.path.exists(source_meta_path):
+                    shutil.copy2(source_meta_path, f"{target_path}.meta.json")
 
             moonraker_response = await post_moonraker_json(
                 target.node,
@@ -1077,12 +1094,54 @@ async def print_printer_gcode(printer_id: int, request_data: GcodePrintRequest, 
                 {"filename": relative_path},
                 timeout=10.0,
             )
+            filament_usage = None
+            if request_data.deduct_filament:
+                spool = requested_spool
+                if not spool:
+                    spool = (await db.execute(
+                        select(FilamentSpool)
+                        .options(selectinload(FilamentSpool.printer))
+                        .where(FilamentSpool.printer_id == target.id, FilamentSpool.status == "active")
+                        .order_by(FilamentSpool.updated_at.desc().nullslast(), FilamentSpool.created_at.desc())
+                    )).scalars().first()
+                if not spool and gcode_metadata.get("filament_spool_id"):
+                    spool = (await db.execute(
+                        select(FilamentSpool)
+                        .options(selectinload(FilamentSpool.printer))
+                        .where(FilamentSpool.id == gcode_metadata["filament_spool_id"])
+                    )).scalar_one_or_none()
+
+                usage_g = estimate_usage_g(gcode_metadata, spool)
+                if spool and usage_g:
+                    await deduct_spool_usage(
+                        db,
+                        spool,
+                        usage_g,
+                        printer_id=target.id,
+                        gcode_path=target_path,
+                        usage_mm=gcode_metadata.get("filament_used_mm"),
+                        reason="print_started",
+                        note=f"Started {relative_path}",
+                    )
+                    filament_usage = {
+                        "spool_id": spool.id,
+                        "spool_name": spool.name,
+                        "usage_g": round(usage_g, 1),
+                        "remaining_weight_g": round(float(spool.remaining_weight_g or 0), 1),
+                    }
+                elif usage_g:
+                    filament_usage = {
+                        "status": "not_deducted",
+                        "usage_g": round(usage_g, 1),
+                        "message": "No loaded filament spool found",
+                    }
             results.append({
                 "printer_id": target.id,
                 "printer_name": target.name,
                 "status": "started",
                 "fit_status": fit["status"],
                 "message": "Print started",
+                "filament_usage": filament_usage,
                 "moonraker_response": moonraker_response,
             })
             db.add(Event(
@@ -1091,7 +1150,11 @@ async def print_printer_gcode(printer_id: int, request_data: GcodePrintRequest, 
                 severity="info",
                 event_type="gcode_print_start",
                 message=f"Started {relative_path} on printer {target.name}",
-                details={"source_printer_id": source_printer.id, "fit_status": fit["status"]},
+                details={
+                    "source_printer_id": source_printer.id,
+                    "fit_status": fit["status"],
+                    "filament_usage": filament_usage,
+                },
             ))
         except HTTPException as e:
             results.append({
@@ -1148,254 +1211,6 @@ async def home_printer_axis(printer_id: int, axis: str = Body(..., embed=True), 
     ))
     await db.commit()
     return {"status": "success", "axis": target_axis, "script": script, "moonraker_response": response}
-
-@router.post("/{printer_id}/probe-reach/find")
-async def find_printer_probe_reach(printer_id: int, request_data: PrinterProbeReachRequest, db: AsyncSession = Depends(get_db)):
-    printer, node = await get_printer_and_assigned_node(printer_id, db)
-    if not printer.moonraker_port:
-        raise HTTPException(status_code=400, detail="Printer Moonraker port is missing")
-
-    bed_probe = dict(request_data.bed_probe or {})
-    if not bed_probe.get("enabled", True):
-        raise HTTPException(status_code=400, detail="Bed probe is disabled in the config helper.")
-
-    bed_width = _clamp(float(request_data.bed_width or 0), 10, 1000)
-    bed_height = _clamp(float(request_data.bed_height or 0), 10, 1000)
-    margin = _clamp(float(request_data.margin_mm or 5), 0, min(bed_width, bed_height) / 3)
-    step = _clamp(float(request_data.step_mm or 5), 0.5, 25)
-    max_attempts = int(_clamp(float(request_data.max_attempts or 8), 1, 20))
-
-    status = await _fetch_motion_status(node, printer.moonraker_port)
-    webhooks = status.get("webhooks") or {}
-    if str(webhooks.get("state") or "").lower() != "ready":
-        raise HTTPException(status_code=400, detail="Klipper must be ready before running the probe reach finder.")
-
-    print_stats = status.get("print_stats") or {}
-    if str(print_stats.get("state") or "").lower() in {"printing", "paused"}:
-        raise HTTPException(status_code=400, detail="Probe reach finder is blocked while a print is active or paused.")
-
-    toolhead = status.get("toolhead") or {}
-    homed_axes = str(toolhead.get("homed_axes") or "").lower()
-    missing_axes = [axis.upper() for axis in ("x", "y", "z") if axis not in homed_axes]
-    if missing_axes:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Home {'/'.join(missing_axes)} before running the probe reach finder.",
-        )
-
-    position = toolhead.get("position") or [0, 0, 0]
-    axis_minimum = toolhead.get("axis_minimum") or [0, 0, 0]
-    axis_maximum = toolhead.get("axis_maximum") or [bed_width, bed_height, 250]
-    current_z = float(position[2] if len(position) > 2 else 0)
-    max_z = float(axis_maximum[2] if len(axis_maximum) > 2 else max(current_z + 30, 250))
-    z_hop = _clamp(_float_value(bed_probe, "z_hop", 10), 2, 25)
-    safe_z = _clamp(current_z + z_hop, z_hop, max(z_hop, max_z - 1))
-    lift_feed = _clamp(_float_value(bed_probe, "lift_speed", 5), 1, 50) * 60
-    move_feed = _clamp(_float_value(bed_probe, "mesh_speed", 120), 5, 300) * 60
-
-    suggested = {
-        **bed_probe,
-        "mesh_min_x": _round_mm(min(_float_value(bed_probe, "mesh_min_x", 0), _float_value(bed_probe, "mesh_max_x", bed_width))),
-        "mesh_max_x": _round_mm(max(_float_value(bed_probe, "mesh_min_x", 0), _float_value(bed_probe, "mesh_max_x", bed_width))),
-        "mesh_min_y": _round_mm(min(_float_value(bed_probe, "mesh_min_y", 0), _float_value(bed_probe, "mesh_max_y", bed_height))),
-        "mesh_max_y": _round_mm(max(_float_value(bed_probe, "mesh_min_y", 0), _float_value(bed_probe, "mesh_max_y", bed_height))),
-    }
-
-    attempts = []
-    successful_edges = []
-    x_offset = _float_value(bed_probe, "x_offset")
-    y_offset = _float_value(bed_probe, "y_offset")
-    nozzle_min_x = float(axis_minimum[0] if len(axis_minimum) > 0 else 0)
-    nozzle_min_y = float(axis_minimum[1] if len(axis_minimum) > 1 else 0)
-    nozzle_max_x = float(axis_maximum[0] if len(axis_maximum) > 0 else bed_width)
-    nozzle_max_y = float(axis_maximum[1] if len(axis_maximum) > 1 else bed_height)
-    fine_step = max(0.5, min(2.0, step / 5))
-
-    def lane_values(minimum: float, maximum: float) -> List[float]:
-        low = min(float(minimum), float(maximum))
-        high = max(float(minimum), float(maximum))
-        span = high - low
-        if span <= 0:
-            return [_round_mm(low)]
-        inset = min(max(margin, span * 0.18), span / 3)
-        lanes = [_round_mm(low + inset), _round_mm(high - inset)]
-        return list(dict.fromkeys(lanes))
-
-    def probe_coordinate_limit(axis: str) -> tuple[float, float]:
-        if axis == "x":
-            return nozzle_min_x + x_offset, nozzle_max_x + x_offset
-        return nozzle_min_y + y_offset, nozzle_max_y + y_offset
-
-    async def probe_edge_candidate(
-        edge_name: str,
-        axis: str,
-        moving_probe_coord: float,
-        fixed_probe_coord: float,
-        attempt_number: int,
-        phase: str,
-        lane_number: int,
-    ) -> bool:
-        probe_x = moving_probe_coord if axis == "x" else fixed_probe_coord
-        probe_y = fixed_probe_coord if axis == "x" else moving_probe_coord
-        nozzle_x = probe_x - x_offset
-        nozzle_y = probe_y - y_offset
-        attempt = {
-            "edge": edge_name,
-            "axis": axis,
-            "lane": lane_number,
-            "phase": phase,
-            "attempt": attempt_number,
-            "nozzle_x": _round_mm(nozzle_x),
-            "nozzle_y": _round_mm(nozzle_y),
-            "probe_x": _round_mm(probe_x),
-            "probe_y": _round_mm(probe_y),
-        }
-
-        if nozzle_x < nozzle_min_x or nozzle_x > nozzle_max_x or nozzle_y < nozzle_min_y or nozzle_y > nozzle_max_y:
-            attempt["status"] = "skipped_nozzle_limit"
-            attempts.append(attempt)
-            return False
-
-        probe_result = await _try_probe_reach_point(
-            node,
-            printer.moonraker_port,
-            nozzle_x,
-            nozzle_y,
-            safe_z,
-            lift_feed,
-            move_feed,
-        )
-        if probe_result["success"]:
-            attempt["status"] = "success"
-            attempts.append(attempt)
-            return True
-
-        attempt["status"] = "probe_failed"
-        attempt["error"] = probe_result.get("error")
-        attempts.append(attempt)
-        followup_status = await _fetch_motion_status(node, printer.moonraker_port)
-        followup_state = str((followup_status.get("webhooks") or {}).get("state") or "").lower()
-        if followup_state != "ready":
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": "Probe failed and Klipper is no longer ready. Retract/recover the printer before trying again.",
-                    "attempts": attempts,
-                },
-            )
-        return False
-
-    async def search_edge_lane(edge_name: str, axis: str, field_name: str, outward_direction: int, fixed_probe_coord: float, lane_number: int) -> float:
-        probe_min_limit, probe_max_limit = probe_coordinate_limit(axis)
-        probe_min_limit = max(probe_min_limit, -bed_width if axis == "x" else -bed_height)
-        probe_max_limit = min(probe_max_limit, bed_width * 2 if axis == "x" else bed_height * 2)
-        candidate = _round_mm(_clamp(float(suggested[field_name]), probe_min_limit, probe_max_limit))
-        last_success = None
-        first_failure = None
-        attempt_number = 1
-
-        while attempt_number <= max_attempts:
-            success = await probe_edge_candidate(edge_name, axis, candidate, fixed_probe_coord, attempt_number, "find-safe-start", lane_number)
-            if success:
-                last_success = candidate
-                attempt_number += 1
-                break
-            first_failure = candidate
-            candidate = _round_mm(_clamp(candidate - outward_direction * step, probe_min_limit, probe_max_limit))
-            attempt_number += 1
-
-        if last_success is None:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": f"Could not find a safe starting point for the {edge_name} edge.",
-                    "attempts": attempts,
-                },
-            )
-
-        first_failure = None
-        candidate = _round_mm(_clamp(last_success + outward_direction * step, probe_min_limit, probe_max_limit))
-        while attempt_number <= max_attempts:
-            if candidate == last_success:
-                return _round_mm(last_success)
-            success = await probe_edge_candidate(edge_name, axis, candidate, fixed_probe_coord, attempt_number, "coarse-edge", lane_number)
-            if success:
-                last_success = candidate
-                next_candidate = _round_mm(_clamp(candidate + outward_direction * step, probe_min_limit, probe_max_limit))
-                if next_candidate == candidate:
-                    return _round_mm(last_success)
-                candidate = next_candidate
-                attempt_number += 1
-                continue
-            first_failure = candidate
-            break
-
-        if first_failure is None:
-            return _round_mm(last_success)
-
-        fine_candidate = _round_mm(_clamp(last_success + outward_direction * fine_step, min(last_success, first_failure), max(last_success, first_failure)))
-        fine_attempt = 1
-        max_fine_attempts = int(max(2, abs(first_failure - last_success) / fine_step)) + 2
-        while fine_attempt <= max_fine_attempts:
-            if fine_candidate == last_success or (outward_direction < 0 and fine_candidate <= first_failure) or (outward_direction > 0 and fine_candidate >= first_failure):
-                return _round_mm(last_success)
-            success = await probe_edge_candidate(edge_name, axis, fine_candidate, fixed_probe_coord, fine_attempt, "fine-edge", lane_number)
-            if success:
-                last_success = fine_candidate
-                fine_candidate = _round_mm(_clamp(fine_candidate + outward_direction * fine_step, min(last_success, first_failure), max(last_success, first_failure)))
-                fine_attempt += 1
-                continue
-            return _round_mm(last_success)
-
-        return _round_mm(last_success)
-
-    async def search_edge(edge_name: str, axis: str, field_name: str, outward_direction: int, lanes: List[float]) -> float:
-        lane_results = []
-        for lane_number, lane in enumerate(lanes, start=1):
-            lane_results.append(await search_edge_lane(edge_name, axis, field_name, outward_direction, lane, lane_number))
-        return _round_mm(max(lane_results) if outward_direction < 0 else min(lane_results))
-
-    x_edge_lanes = lane_values(float(suggested["mesh_min_y"]), float(suggested["mesh_max_y"]))
-    for edge_name, field_name, outward_direction in [
-        ("left", "mesh_min_x", -1),
-        ("right", "mesh_max_x", 1),
-    ]:
-        suggested[field_name] = await search_edge(edge_name, "x", field_name, outward_direction, x_edge_lanes)
-        successful_edges.append(edge_name)
-
-    y_edge_lanes = lane_values(float(suggested["mesh_min_x"]), float(suggested["mesh_max_x"]))
-    for edge_name, field_name, outward_direction in [
-        ("front", "mesh_min_y", -1),
-        ("back", "mesh_max_y", 1),
-    ]:
-        suggested[field_name] = await search_edge(edge_name, "y", field_name, outward_direction, y_edge_lanes)
-        successful_edges.append(edge_name)
-
-    if float(suggested["mesh_min_x"]) >= float(suggested["mesh_max_x"]) or float(suggested["mesh_min_y"]) >= float(suggested["mesh_max_y"]):
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": "Successful probe points collapsed the mesh area. Check probe offset and bed size.",
-                "attempts": attempts,
-            },
-        )
-
-    db.add(Event(
-        printer_id=printer.id,
-        node_id=node.id,
-        severity="info",
-        event_type="probe_reach_finder",
-        message=f"Found probe-safe mesh reach for printer {printer.name}",
-        details={"attempts": attempts, "suggested_bed_probe": suggested},
-    ))
-    await db.commit()
-    return {
-        "status": "success",
-        "message": "Probe reach finder completed. Mesh bounds were updated from successful edge probes.",
-        "suggested_bed_probe": suggested,
-        "attempts": attempts,
-        "successful_edges": successful_edges,
-    }
 
 @router.post("/{printer_id}/restart")
 async def restart_printer_services(printer_id: int, target: str = Body(..., embed=True), db: AsyncSession = Depends(get_db)):

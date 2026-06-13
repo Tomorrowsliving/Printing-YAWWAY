@@ -2,7 +2,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from .routers import nodes, printers, files, assignments, events, backups, websocket, settings, notifications, storage, slicer
+from .routers import nodes, printers, files, assignments, events, backups, websocket, settings, notifications, storage, slicer, filaments
 import logging
 import asyncio
 import datetime
@@ -47,6 +47,7 @@ api_router.include_router(settings.router)
 api_router.include_router(notifications.router)
 api_router.include_router(storage.router)
 api_router.include_router(slicer.router)
+api_router.include_router(filaments.router)
 
 # Include the API router in the app
 app.include_router(api_router)
