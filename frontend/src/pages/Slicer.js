@@ -5,7 +5,6 @@ import {
   Box,
   CheckCircle2,
   ClipboardList,
-  Copy,
   Cpu,
   FileBox,
   Gauge,
@@ -94,19 +93,20 @@ const Slicer = ({ addToast }) => {
   const [savingSettings, setSavingSettings] = useState(false);
   const [creatingProfile, setCreatingProfile] = useState(false);
   const [startingJob, setStartingJob] = useState(false);
+  const [installingSlicer, setInstallingSlicer] = useState(false);
   const [confirmAction, setConfirmAction] = useState(null);
 
   const refresh = useCallback(async () => {
-    const [printerRes, settingsRes, healthRes, modelRes, profileRes, spoolRes, jobRes, installRes] = await Promise.all([
+    const [printerRes, settingsRes, healthRes, modelRes, profileRes, spoolRes, installRes] = await Promise.all([
       axios.get('/api/printers'),
       axios.get('/api/slicer/settings'),
       axios.get('/api/slicer/health'),
       axios.get('/api/slicer/models'),
       axios.get('/api/slicer/profiles'),
       axios.get('/api/filaments/spools'),
-      axios.get('/api/slicer/jobs'),
       axios.get('/api/slicer/install-info'),
     ]);
+    const jobRes = await axios.get('/api/slicer/jobs').catch(() => ({ data: [] }));
     setPrinters(printerRes.data || []);
     setSettings(settingsRes.data || { orca_binary_path: '' });
     setHealth(healthRes.data || null);
@@ -214,11 +214,17 @@ const Slicer = ({ addToast }) => {
     }
   };
 
-  const copyInstallCommand = async () => {
-    const command = installInfo?.live_example || installInfo?.install_command;
-    if (!command) return;
-    await navigator.clipboard.writeText(command);
-    addToast('Install command copied', 'success');
+  const installSlicerEngine = async () => {
+    setInstallingSlicer(true);
+    try {
+      const res = await axios.post('/api/slicer/install');
+      addToast(res.data?.success ? 'OrcaSlicer installed on the server' : 'OrcaSlicer install finished with warnings', res.data?.success ? 'success' : 'info');
+      await refresh();
+    } catch (err) {
+      addToast(err.response?.data?.detail || 'OrcaSlicer install failed. Check server internet access and central storage permissions.', 'error');
+    } finally {
+      setInstallingSlicer(false);
+    }
   };
 
   const uploadModel = async (event) => {
@@ -704,16 +710,23 @@ const Slicer = ({ addToast }) => {
             </div>
             {installInfo && !health?.available && (
               <div className="rounded-lg border border-slate-700 bg-slate-950 p-3">
-                <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="mb-3 space-y-1">
                   <p className="text-[10px] font-bold uppercase text-slate-500">Server install</p>
-                  <button onClick={copyInstallCommand} className="inline-flex items-center gap-1 rounded-md bg-slate-800 px-2 py-1 text-[10px] font-bold text-blue-300 hover:bg-slate-700">
-                    <Copy size={12} />
-                    Copy
-                  </button>
+                  <p className="text-xs leading-relaxed text-slate-400">
+                    Installs the official OrcaSlicer AppImage into central storage and updates the backend binary path.
+                  </p>
                 </div>
-                <code className="block break-all rounded-md bg-black/40 p-2 text-[11px] text-slate-300">
-                  {installInfo.live_example || installInfo.install_command}
-                </code>
+                <button
+                  onClick={installSlicerEngine}
+                  disabled={installingSlicer}
+                  className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-orange-600 text-sm font-bold hover:bg-orange-700 disabled:opacity-50"
+                >
+                  {installingSlicer ? <Loader2 size={16} className="animate-spin" /> : <Package size={16} />}
+                  {installingSlicer ? 'Installing OrcaSlicer...' : 'Install OrcaSlicer'}
+                </button>
+                <p className="mt-2 break-all text-[10px] text-slate-500">
+                  Target: {installInfo.recommended_backend_path}
+                </p>
               </div>
             )}
             <button onClick={saveSettings} disabled={savingSettings} className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-bold hover:bg-blue-700 disabled:opacity-50">

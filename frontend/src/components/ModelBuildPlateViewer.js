@@ -119,6 +119,18 @@ const loadModel = (model, url) => new Promise((resolve, reject) => {
   reject(new Error('Unsupported model format'));
 });
 
+const previewErrorMessage = (err) => {
+  const message = String(err?.message || '');
+  const lower = message.toLowerCase();
+  if (message.includes('404') || lower.includes('not found')) {
+    return 'Model file not found in central storage. Upload the STL or 3MF file again, then select the new model.';
+  }
+  if (lower.includes('unsupported')) {
+    return 'This model format cannot be previewed yet. Upload an STL or 3MF file.';
+  }
+  return 'Model preview failed. Check that the file is still available in central storage.';
+};
+
 const ModelBuildPlateViewer = ({ model, printer, viewPreset }) => {
   const mountRef = useRef(null);
   const [error, setError] = useState('');
@@ -196,7 +208,7 @@ const ModelBuildPlateViewer = ({ model, printer, viewPreset }) => {
         setDimensions(nextDimensions);
       })
       .catch((err) => {
-        if (!disposed) setError(err?.message || 'Preview failed');
+        if (!disposed) setError(previewErrorMessage(err));
       });
 
     let animationFrame = 0;

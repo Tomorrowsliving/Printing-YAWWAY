@@ -7,6 +7,7 @@ import asyncio
 import datetime
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -14,6 +15,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import requests
 from ..database import AsyncSessionLocal, get_db
 from ..models import Event, FilamentSpool, Printer, SlicerJob, SlicerModel, SlicerProfile
 from ..schemas import SlicerBatchJobCreate, SlicerJob as SlicerJobSchema
@@ -37,6 +39,9 @@ DEFAULT_ORCA_PATHS = [
     "/usr/local/bin/OrcaSlicer",
     "/usr/bin/OrcaSlicer",
 ]
+ORCA_INSTALL_LOCK = asyncio.Lock()
+ORCA_REPO = "OrcaSlicer/OrcaSlicer"
+ORCA_BACKEND_PATH = "/mnt/klipper-farm/tools/orca-slicer/orca-slicer"
 
 
 def _detected_orca_path():
@@ -58,6 +63,14 @@ def _safe_stem(value: str):
     stem = Path(value or "slice").stem
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._-")
     return stem or "slice"
+
+
+def _model_file_available(model: SlicerModel):
+    return bool(
+        model.file_path
+        and is_path_within(model.file_path, MODELS_ROOT)
+        and os.path.exists(model.file_path)
+    )
 
 
 def _unique_gcode_path(output_dir: str, model: SlicerModel, printer: Printer):
@@ -87,6 +100,149 @@ def _save_settings(data: dict):
     with open(SLICER_SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(current, f, indent=2)
     return current
+
+
+def _orca_arch_pattern():
+    machine = platform.machine().lower()
+    if machine in {"x86_64", "amd64"}:
+        return "x86_64"
+    if machine in {"aarch64", "arm64"}:
+        return "aarch64"
+    raise RuntimeError(f"Unsupported architecture for OrcaSlicer AppImage: {machine}")
+
+
+def _select_orca_asset(release: dict):
+    arch = _orca_arch_pattern()
+    matches = []
+    for asset in release.get("assets", []):
+        name = asset.get("name") or ""
+        url = asset.get("browser_download_url") or ""
+        lower = name.lower()
+        if not url or not lower.endswith(".appimage") or "linux" not in lower:
+            continue
+        score = 0
+        if arch == "x86_64":
+            if "aarch64" in lower or "arm64" in lower:
+                continue
+            score += 10
+        else:
+            if not ("aarch64" in lower or "arm64" in lower):
+                continue
+            score += 10
+        if "ubuntu2404" in lower:
+            score += 3
+        if "ubuntu" in lower:
+            score += 2
+        matches.append((score, name, url))
+    matches.sort(reverse=True)
+    if not matches:
+        raise RuntimeError("No Linux AppImage asset found in the latest OrcaSlicer release.")
+    return {"name": matches[0][1], "url": matches[0][2]}
+
+
+def _validate_appimage_arch(path: str):
+    machine = platform.machine().lower()
+    with open(path, "rb") as f:
+        header = f.read(20)
+    if len(header) < 20 or header[:4] != b"\x7fELF":
+        raise RuntimeError("Downloaded OrcaSlicer asset is not an ELF AppImage.")
+    elf_machine = int.from_bytes(header[18:20], "little")
+    if machine in {"x86_64", "amd64"} and elf_machine != 62:
+        raise RuntimeError("Downloaded OrcaSlicer AppImage is not the x86_64 build.")
+    if machine in {"aarch64", "arm64"} and elf_machine != 183:
+        raise RuntimeError("Downloaded OrcaSlicer AppImage is not the ARM64 build.")
+
+
+def _download_file(url: str, target: str):
+    with requests.get(url, stream=True, timeout=(15, 120)) as response:
+        response.raise_for_status()
+        with open(target, "wb") as f:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+
+
+def _write_orca_wrapper(wrapper_path: str):
+    wrapper = """#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APPDIR="$ROOT/squashfs-root"
+HOME_ROOT="${ORCA_SLICER_HOME:-/mnt/klipper-farm/tools/orca-slicer/home}"
+
+mkdir -p "$HOME_ROOT" "$HOME_ROOT/.config" "$HOME_ROOT/.cache"
+export HOME="$HOME_ROOT"
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME_ROOT/.config}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME_ROOT/.cache}"
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}"
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+
+if command -v xvfb-run >/dev/null 2>&1; then
+  exec xvfb-run -a "$APPDIR/AppRun" "$@"
+fi
+
+exec "$APPDIR/AppRun" "$@"
+"""
+    with open(wrapper_path, "w", encoding="utf-8") as f:
+        f.write(wrapper)
+    os.chmod(wrapper_path, 0o755)
+
+
+def _install_orca_slicer():
+    install_dir = os.path.join(STORAGE_ROOT, "tools", "orca-slicer")
+    download_dir = os.path.join(install_dir, "downloads")
+    appimage_path = os.path.join(download_dir, "OrcaSlicer.AppImage")
+    extract_dir = os.path.join(install_dir, "squashfs-root")
+    wrapper_path = os.path.join(install_dir, "orca-slicer")
+
+    os.makedirs(download_dir, exist_ok=True)
+    os.makedirs(SETTINGS_DIR, exist_ok=True)
+
+    release_url = f"https://api.github.com/repos/{ORCA_REPO}/releases/latest"
+    release_response = requests.get(release_url, timeout=(15, 60))
+    release_response.raise_for_status()
+    release = release_response.json()
+    asset = _select_orca_asset(release)
+
+    _download_file(asset["url"], appimage_path)
+    os.chmod(appimage_path, 0o755)
+    _validate_appimage_arch(appimage_path)
+
+    if os.path.exists(extract_dir):
+        shutil.rmtree(extract_dir)
+    result = subprocess.run(
+        [appimage_path, "--appimage-extract"],
+        cwd=install_dir,
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "AppImage extraction failed").strip())
+
+    _write_orca_wrapper(wrapper_path)
+    settings = _save_settings({"orca_binary_path": ORCA_BACKEND_PATH})
+    health_result = subprocess.run(
+        [wrapper_path, "--help"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    health_output = (health_result.stdout or health_result.stderr or "").strip()
+    health_available = health_result.returncode == 0 and ("OrcaSlicer" in health_output or "orca-slicer" in health_output.lower())
+    return {
+        "success": health_available,
+        "installed": True,
+        "asset": asset["name"],
+        "download_url": asset["url"],
+        "backend_path": ORCA_BACKEND_PATH,
+        "storage_root": STORAGE_ROOT,
+        "settings": settings,
+        "health_check": {
+            "returncode": health_result.returncode,
+            "output": health_output.splitlines()[:5],
+        },
+    }
 
 
 def _printer_gcode_dir(printer: Printer):
@@ -228,14 +384,13 @@ async def slicer_health():
 @router.get("/install-info")
 async def slicer_install_info():
     storage_root = STORAGE_ROOT
-    shared_runner = "/mnt/klipper-farm/tools/orca-slicer/orca-slicer"
     host_storage_hint = os.getenv("HOST_STORAGE_ROOT") or "<host-storage-root>"
     return {
         "engine": "OrcaSlicer",
         "licence": "AGPL-3.0",
         "official_repository": "https://github.com/OrcaSlicer/OrcaSlicer",
         "official_releases": "https://github.com/OrcaSlicer/OrcaSlicer/releases",
-        "recommended_backend_path": shared_runner,
+        "recommended_backend_path": ORCA_BACKEND_PATH,
         "storage_root": storage_root,
         "install_command": f"sudo bash scripts/install-orca-slicer.sh --storage-root {host_storage_hint}",
         "live_example": "sudo bash scripts/install-orca-slicer.sh --storage-root /data/compose/16/storage",
@@ -247,6 +402,52 @@ async def slicer_install_info():
             "The backend image includes the headless Linux runtime libraries required by the AppImage.",
         ],
     }
+
+
+@router.post("/install")
+async def install_slicer_engine(db: AsyncSession = Depends(get_db)):
+    if ORCA_INSTALL_LOCK.locked():
+        raise HTTPException(status_code=409, detail="OrcaSlicer install is already running. Wait for it to finish, then refresh.")
+
+    async with ORCA_INSTALL_LOCK:
+        db.add(Event(
+            severity="info",
+            event_type="slicer_install_started",
+            message="OrcaSlicer server install started",
+            details={"storage_root": STORAGE_ROOT, "backend_path": ORCA_BACKEND_PATH},
+        ))
+        await db.commit()
+        try:
+            result = await asyncio.to_thread(_install_orca_slicer)
+        except Exception as exc:
+            db.add(Event(
+                severity="error",
+                event_type="slicer_install_failed",
+                message=f"OrcaSlicer server install failed: {exc}",
+                details={
+                    "what_failed": "OrcaSlicer server install",
+                    "likely_cause": "The backend could not download the official AppImage, extract it, or write to central storage.",
+                    "suggested_fix": "Check internet access from the server, free space, and write permissions on central storage, then try Install OrcaSlicer again.",
+                    "error": str(exc),
+                },
+            ))
+            await db.commit()
+            raise HTTPException(status_code=500, detail=f"OrcaSlicer install failed: {exc}")
+
+        install_ready = bool(result.get("success"))
+        db.add(Event(
+            severity="info" if install_ready else "warning",
+            event_type="slicer_install_succeeded" if install_ready else "slicer_install_warning",
+            message="OrcaSlicer server install completed" if install_ready else "OrcaSlicer server install completed but health check needs attention",
+            details={
+                "asset": result.get("asset"),
+                "backend_path": result.get("backend_path"),
+                "storage_root": result.get("storage_root"),
+                "health_check": result.get("health_check"),
+            },
+        ))
+        await db.commit()
+        return result
 
 
 @router.get("/profiles", response_model=list[SlicerProfileSchema])
@@ -294,7 +495,7 @@ async def delete_profile(profile_id: int, db: AsyncSession = Depends(get_db)):
 @router.get("/models", response_model=list[SlicerModelSchema])
 async def list_models(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(SlicerModel).order_by(desc(SlicerModel.created_at)))
-    return result.scalars().all()
+    return [model for model in result.scalars().all() if _model_file_available(model)]
 
 
 @router.post("/models/upload")
@@ -343,8 +544,16 @@ async def download_model(model_id: int, db: AsyncSession = Depends(get_db)):
     row = result.scalar_one_or_none()
     if not row:
         raise HTTPException(status_code=404, detail="Model not found")
-    if not row.file_path or not is_path_within(row.file_path, MODELS_ROOT) or not os.path.exists(row.file_path):
-        raise HTTPException(status_code=404, detail="Model file not found")
+    if not _model_file_available(row):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": "Model file not found in central storage",
+                "what_failed": "Slicer model download",
+                "likely_cause": "The model database record points to a file that no longer exists under /mnt/klipper-farm/models.",
+                "suggested_fix": "Upload the STL or 3MF file again, then select the new model from the Slicer page.",
+            },
+        )
     return FileResponse(row.file_path, filename=row.filename, media_type="application/octet-stream")
 
 

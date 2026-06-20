@@ -190,7 +190,7 @@ class SlicerBatchJobCreate(BaseModel):
 class SlicerJob(BaseModel):
     id: int
     model_id: int
-    printer_id: int
+    printer_id: Optional[int] = None
     printer_profile_id: Optional[int] = None
     filament_profile_id: Optional[int] = None
     process_profile_id: Optional[int] = None
