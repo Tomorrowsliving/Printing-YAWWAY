@@ -787,7 +787,6 @@ const NodeOverview = ({ addToast }) => {
           const serviceInstances = inventory.service_instances || node.service_instances || [];
           const lastReboot = latestNodeEvent(node.id, (type) => type === 'node_reboot');
           const lastInstall = latestNodeEvent(node.id, (type) => type.includes('install') || type.includes('software'));
-          const lastNfs = latestNodeEvent(node.id, (type) => type.includes('storage') || type.includes('nfs'));
           const lastUpdate = latestNodeEvent(node.id, (type) => type.includes('node_update'));
           const warnings = [
             /zero 2/i.test(node.model || '') ? 'Pi Zero 2 W: avoid webcams or multiple printers on this node.' : null,
@@ -822,7 +821,6 @@ const NodeOverview = ({ addToast }) => {
                 { label: 'Last update', value: node.last_update_status || 'Never', helper: node.last_update_at ? formatDateTime(node.last_update_at) : lastUpdate?.message },
                 { label: 'Last reboot', value: lastReboot ? formatLastSeen(lastReboot.created_at) : 'Never', helper: lastReboot?.message },
                 { label: 'Last install', value: lastInstall ? formatLastSeen(lastInstall.created_at) : 'Never', helper: lastInstall?.message },
-                { label: 'Last NFS mount', value: lastNfs ? formatLastSeen(lastNfs.created_at) : (storage.checked_at ? formatLastSeen(storage.checked_at) : 'Never'), helper: lastNfs?.message || storage.error },
               ]}
               className="grid-cols-2"
             />
