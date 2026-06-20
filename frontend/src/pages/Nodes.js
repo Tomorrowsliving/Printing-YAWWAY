@@ -51,6 +51,10 @@ const LOCAL_ACTION_DETAILS = {
   approve: { label: 'Approving', message: 'Approving this node and queueing storage auto-connect.' },
   refresh: { label: 'Refreshing', message: 'Checking the node health and current agent details.' },
   'mount-nfs': OPERATION_DETAILS.nfs_mounting,
+  'update-and-mount': {
+    label: 'Updating + NFS',
+    message: 'Updating the node agent, retrying once if needed, then testing NFS storage again.'
+  },
   'update-agent': OPERATION_DETAILS.node_updating,
   'restart-agent': OPERATION_DETAILS.agent_restarting,
   reboot: OPERATION_DETAILS.node_rebooting,
@@ -62,6 +66,7 @@ const ACTION_MIN_VISIBLE_MS = {
   approve: 1200,
   delete: 900,
   'mount-nfs': 1600,
+  'update-and-mount': 2200,
   'update-agent': 1600,
   'restart-agent': 1400,
   reboot: 1600,
@@ -499,7 +504,8 @@ const NodeOverview = ({ addToast }) => {
         'restart-agent': { url: `/api/nodes/${nodeId}/restart-agent`, label: 'Agent restart' },
         'reboot': { url: `/api/nodes/${nodeId}/reboot`, label: 'Node reboot' },
         'restart-services': { url: `/api/nodes/${nodeId}/restart-services`, label: 'Service restart' },
-        'mount-nfs': { url: `/api/nodes/${nodeId}/storage/mount`, label: 'NFS mount' }
+        'mount-nfs': { url: `/api/nodes/${nodeId}/storage/mount`, label: 'NFS mount' },
+        'update-and-mount': { url: `/api/nodes/${nodeId}/storage/update-and-mount`, label: 'Update and NFS retry' }
     };
 
     const config = actionMap[action];
@@ -507,14 +513,14 @@ const NodeOverview = ({ addToast }) => {
     setNodeAction(nodeId, action);
     try {
         const res = await axios.post(config.url);
-        if (action === 'mount-nfs' && res.data.success === false) {
-             addToast(res.data.message || "Mount failed", "error");
+        if ((action === 'mount-nfs' || action === 'update-and-mount') && res.data.success === false) {
+             addToast(res.data.message || `${config.label} failed`, "error");
         } else {
-             addToast(`${config.label} initiated`, "success");
+             addToast(action === 'update-and-mount' ? (res.data.message || 'Node updated and NFS retry completed') : `${config.label} initiated`, "success");
         }
 
         // Immediate refresh for storage actions
-        if (action === 'mount-nfs') {
+        if (action === 'mount-nfs' || action === 'update-and-mount') {
             const node = nodes.find(n => n.id === nodeId);
             if (node) fetchNodeStorage(node);
         }
@@ -610,6 +616,18 @@ const NodeOverview = ({ addToast }) => {
           'The current agent version will be replaced if an update is available.',
           'The node may disconnect while dependencies install and services restart.',
           'The result stays visible on the node card until the next update.',
+        ],
+        confirmVariant: 'warning',
+      },
+      'update-and-mount': {
+        title: 'Update & Retry NFS',
+        actionLabel: 'Update & Retry',
+        description: `Update the node agent on ${nodeName}, retry the update once if it fails, then try the NFS mount again.`,
+        consequences: [
+          'The dashboard will run the node-agent update.',
+          'If the first update fails, it will automatically try one more time.',
+          'If the update succeeds, the dashboard will retry the NFS storage mount.',
+          'The node may briefly appear offline while the agent restarts.',
         ],
         confirmVariant: 'warning',
       },
@@ -742,7 +760,11 @@ const NodeOverview = ({ addToast }) => {
           const showOperationPanel = operation && operation.operation !== 'refresh';
           const actionDisabled = isNodeBusy(node.id) || Boolean(node.active_operation);
           const storage = storageStatus[node.id] || {};
-          const storageBusy = operation?.operation === 'nfs_mounting' || nodeAction(node.id) === 'mount-nfs';
+          const storageBusy = operation?.operation === 'nfs_mounting' || ['mount-nfs', 'update-and-mount'].includes(nodeAction(node.id));
+          const recoveryBusy = nodeAction(node.id) === 'update-and-mount';
+          const latestStorageRecoveryEvent = latestNodeEvent(node.id, (type) => type === 'node_storage_auto_mount' || type === 'node_storage_recovery_failed');
+          const storageRecoveryRecommended = node.approved && !storage.nfs_available && Boolean(latestStorageRecoveryEvent);
+          const storageRecoveryMessage = latestStorageRecoveryEvent?.details?.suggested_fix || latestStorageRecoveryEvent?.message;
           const nodeLooksOnline = node.online || Boolean(operation);
           const statusMeta = nodeStatusMeta(node, operation);
           const iconClass = operation
@@ -905,19 +927,33 @@ const NodeOverview = ({ addToast }) => {
 
                   {node.approved && !storage.nfs_available && (
                     <p className="text-[9px] text-orange-200/80 leading-tight">
-                      {storageBusy ? 'Auto-connect is running now. Health checks may pause while the mount is created.' : 'Auto-connect runs after approval and each node boot. Use the button to retry now.'}
+                      {storageBusy
+                        ? 'Recovery is running now. Health checks may pause while the node updates or mounts storage.'
+                        : storageRecoveryRecommended
+                          ? (storageRecoveryMessage || 'Auto-connect failed. Update the node agent and retry NFS.')
+                          : 'Auto-connect runs after approval and each node boot. If it fails, update the node agent and retry NFS.'}
                     </p>
                   )}
 
                   {(!storage.nfs_available && node.approved) && (
-                    <button
-                      onClick={() => requestNodeAction(node, 'mount-nfs')}
-                      disabled={actionDisabled || storageBusy}
-                      className="w-full py-1 bg-orange-600/20 hover:bg-orange-600/40 text-orange-400 text-[10px] font-bold rounded border border-orange-500/30 transition-colors flex items-center justify-center space-x-1"
-                    >
-                      {storageBusy ? <Loader2 size={10} className="animate-spin" /> : <HardDrive size={10} />}
-                      <span>{storageBusy ? 'Testing...' : 'Test NFS Connection'}</span>
-                    </button>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      <button
+                        onClick={() => requestNodeAction(node, 'mount-nfs')}
+                        disabled={actionDisabled || storageBusy}
+                        className="w-full py-1 bg-orange-600/20 hover:bg-orange-600/40 text-orange-400 text-[10px] font-bold rounded border border-orange-500/30 transition-colors flex items-center justify-center space-x-1"
+                      >
+                        {storageBusy && !recoveryBusy ? <Loader2 size={10} className="animate-spin" /> : <HardDrive size={10} />}
+                        <span>{storageBusy && !recoveryBusy ? 'Testing...' : 'Test NFS'}</span>
+                      </button>
+                      <button
+                        onClick={() => requestNodeAction(node, 'update-and-mount')}
+                        disabled={actionDisabled || storageBusy}
+                        className="w-full py-1 bg-blue-600/20 hover:bg-blue-600/40 text-blue-300 text-[10px] font-bold rounded border border-blue-500/30 transition-colors flex items-center justify-center space-x-1"
+                      >
+                        {recoveryBusy ? <Loader2 size={10} className="animate-spin" /> : <ArrowUpCircle size={10} />}
+                        <span>{recoveryBusy ? 'Updating...' : 'Update & Retry'}</span>
+                      </button>
+                    </div>
                   )}
 
                   {storage.error && !storage.mounted && !storageBusy && (

@@ -197,6 +197,53 @@ def _storage_mount_payload(server_ip: str):
         "persistent": True,
     }
 
+def _agent_url(node: Node, path: str):
+    return f"http://{node.ip_address}:{node.agent_port}{path}"
+
+async def _wait_for_node_health(node: Node, timeout_seconds: int = 45):
+    deadline = time.monotonic() + timeout_seconds
+    last_error = None
+    async with httpx.AsyncClient() as client:
+        while time.monotonic() < deadline:
+            try:
+                res = await client.get(_agent_url(node, "/health"), timeout=3)
+                if res.status_code == 200:
+                    return {"ready": True, "health": res.json()}
+                last_error = f"HTTP {res.status_code}"
+            except Exception as e:
+                last_error = str(e)
+            await asyncio.sleep(3)
+    return {"ready": False, "error": last_error or "Timed out waiting for node health"}
+
+async def _post_node_update(node: Node, timeout_seconds: int = 90):
+    async with httpx.AsyncClient() as client:
+        res = await client.post(_agent_url(node, "/update"), timeout=timeout_seconds)
+    try:
+        payload = res.json()
+    except Exception:
+        payload = {"success": False, "status": "failed", "message": res.text}
+    if res.status_code >= 400:
+        payload["success"] = False
+        payload.setdefault("status", "failed")
+        payload.setdefault("message", f"Node-agent returned HTTP {res.status_code}")
+    return payload
+
+async def _post_node_storage_mount(node: Node, server_ip: str):
+    async with httpx.AsyncClient() as client:
+        res = await client.post(
+            _agent_url(node, "/storage/mount"),
+            json=_storage_mount_payload(server_ip),
+            timeout=360,
+        )
+    try:
+        payload = res.json()
+    except Exception:
+        payload = {"success": False, "message": res.text}
+    if res.status_code >= 400:
+        payload["success"] = False
+        payload.setdefault("message", f"Node-agent returned HTTP {res.status_code}")
+    return payload
+
 async def auto_mount_node_storage(node_id: int, hostname: str, ip_address: str, agent_port: int, server_ip: str, reason: str):
     if not server_ip or not ip_address or not agent_port:
         return
@@ -245,12 +292,20 @@ async def auto_mount_node_storage(node_id: int, hostname: str, ip_address: str, 
             if mount_res.status_code >= 400 or mount_data.get("success") is False:
                 event_severity = "warning"
                 event_message = mount_data.get("message") or f"NFS storage auto-connect failed for {hostname}"
+                details["what_failed"] = "NFS storage auto-connect"
+                details["likely_cause"] = "Node-agent is out of date, NFS helpers are missing, or the mount path/export is not reachable"
+                details["suggested_fix"] = "Use Update & Retry NFS on the node card. The dashboard will retry the update once, then try the NFS mount again."
+                details["recommended_action"] = "update_and_retry_nfs"
             else:
                 event_message = mount_data.get("message") or event_message
     except Exception as e:
         event_severity = "warning"
         event_message = f"NFS storage auto-connect failed for {hostname}: {e}"
         details["error"] = str(e)
+        details["what_failed"] = "NFS storage auto-connect"
+        details["likely_cause"] = "Node-agent was unreachable or did not complete the mount command"
+        details["suggested_fix"] = "Use Update & Retry NFS on the node card. The dashboard will retry the update once, then try the NFS mount again."
+        details["recommended_action"] = "update_and_retry_nfs"
     finally:
         AUTO_MOUNT_IN_FLIGHT.discard(node_id)
         clear_node_operation(node_id, "nfs_mounting")
@@ -1030,6 +1085,156 @@ async def proxy_storage_mount(node_id: int, request: Request, db: AsyncSession =
         raise HTTPException(status_code=502, detail=f"Could not reach node agent at {url}")
     finally:
         clear_node_operation(node.id, "nfs_mounting")
+
+@router.post("/{node_id}/storage/update-and-mount")
+async def update_agent_and_retry_storage(node_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    """Operator-approved recovery: update node-agent, retry update once on failure, then retry NFS mount."""
+    node = await get_node_or_404(node_id, db)
+    server_ip = get_nfs_server_host(request)
+    if not server_ip:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not auto-detect the dashboard LAN host. Open the dashboard using its LAN IP/hostname, or set NFS_SERVER_HOST in .env.",
+        )
+
+    attempts = []
+    update_result = None
+    set_node_operation(
+        node.id,
+        "node_updating",
+        "Updating node-agent before retrying NFS storage. If the first update fails, the dashboard will retry once.",
+        ttl_seconds=540,
+    )
+    db.add(Event(
+        node_id=node.id,
+        severity="info",
+        event_type="node_storage_recovery_started",
+        message=f"Update and NFS retry started for node {node.hostname}",
+        details={"server": server_ip, "max_update_attempts": 2},
+    ))
+    await db.commit()
+
+    try:
+        for attempt_number in (1, 2):
+            try:
+                update_result = await _post_node_update(node)
+            except Exception as e:
+                update_result = {
+                    "success": False,
+                    "status": "failed",
+                    "message": f"Update request failed: {e}",
+                    "error": str(e),
+                }
+            update_result["attempt"] = attempt_number
+            attempts.append(update_result)
+
+            node.last_update_status = update_result.get("status", "failed")
+            node.last_update_message = update_result.get("message", "No message provided")
+            node.last_update_at = utcnow()
+            if update_result.get("success"):
+                break
+
+            db.add(Event(
+                node_id=node.id,
+                severity="warning",
+                event_type="node_update_retry",
+                message=f"Node-agent update attempt {attempt_number} failed for {node.hostname}: {node.last_update_message}",
+                details={
+                    "attempt": attempt_number,
+                    "will_retry": attempt_number == 1,
+                    "status": node.last_update_status,
+                    "message": node.last_update_message,
+                },
+            ))
+            await db.commit()
+            if attempt_number == 1:
+                await asyncio.sleep(3)
+
+        if not update_result or not update_result.get("success"):
+            node.status = "error"
+            db.add(Event(
+                node_id=node.id,
+                severity="error",
+                event_type="node_storage_recovery_failed",
+                message=f"Update and NFS retry failed for {node.hostname}: update failed twice",
+                details={
+                    "what_failed": "Node-agent update before NFS retry",
+                    "likely_cause": "The node repo has local edits, Git cannot fast-forward, or the node cannot reach GitHub/Python package indexes",
+                    "suggested_fix": "Check node-agent logs or SSH into the node, resolve local repo changes, then run Update & Retry NFS again.",
+                    "attempts": attempts,
+                },
+            ))
+            await db.commit()
+            return {
+                "success": False,
+                "status": "update_failed",
+                "message": "Node-agent update failed twice. NFS mount was not retried.",
+                "update_attempts": attempts,
+            }
+
+        node.status = "online"
+        db.add(Event(
+            node_id=node.id,
+            severity="info",
+            event_type="node_update_succeeded",
+            message=f"Update succeeded before NFS retry for node {node.hostname}: {node.last_update_message}",
+            details={
+                "status": node.last_update_status,
+                "attempt": update_result.get("attempt"),
+                "restart_required": bool(update_result.get("restart_required")),
+                "timestamp": node.last_update_at.isoformat(),
+            },
+        ))
+        await db.commit()
+
+        restart_result = None
+        health_after_restart = None
+        if update_result.get("restart_required"):
+            try:
+                async with httpx.AsyncClient() as client:
+                    restart_res = await client.post(_agent_url(node, "/restart-agent"), timeout=5)
+                restart_result = restart_res.json() if restart_res.status_code == 200 else {"success": False, "message": restart_res.text}
+            except Exception as e:
+                restart_result = {"success": False, "message": str(e)}
+            health_after_restart = await _wait_for_node_health(node, timeout_seconds=45)
+
+        set_node_operation(
+            node.id,
+            "nfs_mounting",
+            "Retrying NFS storage after node-agent update.",
+            ttl_seconds=420,
+        )
+        mount_result = await _post_node_storage_mount(node, server_ip)
+        mount_success = mount_result.get("success") is not False
+        db.add(Event(
+            node_id=node.id,
+            severity="info" if mount_success else "warning",
+            event_type="node_storage_recovery_succeeded" if mount_success else "node_storage_recovery_failed",
+            message=(
+                f"Update and NFS retry completed for {node.hostname}"
+                if mount_success
+                else f"Update succeeded but NFS retry failed for {node.hostname}: {mount_result.get('message', 'Mount failed')}"
+            ),
+            details={
+                "update_attempts": attempts,
+                "restart": restart_result,
+                "health_after_restart": health_after_restart,
+                "mount": mount_result,
+                "server": server_ip,
+            },
+        ))
+        await db.commit()
+        return {
+            "success": mount_success,
+            "status": "mounted" if mount_success else "mount_failed",
+            "message": mount_result.get("message") or ("NFS retry completed" if mount_success else "NFS retry failed"),
+            "update_attempts": attempts,
+            "restart": restart_result,
+            "health_after_restart": health_after_restart,
+            "mount": mount_result,
+        }
+    finally:
+        clear_node_operation(node.id)
 
 @router.post("/{node_id}/instances/create")
 async def proxy_create_instance(node_id: int, request: Request, data: dict = Body(...), db: AsyncSession = Depends(get_db)):
