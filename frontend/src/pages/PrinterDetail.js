@@ -24,7 +24,10 @@ import {
 } from 'lucide-react';
 import { printerService } from '../services/api';
 import ConfigHelperCard from '../components/ConfigHelperCard';
+import { ConfirmActionModal } from '../components/UI';
+import { PageHeader, StatusPill, ToolbarButton } from '../components/DesignSystem';
 import axios from 'axios';
+import { explainApiError } from '../utils/operator';
 
 const WIDGET_SIZE_OPTIONS = [
   { id: '1x1', label: '1x1', cols: 1, rows: 1 },
@@ -214,6 +217,7 @@ const PrinterDetail = ({ addToast }) => {
   const [logs, setLogs] = useState('');
   const [logService, setLogService] = useState('');
   const [logsLoading, setLogsLoading] = useState(false);
+  const [confirmAction, setConfirmAction] = useState(null);
 
   const fetchPrinter = useCallback(async () => {
     try {
@@ -295,7 +299,7 @@ const PrinterDetail = ({ addToast }) => {
     if (settingsRequested) setSettingsOpen(true);
   }, [settingsRequested]);
 
-  const handleAction = async (name) => {
+  const performAction = async (name) => {
     const targetMap = {
       'Restart Klipper': 'klipper',
       'Restart Moonraker': 'moonraker',
@@ -304,12 +308,15 @@ const PrinterDetail = ({ addToast }) => {
     };
 
     if (name === 'Emergency Stop') {
-      if (!window.confirm('Send emergency stop to this printer?')) return;
       try {
         await axios.post(`/api/printers/${id}/emergency-stop`);
         addToast('Emergency stop sent', 'success');
       } catch (err) {
-        addToast(err.response?.data?.detail || 'Emergency stop failed', 'error');
+        addToast(explainApiError(err, {
+          what: 'Emergency stop failed',
+          cause: 'Moonraker did not accept the emergency stop command.',
+          fix: 'Use physical controls if the printer is unsafe, then check Moonraker connectivity.',
+        }), 'error');
       }
       return;
     }
@@ -320,14 +327,47 @@ const PrinterDetail = ({ addToast }) => {
       return;
     }
 
-    if (!window.confirm(`Initiate ${name}?`)) return;
-
     try {
       await axios.post(`/api/printers/${id}/restart`, { target });
       addToast(`${name} initiated`, "success");
     } catch (err) {
-      addToast(err.response?.data?.detail || "Action failed", "error");
+      addToast(explainApiError(err, {
+        what: `${name} failed`,
+        cause: 'The service restart command did not complete.',
+        fix: 'Check the assigned node, service names, and recent logs.',
+      }), "error");
     }
+  };
+
+  const handleAction = async (name) => {
+    if (name === 'Emergency Stop') {
+      setConfirmAction({
+        kind: 'action',
+        name,
+        title: 'Emergency Stop',
+        actionLabel: 'Send Emergency Stop',
+        description: `Send emergency stop to ${printer?.name || 'this printer'}.`,
+        consequences: [
+          'Klipper will stop printer motion immediately if Moonraker is reachable.',
+          'You may need a firmware restart before printing again.',
+          'Use physical controls if the printer is unsafe and this command cannot reach Moonraker.',
+        ],
+      });
+      return;
+    }
+    setConfirmAction({
+      kind: 'action',
+      name,
+      title: name,
+      actionLabel: 'Start Action',
+      description: `Initiate ${name} for ${printer?.name || 'this printer'}.`,
+      consequences: [
+        'Printer services may briefly disconnect.',
+        'Active prints can fail if Klipper, Moonraker, or firmware restarts.',
+        'Watch the status card and event log after starting.',
+      ],
+      confirmVariant: 'warning',
+    });
   };
 
   const savePrinterProfile = async () => {
@@ -377,8 +417,6 @@ const PrinterDetail = ({ addToast }) => {
   };
 
   const handleRepairMoonraker = async () => {
-    if (!window.confirm("Auto-fix printer config warnings and restart the affected printer services?")) return;
-
     setRepairingMoonraker(true);
     try {
       const res = await axios.post(`/api/printers/${id}/repair-moonraker`);
@@ -386,16 +424,19 @@ const PrinterDetail = ({ addToast }) => {
       await fetchPrinter();
       await fetchRuntime();
     } catch (err) {
-      addToast(err.response?.data?.detail || "Auto fix failed", "error");
+      addToast(explainApiError(err, {
+        what: 'Moonraker repair failed',
+        cause: 'The node-agent could not update config and restart affected services.',
+        fix: 'Check NFS write access, generated config paths, and node-agent logs.',
+      }), "error");
     } finally {
       setRepairingMoonraker(false);
     }
   };
 
-  const handleHomeAxis = async (axis) => {
+  const performHomeAxis = async (axis) => {
     const targetAxis = String(axis || '').toUpperCase();
     if (!['X', 'Y', 'Z'].includes(targetAxis)) return;
-    if (!window.confirm(`Home ${targetAxis} axis now?`)) return;
 
     setHomingAxis(targetAxis);
     try {
@@ -403,10 +444,55 @@ const PrinterDetail = ({ addToast }) => {
       addToast(`Homing ${targetAxis} axis`, "success");
       await fetchRuntime();
     } catch (err) {
-      addToast(err.response?.data?.detail || `Failed to home ${targetAxis} axis`, "error");
+      addToast(explainApiError(err, {
+        what: `Failed to home ${targetAxis} axis`,
+        cause: 'Moonraker did not accept the homing command.',
+        fix: 'Check endstops, printer state, and Moonraker connectivity.',
+      }), "error");
     } finally {
       setHomingAxis('');
     }
+  };
+
+  const handleHomeAxis = async (axis) => {
+    const targetAxis = String(axis || '').toUpperCase();
+    if (!['X', 'Y', 'Z'].includes(targetAxis)) return;
+    setConfirmAction({
+      kind: 'home',
+      axis: targetAxis,
+      title: `Home ${targetAxis} Axis`,
+      actionLabel: `Home ${targetAxis}`,
+      description: `Move ${printer?.name || 'this printer'} to home the ${targetAxis} axis.`,
+      consequences: [
+        'The printer will move immediately if Moonraker accepts the command.',
+        'Make sure the toolhead and bed are clear before continuing.',
+        'If a USB, MCU, or endstop issue exists, homing can fail.',
+      ],
+      confirmVariant: 'warning',
+    });
+  };
+
+  const requestRepairMoonraker = () => {
+    setConfirmAction({
+      kind: 'repair-moonraker',
+      title: 'Repair Moonraker Config',
+      actionLabel: 'Repair Config',
+      description: `Auto-fix Moonraker config warnings for ${printer?.name || 'this printer'} and restart affected services.`,
+      consequences: [
+        'A backup is created before config files are changed.',
+        'Moonraker and Klipper services may restart.',
+        'Review the event log if the printer does not return ready.',
+      ],
+      confirmVariant: 'warning',
+    });
+  };
+
+  const runConfirmedAction = async () => {
+    const action = confirmAction;
+    setConfirmAction(null);
+    if (action?.kind === 'action') await performAction(action.name);
+    if (action?.kind === 'home') await performHomeAxis(action.axis);
+    if (action?.kind === 'repair-moonraker') await handleRepairMoonraker();
   };
 
   const hideWidget = (widgetId) => {
@@ -593,7 +679,7 @@ const PrinterDetail = ({ addToast }) => {
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
             <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">Moonraker Warnings</p>
             <button
-              onClick={handleRepairMoonraker}
+              onClick={requestRepairMoonraker}
               disabled={repairingMoonraker || !printer.assigned_node_id}
               className="inline-flex items-center space-x-2 rounded-lg bg-amber-500/20 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-amber-100 transition-colors hover:bg-amber-500/30 disabled:cursor-not-allowed disabled:opacity-60"
             >
@@ -812,33 +898,34 @@ const PrinterDetail = ({ addToast }) => {
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center space-x-4">
-          <Link to="/" className="p-2 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors text-slate-400 hover:text-white">
-            <ArrowLeft size={20} />
+      <PageHeader
+        eyebrow="Printer Detail"
+        title={printer.name}
+        description={`Slug: ${printer.slug} | MCU: ${printer.mcu_serial || 'Not connected'}`}
+        actions={(
+          <>
+          <Link to="/" className="inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-4 text-sm font-bold text-slate-300 transition-colors hover:bg-slate-750 hover:text-white">
+            <ArrowLeft size={16} />
+            Fleet
           </Link>
-          <div>
-            <h2 className="text-2xl font-bold">{printer.name}</h2>
-            <p className="text-xs text-slate-500 font-mono mt-0.5">SLUG: {printer.slug} - MCU: {printer.mcu_serial || 'NOT CONNECTED'}</p>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
+          <StatusPill status={printer.status || 'offline'} />
+          <ToolbarButton
             onClick={toggleSettingsPanel}
-            className={`inline-flex items-center space-x-2 rounded-lg px-4 py-2 text-sm font-bold transition-colors ${settingsOpen ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20 hover:bg-blue-500' : 'bg-slate-800 text-slate-200 hover:bg-slate-700'}`}
+            icon={Settings}
+            variant={settingsOpen ? 'primary' : 'secondary'}
           >
-            <Settings size={17} />
-            <span>Printer Settings</span>
-          </button>
-          <button
+            Printer Settings
+          </ToolbarButton>
+          <ToolbarButton
             onClick={() => setLayoutOpen((value) => !value)}
-            className="inline-flex items-center space-x-2 rounded-lg bg-slate-800 px-4 py-2 text-sm font-bold text-slate-200 transition-colors hover:bg-slate-700"
+            icon={SlidersHorizontal}
+            variant="secondary"
           >
-            <SlidersHorizontal size={17} />
-            <span>Customize</span>
-          </button>
-        </div>
-      </div>
+            Customise
+          </ToolbarButton>
+          </>
+        )}
+      />
 
       {settingsOpen && (
         <div className={`${cardClass} p-5`}>
@@ -1074,6 +1161,19 @@ const PrinterDetail = ({ addToast }) => {
           );
         })}
       </div>
+
+      <ConfirmActionModal
+        isOpen={Boolean(confirmAction)}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={runConfirmedAction}
+        title={confirmAction?.title}
+        actionLabel={confirmAction?.actionLabel}
+        itemName={printer?.name}
+        description={confirmAction?.description}
+        consequences={confirmAction?.consequences || []}
+        confirmVariant={confirmAction?.confirmVariant || 'danger'}
+        busy={repairingMoonraker || Boolean(homingAxis)}
+      />
     </div>
   );
 };

@@ -18,6 +18,8 @@ import {
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import axios from 'axios';
+import { EmptyState, PageHeader, Panel, StatusPill, ToolbarButton } from './DesignSystem';
+import { ConfirmActionModal } from './UI';
 
 const formatBytes = (value) => {
   const size = Number(value) || 0;
@@ -537,6 +539,7 @@ const GcodeHub = ({ addToast }) => {
   const [uploading, setUploading] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [deletingPath, setDeletingPath] = useState('');
+  const [confirmAction, setConfirmAction] = useState(null);
 
   const selectedFile = useMemo(
     () => files.find((file) => file.path === selectedPath) || null,
@@ -704,8 +707,8 @@ const GcodeHub = ({ addToast }) => {
     }
   };
 
-  const handleDelete = async (file) => {
-    if (!file || !window.confirm(`Delete ${file.relative_path} from ${file.source_printer_name}?`)) return;
+  const performDelete = async (file) => {
+    if (!file) return;
     setDeletingPath(file.path);
     try {
       await axios.delete('/api/files/delete', { params: { path: file.path } });
@@ -718,6 +721,23 @@ const GcodeHub = ({ addToast }) => {
     }
   };
 
+  const handleDelete = (file) => {
+    if (!file) return;
+    setConfirmAction({
+      action: 'delete',
+      file,
+      title: 'Delete G-code File',
+      actionLabel: 'Delete File',
+      description: 'This removes the G-code file from central printer storage.',
+      consequences: [
+        `${file.relative_path} will be deleted from ${file.source_printer_name || 'its source printer'}.`,
+        'Any print workflow using this exact file path will need the file uploaded again.',
+      ],
+      requireText: 'DELETE',
+      confirmVariant: 'danger',
+    });
+  };
+
   const toggleTarget = (printerId) => {
     setSelectedTargetIds((current) => (
       current.includes(printerId)
@@ -726,7 +746,7 @@ const GcodeHub = ({ addToast }) => {
     ));
   };
 
-  const handlePrint = async (targetIds, onlyCompatible = false) => {
+  const handlePrint = async (targetIds, onlyCompatible = false, confirmedRisk = false) => {
     if (!selectedFile || targetIds.length === 0) {
       addToast('Select a file and at least one printer', 'error');
       return;
@@ -735,7 +755,20 @@ const GcodeHub = ({ addToast }) => {
     const riskyTargets = targetIds
       .map((id) => targets.find((target) => target.id === id))
       .filter((target) => target && compatibility[target.id]?.status === 'too_large');
-    if (riskyTargets.length > 0 && !window.confirm(`Print on ${riskyTargets.map((target) => target.name).join(', ')} even though the file may not fit?`)) {
+    if (riskyTargets.length > 0 && !confirmedRisk) {
+      setConfirmAction({
+        action: 'print_risk',
+        title: 'Start Oversized Print',
+        actionLabel: 'Start Print',
+        description: 'One or more selected printers appear smaller than the G-code bounds.',
+        consequences: [
+          `Risky targets: ${riskyTargets.map((target) => target.name).join(', ')}.`,
+          'The print may exceed bed limits or fail during motion.',
+          'Check the preview and printer dimensions before continuing.',
+        ],
+        confirmVariant: 'warning',
+        onConfirm: () => handlePrint(targetIds, onlyCompatible, true),
+      });
       return;
     }
 
@@ -767,43 +800,49 @@ const GcodeHub = ({ addToast }) => {
     }
   };
 
+  const runConfirmedAction = async () => {
+    const action = confirmAction;
+    setConfirmAction(null);
+    if (action?.action === 'delete') await performDelete(action.file);
+    if (action?.action === 'print_risk' && action.onConfirm) await action.onConfirm();
+  };
+
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h2 className="text-2xl font-bold">G-code Hub</h2>
-          <p className="mt-1 text-xs text-slate-500">Central G-code storage, preview, fit checks, and print dispatch.</p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
+      <PageHeader
+        eyebrow="Print Prep"
+        title="G-code Hub"
+        description="Central ready-to-print storage with 3D preview, grouped slicer variants, fit checks, filament deduction, and dispatch."
+        actions={(
+          <>
           <select
             value={uploadPrinterId}
             onChange={(event) => setUploadPrinterId(event.target.value)}
-            className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-blue-500"
+            className="app-select min-w-[190px]"
           >
             {printers.map((printer) => (
               <option key={printer.id} value={printer.id}>Upload to {printer.name}</option>
             ))}
           </select>
           <input ref={fileInputRef} type="file" accept=".gcode,.gco,.g" className="hidden" onChange={handleUpload} />
-          <button
+          <ToolbarButton
             onClick={() => fileInputRef.current?.click()}
             disabled={uploading || printers.length === 0}
-            className="inline-flex items-center space-x-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-700"
+            icon={Upload}
+            variant="primary"
+            busy={uploading}
           >
-            {uploading ? <Loader2 size={17} className="animate-spin" /> : <Upload size={17} />}
-            <span>Upload</span>
-          </button>
-          <button onClick={fetchGcodes} className="rounded-lg bg-slate-800 p-2 text-slate-400 transition-colors hover:text-blue-300" title="Refresh">
-            <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
-          </button>
-        </div>
-      </div>
+            Upload
+          </ToolbarButton>
+          <ToolbarButton onClick={fetchGcodes} icon={RefreshCw} variant="secondary" size="icon" busy={loading} title="Refresh" />
+          </>
+        )}
+      />
 
       <div className="grid grid-cols-1 gap-6 2xl:grid-cols-[380px_minmax(0,1fr)_320px]">
-        <div className="rounded-xl border border-slate-700 bg-slate-800">
-          <div className="space-y-3 border-b border-slate-700 p-4">
-            <div className="flex items-center space-x-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2">
+        <Panel title="Library" description="Ready files and grouped slicer outputs" icon={FileCode} padded={false}>
+          <div className="space-y-3 border-b border-slate-800 p-4">
+            <div className="flex items-center space-x-2 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2">
               <Search size={15} className="text-slate-500" />
               <input
                 value={search}
@@ -815,7 +854,7 @@ const GcodeHub = ({ addToast }) => {
             <select
               value={sourceFilter}
               onChange={(event) => setSourceFilter(event.target.value)}
-              className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm outline-none focus:border-blue-500"
+              className="app-select w-full"
             >
               <option value="all">All printer stores</option>
               {printers.map((printer) => (
@@ -830,7 +869,9 @@ const GcodeHub = ({ addToast }) => {
                 <Loader2 size={28} className="animate-spin text-blue-400" />
               </div>
             ) : filteredGroups.length === 0 ? (
-              <div className="p-10 text-center text-xs italic text-slate-600">No G-code files found.</div>
+              <div className="p-4">
+                <EmptyState icon={FileCode} title="No G-code files found" description="Upload a ready G-code file or slice a model to send output here." />
+              </div>
             ) : (
               filteredGroups.map((group) => (
                 <button
@@ -855,9 +896,9 @@ const GcodeHub = ({ addToast }) => {
               ))
             )}
           </div>
-        </div>
+        </Panel>
 
-        <div className="rounded-xl border border-slate-700 bg-slate-800 p-5">
+        <Panel title="3D Preview" description={selectedFile ? formatBounds(selectedFile.analysis) : 'Select a file to inspect toolpaths'} icon={Box} className="min-w-0">
           {selectedFile ? (
             contentLoading ? (
               <div className="flex h-[420px] items-center justify-center">
@@ -867,17 +908,18 @@ const GcodeHub = ({ addToast }) => {
               <GcodeViewer content={content} analysis={selectedFile.analysis} />
             )
           ) : (
-            <div className="flex h-[420px] items-center justify-center rounded-lg border border-dashed border-slate-700 text-xs italic text-slate-600">
-              Select or upload a G-code file.
-            </div>
+            <EmptyState icon={Box} title="Select a G-code file" description="The viewer will show the build volume, extrusions, travel moves, and file bounds." />
           )}
-        </div>
+        </Panel>
 
-        <div className="space-y-4 rounded-xl border border-slate-700 bg-slate-800 p-4">
+        <Panel title="Print Dispatch" description="Choose printers, filament, and start safely" icon={Play} className="2xl:sticky 2xl:top-24 2xl:self-start" bodyClassName="space-y-4">
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Selected File</p>
             <p className="mt-2 break-all text-sm font-bold text-slate-100">{selectedGroup?.label || selectedFile?.relative_path || 'None'}</p>
             {selectedFile && <p className="mt-1 text-xs text-slate-500">{selectedFile.source_printer_name} variant</p>}
+            {selectedGroup?.variants?.length > 1 && (
+              <StatusPill tone="blue" icon={Package} className="mt-3">{selectedGroup.variants.length} printer variants</StatusPill>
+            )}
           </div>
 
           {selectedGroup && selectedGroup.variants.length > 1 && (
@@ -1013,8 +1055,21 @@ const GcodeHub = ({ addToast }) => {
               </div>
             </div>
           )}
-        </div>
+        </Panel>
       </div>
+      <ConfirmActionModal
+        isOpen={Boolean(confirmAction)}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={runConfirmedAction}
+        title={confirmAction?.title}
+        actionLabel={confirmAction?.actionLabel}
+        itemName={confirmAction?.file?.name || selectedFile?.name}
+        description={confirmAction?.description}
+        consequences={confirmAction?.consequences || []}
+        requireText={confirmAction?.requireText}
+        confirmVariant={confirmAction?.confirmVariant || 'danger'}
+        busy={Boolean(deletingPath) || printing}
+      />
     </div>
   );
 };

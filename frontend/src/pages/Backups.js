@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { RotateCcw, Plus, Loader2, DatabaseBackup, Save, SlidersHorizontal, Filter, X } from 'lucide-react';
 import axios from 'axios';
+import { ConfirmActionModal } from '../components/UI';
+import { HelpText, PageHeader, Panel, SearchBox, ToolbarButton } from '../components/DesignSystem';
+import { explainApiError } from '../utils/operator';
 
 const ALL_PRINTERS_SLUG = '__all_printers__';
 
@@ -51,6 +54,8 @@ const Backups = ({ addToast }) => {
   const [settings, setSettings] = useState({ file_backup_limit: 5 });
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [filters, setFilters] = useState({ printer: 'all', type: 'all' });
+  const [searchTerm, setSearchTerm] = useState('');
+  const [confirmAction, setConfirmAction] = useState(null);
 
   useEffect(() => {
     fetchBackups();
@@ -85,7 +90,11 @@ const Backups = ({ addToast }) => {
       addToast('Backup settings saved', 'success');
       fetchBackups();
     } catch (err) {
-      addToast('Failed to save backup settings', 'error');
+      addToast(explainApiError(err, {
+        what: 'Backup settings failed to save',
+        cause: 'The API could not update retention or schedule settings.',
+        fix: 'Check the values and try again.',
+      }), 'error');
     } finally {
       setSettingsLoading(false);
     }
@@ -98,7 +107,27 @@ const Backups = ({ addToast }) => {
       addToast('Backup created successfully', 'success');
       fetchBackups();
     } catch (err) {
-      addToast('Failed to create backup', 'error');
+      addToast(explainApiError(err, {
+        what: 'Backup creation failed',
+        cause: 'The backend could not write the backup archive.',
+        fix: 'Check central storage write access and free space.',
+      }), 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const performRestore = async (backup) => {
+    setActionLoading(true);
+    try {
+      await axios.post(`/api/backups/restore/${backup.id}`);
+      addToast('System restored successfully', 'success');
+    } catch (err) {
+      addToast(explainApiError(err, {
+        what: 'Restore failed',
+        cause: 'The backend could not restore the selected backup.',
+        fix: 'Check that the backup file exists and central storage is writable.',
+      }), 'error');
     } finally {
       setActionLoading(false);
     }
@@ -106,17 +135,24 @@ const Backups = ({ addToast }) => {
 
   const handleRestore = async (backup) => {
     const target = backup.backup_type === 'file-edit' ? 'this file' : 'the full printer store';
-    if (!window.confirm(`Restore ${target} from ${backup.filename}? Current data may be overwritten.`)) return;
-
-    setActionLoading(true);
-    try {
-      await axios.post(`/api/backups/restore/${backup.id}`);
-      addToast('System restored successfully', 'success');
-    } catch (err) {
-      addToast('Restore failed', 'error');
-    } finally {
-      setActionLoading(false);
-    }
+    setConfirmAction({
+      backup,
+      title: 'Restore Backup',
+      actionLabel: 'Restore Backup',
+      requireText: 'DELETE',
+      description: `Restore ${target} from ${backup.filename}.`,
+      consequences: backup.backup_type === 'file-edit'
+        ? [
+            'The current file will be overwritten by this backup.',
+            'The restore action is recorded as an event.',
+            'Restart affected printer services if Klipper or Moonraker configs changed.',
+          ]
+        : [
+            'Printer storage files from the archive will overwrite current files.',
+            'Existing configs and G-code with matching paths may be replaced.',
+            'Create a fresh backup first if you may need the current state.',
+          ],
+    });
   };
 
   const printerOptions = useMemo(() => {
@@ -135,26 +171,51 @@ const Backups = ({ addToast }) => {
     backups.filter((backup) => (
       (filters.type === 'all' || getBackupCategory(backup) === filters.type)
       && (filters.printer === 'all' || getPrinterSlug(backup) === filters.printer)
+      && (
+        !searchTerm.trim()
+        || [
+          backup.filename,
+          backup.file_path,
+          backup.status,
+          backup.backup_type,
+          backup.display_type,
+          getPrinterName(backup),
+        ].some((value) => String(value || '').toLowerCase().includes(searchTerm.trim().toLowerCase()))
+      )
     ))
-  ), [backups, filters]);
+  ), [backups, filters, searchTerm]);
 
-  const hasActiveFilters = filters.printer !== 'all' || filters.type !== 'all';
+  const hasActiveFilters = filters.printer !== 'all' || filters.type !== 'all' || searchTerm.trim();
+  const runConfirmedAction = async () => {
+    const backup = confirmAction?.backup;
+    setConfirmAction(null);
+    if (backup) await performRestore(backup);
+  };
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold">Backups & Restore</h2>
-        <button
+      <PageHeader
+        eyebrow="Maintenance"
+        title="Backups & Restore"
+        description="Create restore points, configure daily backups, and recover farm or file-edit backups."
+        actions={(
+          <ToolbarButton
           onClick={handleCreateBackup}
           disabled={actionLoading}
-          className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 text-white px-4 py-2 rounded-lg text-sm font-bold transition-colors shadow-lg shadow-blue-900/20"
+          icon={Plus}
+          variant="primary"
+          busy={actionLoading}
         >
-          {actionLoading ? <Loader2 className="animate-spin" size={18} /> : <Plus size={18} />}
-          <span>{actionLoading ? 'Processing...' : 'Create Farm Backup'}</span>
-        </button>
-      </div>
+          {actionLoading ? 'Processing...' : 'Create Farm Backup'}
+          </ToolbarButton>
+        )}
+      />
 
-      <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 flex flex-wrap gap-4 items-end">
+      <Panel title="Backup Schedule" description="Daily backup time and retention" icon={SlidersHorizontal}>
+      <div className="mb-4">
+        <HelpText>Backups protect central printer files and file-editor changes. Restore is intentionally guarded because it can overwrite live config files.</HelpText>
+      </div>
+      <div className="flex flex-wrap gap-4 items-end">
         <div className="space-y-1">
           <label className="text-[10px] font-bold text-slate-500 uppercase flex items-center gap-1.5">
             <SlidersHorizontal size={12} />
@@ -210,8 +271,10 @@ const Backups = ({ addToast }) => {
           <span>Save</span>
         </button>
       </div>
+      </Panel>
 
-      <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 flex flex-wrap gap-4 items-end">
+      <Panel title="Filters" description="Find a restore point quickly" icon={Filter}>
+      <div className="flex flex-wrap gap-4 items-end">
         <div className="space-y-1">
           <label className="text-[10px] font-bold text-slate-500 uppercase flex items-center gap-1.5">
             <Filter size={12} />
@@ -247,20 +310,27 @@ const Backups = ({ addToast }) => {
         </div>
         {hasActiveFilters && (
           <button
-            onClick={() => setFilters({ printer: 'all', type: 'all' })}
+            onClick={() => { setFilters({ printer: 'all', type: 'all' }); setSearchTerm(''); }}
             className="flex items-center space-x-2 bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm font-bold transition-colors"
           >
             <X size={16} />
             <span>Clear</span>
           </button>
         )}
+        <SearchBox
+          value={searchTerm}
+          onChange={setSearchTerm}
+          placeholder="Search backup name, type, status, or printer..."
+          className="min-w-64 flex-1"
+        />
         <div className="ml-auto text-sm text-slate-400 py-2">
           <span className="font-mono text-slate-200">{filteredBackups.length}</span>
           <span> / {backups.length}</span>
         </div>
       </div>
+      </Panel>
 
-      <div className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
+      <div className="app-card overflow-hidden">
         <table className="w-full text-left text-sm">
           <thead>
             <tr className="border-b border-slate-700 bg-slate-900/50">
@@ -314,6 +384,20 @@ const Backups = ({ addToast }) => {
           </tbody>
         </table>
       </div>
+
+      <ConfirmActionModal
+        isOpen={Boolean(confirmAction)}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={runConfirmedAction}
+        title={confirmAction?.title}
+        actionLabel={confirmAction?.actionLabel}
+        itemName={confirmAction?.backup?.filename}
+        description={confirmAction?.description}
+        consequences={confirmAction?.consequences || []}
+        requireText={confirmAction?.requireText}
+        confirmVariant="danger"
+        busy={actionLoading}
+      />
     </div>
   );
 };

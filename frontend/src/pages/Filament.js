@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { Loader2, Package, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
+import { MetricCard, PageHeader, Panel, ToolbarButton } from '../components/DesignSystem';
+import { ConfirmActionModal } from '../components/UI';
 
 const emptyForm = {
   name: '',
@@ -46,6 +48,7 @@ const Filament = ({ addToast }) => {
   const [editingId, setEditingId] = useState(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [confirmAction, setConfirmAction] = useState(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -138,8 +141,7 @@ const Filament = ({ addToast }) => {
     }
   };
 
-  const deleteSpool = async (spool) => {
-    if (!window.confirm(`Delete ${spool.name}?`)) return;
+  const performDeleteSpool = async (spool) => {
     try {
       await axios.delete(`/api/filaments/spools/${spool.id}`);
       addToast('Spool deleted', 'success');
@@ -147,6 +149,22 @@ const Filament = ({ addToast }) => {
     } catch (err) {
       addToast(err.response?.data?.detail || 'Failed to delete spool', 'error');
     }
+  };
+
+  const deleteSpool = (spool) => {
+    setConfirmAction({
+      action: 'delete_spool',
+      spool,
+      title: 'Delete Filament Spool',
+      actionLabel: 'Delete Spool',
+      description: 'This removes the spool record and its remaining material estimate.',
+      consequences: [
+        `${spool.name} will be removed from filament inventory.`,
+        'Print-start usage deductions can no longer apply to this spool.',
+      ],
+      requireText: 'DELETE',
+      confirmVariant: 'danger',
+    });
   };
 
   const adjustSpool = async (spool, direction) => {
@@ -168,40 +186,29 @@ const Filament = ({ addToast }) => {
     }
   };
 
+  const runConfirmedAction = async () => {
+    const action = confirmAction;
+    setConfirmAction(null);
+    if (action?.action === 'delete_spool') await performDeleteSpool(action.spool);
+  };
+
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h2 className="text-2xl font-bold">Filament</h2>
-          <p className="mt-1 text-xs text-slate-500">Spool inventory, loaded printers, and usage tracking.</p>
-        </div>
-        <button onClick={refresh} className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-4 text-sm font-bold text-slate-200 hover:bg-slate-700">
-          <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
-          Refresh
-        </button>
-      </div>
+      <PageHeader
+        eyebrow="Print Prep"
+        title="Filament"
+        description="Track loaded spools, remaining material, and print-start usage deductions."
+        actions={<ToolbarButton icon={RefreshCw} variant="secondary" busy={loading} onClick={refresh}>Refresh</ToolbarButton>}
+      />
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-        <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Active spools</p>
-          <p className="mt-2 text-2xl font-bold">{summary.active}</p>
-        </div>
-        <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Remaining filament</p>
-          <p className="mt-2 text-2xl font-bold">{formatWeight(summary.remaining)}</p>
-        </div>
-        <div className="rounded-lg border border-slate-700 bg-slate-800 p-4">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Low spools</p>
-          <p className={`mt-2 text-2xl font-bold ${summary.low > 0 ? 'text-orange-300' : 'text-green-300'}`}>{summary.low}</p>
-        </div>
+        <MetricCard label="Active spools" value={summary.active} helper="Available inventory" icon={Package} tone="green" />
+        <MetricCard label="Remaining filament" value={formatWeight(summary.remaining)} helper="Across active spools" icon={Package} tone="blue" />
+        <MetricCard label="Low spools" value={summary.low} helper="Below 15 percent" icon={Package} tone={summary.low > 0 ? 'amber' : 'slate'} />
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[380px_minmax(0,1fr)]">
-        <section className="rounded-lg border border-slate-700 bg-slate-800 p-4">
-          <div className="mb-4 flex items-center gap-2">
-            <Plus size={18} className="text-blue-300" />
-            <h3 className="font-bold">{editingId ? 'Edit Spool' : 'Add Spool'}</h3>
-          </div>
+        <Panel title={editingId ? 'Edit Spool' : 'Add Spool'} description="Material, colour, weight, and loaded printer" icon={Plus}>
           <div className="space-y-3">
             <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Spool name" className="h-10 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 text-sm outline-none focus:border-blue-500" />
             <div className="grid grid-cols-2 gap-3">
@@ -251,12 +258,9 @@ const Filament = ({ addToast }) => {
               </button>
             </div>
           </div>
-        </section>
+        </Panel>
 
-        <section className="rounded-lg border border-slate-700 bg-slate-800">
-          <div className="border-b border-slate-700 px-4 py-3">
-            <h3 className="font-bold">Spools</h3>
-          </div>
+        <Panel title="Spools" description="Inventory and manual adjustments" icon={Package} padded={false}>
           {loading ? (
             <div className="flex h-64 items-center justify-center">
               <Loader2 size={28} className="animate-spin text-blue-400" />
@@ -317,8 +321,20 @@ const Filament = ({ addToast }) => {
               ))}
             </div>
           )}
-        </section>
+        </Panel>
       </div>
+      <ConfirmActionModal
+        isOpen={Boolean(confirmAction)}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={runConfirmedAction}
+        title={confirmAction?.title}
+        actionLabel={confirmAction?.actionLabel}
+        itemName={confirmAction?.spool?.name}
+        description={confirmAction?.description}
+        consequences={confirmAction?.consequences || []}
+        requireText={confirmAction?.requireText}
+        confirmVariant={confirmAction?.confirmVariant || 'danger'}
+      />
     </div>
   );
 };

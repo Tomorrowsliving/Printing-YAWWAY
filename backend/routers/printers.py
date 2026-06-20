@@ -703,12 +703,21 @@ async def create_printer(printer_in: PrinterCreate, db: AsyncSession = Depends(g
     printer = Printer(**printer_in.model_dump())
     printer.created_at = datetime.datetime.now(datetime.timezone.utc)
     db.add(printer)
+    await db.flush()
 
-    # Record event
     event = Event(
+        printer_id=printer.id,
+        node_id=printer.assigned_node_id,
         severity="info",
-        event_type="printer_creation",
-        message=f"Printer {printer.name} created."
+        event_type="printer_created",
+        message=f"Printer created: {printer.name}",
+        details={
+            "slug": printer.slug,
+            "node_id": printer.assigned_node_id,
+            "moonraker_port": printer.moonraker_port,
+            "config_path": printer.config_path,
+            "gcode_path": printer.gcode_path,
+        },
     )
     db.add(event)
 
@@ -841,8 +850,32 @@ async def update_printer(printer_id: int, printer_in: PrinterCreate, db: AsyncSe
     if not printer:
         raise HTTPException(status_code=404, detail="Printer not found")
 
+    old_node_id = printer.assigned_node_id
     for field, value in printer_in.model_dump(exclude_unset=True).items():
         setattr(printer, field, value)
+
+    db.add(Event(
+        printer_id=printer.id,
+        node_id=printer.assigned_node_id,
+        severity="info",
+        event_type="printer_updated",
+        message=f"Printer updated: {printer.name}",
+        details={
+            "slug": printer.slug,
+            "old_node_id": old_node_id,
+            "new_node_id": printer.assigned_node_id,
+            "assignment_changed": old_node_id != printer.assigned_node_id,
+        },
+    ))
+    if old_node_id != printer.assigned_node_id:
+        db.add(Event(
+            printer_id=printer.id,
+            node_id=printer.assigned_node_id,
+            severity="info",
+            event_type="printer_assignment_changed",
+            message=f"Printer {printer.name} assignment changed",
+            details={"old_node_id": old_node_id, "new_node_id": printer.assigned_node_id},
+        ))
 
     await db.commit()
     await db.refresh(printer)
@@ -864,7 +897,8 @@ async def delete_printer(printer_id: int, db: AsyncSession = Depends(get_db)):
     db.add(Event(
         severity="warning",
         event_type="printer_deleted",
-        message=f"Printer {printer_name} was removed from the fleet"
+        message=f"Printer deleted: {printer_name}",
+        details={"printer_id": printer_id, "name": printer_name},
     ))
     await db.commit()
     return {"status": "success", "message": f"Printer {printer_name} deleted"}

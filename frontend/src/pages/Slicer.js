@@ -24,6 +24,8 @@ import {
   XCircle,
 } from 'lucide-react';
 import ModelBuildPlateViewer from '../components/ModelBuildPlateViewer';
+import { EmptyState, PageHeader, Panel, StatusPill, ToolbarButton } from '../components/DesignSystem';
+import { ConfirmActionModal } from '../components/UI';
 
 const emptyProfile = {
   name: '',
@@ -92,6 +94,7 @@ const Slicer = ({ addToast }) => {
   const [savingSettings, setSavingSettings] = useState(false);
   const [creatingProfile, setCreatingProfile] = useState(false);
   const [startingJob, setStartingJob] = useState(false);
+  const [confirmAction, setConfirmAction] = useState(null);
 
   const refresh = useCallback(async () => {
     const [printerRes, settingsRes, healthRes, modelRes, profileRes, spoolRes, jobRes, installRes] = await Promise.all([
@@ -264,8 +267,7 @@ const Slicer = ({ addToast }) => {
     }
   };
 
-  const deleteProfile = async (profile) => {
-    if (!window.confirm(`Delete ${profile.name}?`)) return;
+  const performDeleteProfile = async (profile) => {
     try {
       await axios.delete(`/api/slicer/profiles/${profile.id}`);
       addToast('Profile deleted', 'success');
@@ -275,8 +277,23 @@ const Slicer = ({ addToast }) => {
     }
   };
 
-  const deleteModel = async (model) => {
-    if (!window.confirm(`Delete ${model.filename}?`)) return;
+  const deleteProfile = (profile) => {
+    setConfirmAction({
+      action: 'delete_profile',
+      target: profile,
+      title: 'Delete Slicer Profile',
+      actionLabel: 'Delete Profile',
+      description: 'This removes the slicer profile from the control plane.',
+      consequences: [
+        `${profile.name} will no longer be available for new slice jobs.`,
+        'Existing generated G-code files are not removed.',
+      ],
+      requireText: 'DELETE',
+      confirmVariant: 'danger',
+    });
+  };
+
+  const performDeleteModel = async (model) => {
     try {
       await axios.delete(`/api/slicer/models/${model.id}`);
       addToast('Model deleted', 'success');
@@ -284,6 +301,22 @@ const Slicer = ({ addToast }) => {
     } catch (err) {
       addToast('Failed to delete model', 'error');
     }
+  };
+
+  const deleteModel = (model) => {
+    setConfirmAction({
+      action: 'delete_model',
+      target: model,
+      title: 'Delete Slicer Model',
+      actionLabel: 'Delete Model',
+      description: 'This removes the uploaded model from slicer storage.',
+      consequences: [
+        `${model.filename} will be deleted from the model library.`,
+        'Any unsliced jobs depending on this model will need a new upload.',
+      ],
+      requireText: 'DELETE',
+      confirmVariant: 'danger',
+    });
   };
 
   const startJob = async () => {
@@ -335,6 +368,13 @@ const Slicer = ({ addToast }) => {
     }
   };
 
+  const runConfirmedAction = async () => {
+    const action = confirmAction;
+    setConfirmAction(null);
+    if (action?.action === 'delete_profile') await performDeleteProfile(action.target);
+    if (action?.action === 'delete_model') await performDeleteModel(action.target);
+  };
+
   const profileSelect = (type, value, keyName) => (
     <label className="space-y-1">
       <span className="text-[10px] font-bold uppercase text-slate-500">{profileTypeLabel(type)} profile</span>
@@ -353,38 +393,51 @@ const Slicer = ({ addToast }) => {
 
   return (
     <div className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div>
-          <h2 className="text-2xl font-bold">Slicer</h2>
-          <p className="text-sm text-slate-400">OrcaSlicer local workspace</p>
+      <PageHeader
+        eyebrow="Print Prep"
+        title="Slicer"
+        description="Upload models, preview the build plate, choose printer/material/process profiles, then send finished G-code into the hub."
+        actions={(
+          <>
+            <StatusPill tone={health?.available ? 'green' : 'amber'} icon={health?.available ? CheckCircle2 : XCircle}>
+              {health?.available ? 'Engine ready' : 'Engine unavailable'}
+            </StatusPill>
+            <ToolbarButton icon={RefreshCw} variant="secondary" onClick={() => refresh().catch(() => addToast('Refresh failed', 'error'))}>
+              Refresh
+            </ToolbarButton>
+          </>
+        )}
+      >
+        <div className="grid max-w-3xl grid-cols-1 gap-2 sm:grid-cols-3">
+          {[
+            ['1', 'Upload model', selectedModel?.filename || 'STL or 3MF'],
+            ['2', 'Choose setup', selectedPrinter?.name || 'Printer and profiles'],
+            ['3', 'Slice output', jobForm.slice_for_all_printers ? 'Grouped variants' : 'G-code Hub'],
+          ].map(([step, label, helper]) => (
+            <div key={step} className="rounded-lg border border-slate-700 bg-slate-900/55 px-3 py-2">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-blue-300">Step {step}</p>
+              <p className="mt-1 text-sm font-bold text-slate-100">{label}</p>
+              <p className="mt-0.5 truncate text-xs text-slate-500">{helper}</p>
+            </div>
+          ))}
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className={`inline-flex h-10 items-center gap-2 rounded-lg border px-3 text-xs font-bold ${health?.available ? 'border-green-500/20 bg-green-500/10 text-green-300' : 'border-orange-500/20 bg-orange-500/10 text-orange-300'}`}>
-            {health?.available ? <CheckCircle2 size={15} /> : <XCircle size={15} />}
-            {health?.available ? 'Engine ready' : 'Engine unavailable'}
-          </span>
-          <button onClick={() => refresh().catch(() => addToast('Refresh failed', 'error'))} className="h-10 px-4 rounded-lg bg-slate-800 border border-slate-700 hover:bg-slate-700 flex items-center gap-2 text-sm font-bold">
-            <RefreshCw size={16} />
-            Refresh
-          </button>
-        </div>
-      </div>
+      </PageHeader>
 
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[320px_minmax(0,1fr)_360px]">
-        <aside className="space-y-4">
-          <section className="rounded-lg border border-slate-700 bg-slate-800 p-4">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <FileBox size={18} className="text-blue-300" />
-                <h3 className="font-bold">Models</h3>
-              </div>
-              <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg bg-blue-600 px-3 text-xs font-bold hover:bg-blue-700">
+      <div className="grid grid-cols-1 items-start gap-4 2xl:grid-cols-[300px_minmax(0,1fr)_360px]">
+        <aside className="space-y-4 2xl:sticky 2xl:top-24">
+          <Panel
+            title="Project Models"
+            description="Choose one model"
+            icon={FileBox}
+            actions={(
+              <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg bg-blue-600 px-3 text-xs font-bold text-white hover:bg-blue-500">
                 {uploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
                 Upload
                 <input type="file" accept=".stl,.3mf" className="hidden" onChange={uploadModel} />
               </label>
-            </div>
-            <div className="space-y-2 max-h-[640px] overflow-y-auto pr-1">
+            )}
+          >
+            <div className="space-y-2 max-h-[520px] overflow-y-auto pr-1">
               {models.map((model) => {
                 const selected = String(model.id) === String(jobForm.model_id);
                 return (
@@ -428,23 +481,18 @@ const Slicer = ({ addToast }) => {
                 );
               })}
               {models.length === 0 && (
-                <div className="rounded-lg border border-dashed border-slate-700 bg-slate-900/50 p-5 text-center text-sm font-semibold text-slate-500">
-                  No models uploaded
-                </div>
+                <EmptyState icon={FileBox} title="No models uploaded" description="Upload an STL or 3MF file to place it on the build plate." />
               )}
             </div>
-          </section>
+          </Panel>
         </aside>
 
         <main className="space-y-4">
-          <section className="rounded-lg border border-slate-700 bg-slate-800 p-4">
+          <Panel title="Build Plate" description={selectedModel?.filename || 'No model selected'} icon={Box}>
             <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <Box size={18} className="text-cyan-300" />
-                  <h3 className="font-bold">Build Plate</h3>
-                </div>
-                <p className="mt-1 truncate text-sm text-slate-400">{selectedModel?.filename || 'No model selected'}</p>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Preview</p>
+                <p className="mt-1 truncate text-sm text-slate-400">Use view presets to inspect the model before slicing.</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 {[
@@ -465,15 +513,11 @@ const Slicer = ({ addToast }) => {
               </div>
             </div>
             <ModelBuildPlateViewer model={selectedModel} printer={selectedPrinter} viewPreset={viewPreset} />
-          </section>
+          </Panel>
         </main>
 
-        <aside className="space-y-4">
-          <section className="rounded-lg border border-slate-700 bg-slate-800 p-4">
-            <div className="mb-4 flex items-center gap-2">
-              <Scissors size={18} className="text-green-300" />
-              <h3 className="font-bold">Slice Setup</h3>
-            </div>
+        <aside className="space-y-4 2xl:sticky 2xl:top-24">
+          <Panel title="Slice Setup" description="Printer, material, quality, and output" icon={Scissors}>
             <div className="space-y-3">
               <label className="space-y-1">
                 <span className="text-[10px] font-bold uppercase text-slate-500">Printer</span>
@@ -558,7 +602,7 @@ const Slicer = ({ addToast }) => {
               <button
                 onClick={startJob}
                 disabled={startingJob || !health?.available || !selectedModel || !selectedPrinter || missingProfiles}
-                className="mt-2 flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-green-600 text-sm font-bold hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+                className="mt-2 flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-green-600 text-sm font-bold text-white hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {startingJob ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
                 Slice
@@ -568,49 +612,71 @@ const Slicer = ({ addToast }) => {
                 G-code Hub
               </Link>
             </div>
-          </section>
-
-          <section className="rounded-lg border border-slate-700 bg-slate-800 p-4">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
-                <ClipboardList size={18} className="text-purple-300" />
-                <h3 className="font-bold">Recent Jobs</h3>
-              </div>
-              {latestJob && <span className={`rounded-full border px-2 py-1 text-[10px] font-bold uppercase ${statusTone(latestJob.status)}`}>{latestJob.status}</span>}
-            </div>
-            <div className="space-y-2 max-h-[390px] overflow-y-auto pr-1">
-              {jobs.map((job) => {
-                const model = models.find((item) => item.id === job.model_id);
-                const printer = printers.find((item) => item.id === job.printer_id);
-                return (
-                  <div key={job.id} className="rounded-lg border border-slate-700 bg-slate-900/60 p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-bold">#{job.id} {model?.filename || `Model ${job.model_id}`}</p>
-                        <p className="mt-1 truncate text-xs text-slate-500">{printer?.name || `Printer ${job.printer_id}`}</p>
-                      </div>
-                      <span className={`rounded-full border px-2 py-1 text-[10px] font-bold uppercase ${statusTone(job.status)}`}>{job.status}</span>
-                    </div>
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] font-bold uppercase text-slate-500">
-                      <span>{job.estimated_time || 'Time n/a'}</span>
-                      <span>{job.filament_used_mm ? `${Math.round(job.filament_used_mm)} mm` : 'Filament n/a'}</span>
-                    </div>
-                    {job.message && <p className="mt-2 line-clamp-2 text-xs text-slate-400">{job.message}</p>}
-                    {(job.status === 'queued' || job.status === 'running') && (
-                      <button onClick={() => cancelJob(job)} className="mt-3 h-8 w-full rounded-lg border border-red-500/20 bg-red-500/10 text-xs font-bold text-red-300 hover:bg-red-500/15">
-                        Cancel
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
-              {jobs.length === 0 && <p className="text-sm text-slate-500">No slicer jobs yet.</p>}
-            </div>
-          </section>
+          </Panel>
         </aside>
       </div>
 
-      <details className="rounded-lg border border-slate-700 bg-slate-800">
+      <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <Panel
+          title="Slice History"
+          description="Recent queued, running, and completed jobs"
+          icon={ClipboardList}
+          actions={latestJob && <span className={`rounded-full border px-2 py-1 text-[10px] font-bold uppercase ${statusTone(latestJob.status)}`}>{latestJob.status}</span>}
+        >
+          <div className="grid max-h-[360px] grid-cols-1 gap-2 overflow-y-auto pr-1 lg:grid-cols-2 2xl:grid-cols-3">
+            {jobs.map((job) => {
+              const model = models.find((item) => item.id === job.model_id);
+              const printer = printers.find((item) => item.id === job.printer_id);
+              return (
+                <div key={job.id} className="rounded-lg border border-slate-700 bg-slate-900/60 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-bold">#{job.id} {model?.filename || `Model ${job.model_id}`}</p>
+                      <p className="mt-1 truncate text-xs text-slate-500">{printer?.name || `Printer ${job.printer_id}`}</p>
+                    </div>
+                    <span className={`rounded-full border px-2 py-1 text-[10px] font-bold uppercase ${statusTone(job.status)}`}>{job.status}</span>
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-[10px] font-bold uppercase text-slate-500">
+                    <span>{job.estimated_time || 'Time n/a'}</span>
+                    <span>{job.filament_used_mm ? `${Math.round(job.filament_used_mm)} mm` : 'Filament n/a'}</span>
+                  </div>
+                  {job.message && <p className="mt-2 line-clamp-2 text-xs text-slate-400">{job.message}</p>}
+                  {(job.status === 'queued' || job.status === 'running') && (
+                    <button onClick={() => cancelJob(job)} className="mt-3 h-8 w-full rounded-lg border border-red-500/20 bg-red-500/10 text-xs font-bold text-red-300 hover:bg-red-500/15">
+                      Cancel
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+            {jobs.length === 0 && <EmptyState icon={ClipboardList} title="No slicer jobs yet" description="Choose a model and setup, then press Slice." />}
+          </div>
+        </Panel>
+
+        <Panel title="Current Setup" description="What will be sent to Orca" icon={Move3D}>
+          <div className="space-y-2">
+            {[
+              ['Model', selectedModel?.filename || 'No model selected'],
+              ['Printer', selectedPrinter?.name || 'No printer selected'],
+              ['Output', jobForm.slice_for_all_printers ? 'One grouped item with printer variants' : 'Single G-code item'],
+              ['Engine', health?.available ? 'Ready to slice' : 'Needs setup'],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">{label}</p>
+                <p className="mt-1 truncate text-sm font-semibold text-slate-200">{value}</p>
+              </div>
+            ))}
+            {selectedModel && selectedPrinter && formatDate(selectedModel.created_at) && (
+              <div className="rounded-lg border border-slate-700 bg-slate-950/70 px-3 py-2">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Uploaded</p>
+                <p className="mt-1 text-sm font-semibold text-slate-200">{formatDate(selectedModel.created_at)}</p>
+              </div>
+            )}
+          </div>
+        </Panel>
+      </div>
+
+      <details className="rounded-lg border border-slate-700 bg-slate-850/80 shadow-xl shadow-black/10">
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3">
           <span className="flex items-center gap-2 font-bold">
             <Settings2 size={18} className="text-blue-300" />
@@ -726,20 +792,18 @@ const Slicer = ({ addToast }) => {
         </div>
       </details>
 
-      {selectedModel && selectedPrinter && (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-[10px] font-bold uppercase text-slate-500">
-          <Move3D size={13} />
-          <span>{selectedModel.filename}</span>
-          <span>|</span>
-          <span>{selectedPrinter.name}</span>
-          {formatDate(selectedModel.created_at) && (
-            <>
-              <span>|</span>
-              <span>{formatDate(selectedModel.created_at)}</span>
-            </>
-          )}
-        </div>
-      )}
+      <ConfirmActionModal
+        isOpen={Boolean(confirmAction)}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={runConfirmedAction}
+        title={confirmAction?.title}
+        actionLabel={confirmAction?.actionLabel}
+        itemName={confirmAction?.target?.name || confirmAction?.target?.filename}
+        description={confirmAction?.description}
+        consequences={confirmAction?.consequences || []}
+        requireText={confirmAction?.requireText}
+        confirmVariant={confirmAction?.confirmVariant || 'danger'}
+      />
     </div>
   );
 };

@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Mail, ShieldCheck, Save, Send, Loader2, HardDrive, Check, X, Copy, Scissors } from 'lucide-react';
+import { Mail, ShieldCheck, Save, Send, Loader2, HardDrive, Check, X, Copy, Scissors, RefreshCw } from 'lucide-react';
 import axios from 'axios';
 import NetworkSetupPanel from '../components/NetworkSetupPanel';
+import { HelpText, PageHeader, StatusPill, ToolbarButton } from '../components/DesignSystem';
+import { explainApiError } from '../utils/operator';
 
 const Settings = ({ addToast }) => {
   const [smtp, setSmtp] = useState({
@@ -16,6 +18,7 @@ const Settings = ({ addToast }) => {
   const [isTesting, setIsTesting] = useState(false);
   const [nfsStatus, setNfsStatus] = useState(null);
   const [nfsLoading, setNfsLoading] = useState(true);
+  const [nfsTesting, setNfsTesting] = useState(false);
   const [slicerSettings, setSlicerSettings] = useState({ orca_binary_path: '' });
   const [slicerSaving, setSlicerSaving] = useState(false);
 
@@ -25,6 +28,7 @@ const Settings = ({ addToast }) => {
   }, []);
 
   const fetchNfsStatus = async () => {
+    setNfsLoading(true);
     try {
       const res = await axios.get('/api/storage/nfs-status');
       setNfsStatus(res.data);
@@ -48,7 +52,11 @@ const Settings = ({ addToast }) => {
       await axios.post('/api/slicer/settings', slicerSettings);
       addToast('Slicer settings saved', 'success');
     } catch (err) {
-      addToast('Failed to save slicer settings', 'error');
+      addToast(explainApiError(err, {
+        what: 'Slicer settings failed to save',
+        cause: 'The backend could not persist the slicer binary path.',
+        fix: 'Check the path and try again.',
+      }), 'error');
     } finally {
       setSlicerSaving(false);
     }
@@ -66,7 +74,11 @@ const Settings = ({ addToast }) => {
       });
       addToast("Settings saved successfully", "success");
     } catch (err) {
-      addToast("Failed to save settings", "error");
+      addToast(explainApiError(err, {
+        what: 'Email settings failed to save',
+        cause: 'The SMTP settings request did not complete.',
+        fix: 'Check the host, port, username, and app key.',
+      }), "error");
     } finally {
       setIsSaving(false);
     }
@@ -82,7 +94,11 @@ const Settings = ({ addToast }) => {
       });
       addToast("Test email sent!", "success");
     } catch (err) {
-      addToast("Failed to send test email", "error");
+      addToast(explainApiError(err, {
+        what: 'Test email failed',
+        cause: 'The notification service could not send with the current SMTP settings.',
+        fix: 'Check credentials, app password, TLS port, and firewall access.',
+      }), "error");
     } finally {
       setIsTesting(false);
     }
@@ -93,9 +109,30 @@ const Settings = ({ addToast }) => {
     addToast("Command copied to clipboard", "success");
   };
 
+  const testNfsConnection = async () => {
+    setNfsTesting(true);
+    try {
+      const res = await axios.post('/api/storage/nfs-test');
+      setNfsStatus(res.data);
+      addToast(res.data?.writable ? 'NFS read/write test passed' : 'NFS test needs attention', res.data?.writable ? 'success' : 'error');
+    } catch (err) {
+      addToast(explainApiError(err, {
+        what: 'NFS connection test failed',
+        cause: 'The backend could not read and write central storage.',
+        fix: 'Check the export, mount path, permissions, and free space.',
+      }), 'error');
+    } finally {
+      setNfsTesting(false);
+    }
+  };
+
   return (
     <div className="space-y-6 max-w-4xl animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <h2 className="text-2xl font-bold">Settings</h2>
+      <PageHeader
+        eyebrow="Maintenance"
+        title="Settings"
+        description="Network, NFS storage, slicer engine, email notifications, and system status."
+      />
 
       <NetworkSetupPanel addToast={addToast} onSaved={fetchNfsStatus} />
 
@@ -106,14 +143,17 @@ const Settings = ({ addToast }) => {
             <HardDrive size={20} className="text-purple-400" />
             <h3 className="font-bold text-lg">Central Storage (NFS)</h3>
           </div>
-          <button onClick={fetchNfsStatus} className="p-1.5 hover:bg-slate-700 rounded-lg transition-colors">
-            <RefreshCw size={16} className={nfsLoading ? "animate-spin" : ""} />
-          </button>
+          <div className="flex items-center gap-2">
+            {nfsStatus && <StatusPill tone={nfsStatus.writable ? 'green' : nfsStatus.mounted ? 'amber' : 'red'}>{nfsStatus.writable ? 'Writable' : nfsStatus.mounted ? 'Mounted' : 'Not Mounted'}</StatusPill>}
+            <ToolbarButton onClick={testNfsConnection} icon={HardDrive} variant="warning" busy={nfsTesting}>Test NFS Connection</ToolbarButton>
+            <ToolbarButton onClick={fetchNfsStatus} icon={RefreshCw} variant="secondary" size="icon" busy={nfsLoading} title="Refresh NFS status" />
+          </div>
         </div>
+        <HelpText>NFS is the central storage mount used by nodes for printer configs, G-code, logs, and backups. A passing read/write test means the dashboard can create and restore managed files.</HelpText>
 
         {nfsStatus && (
           <div className="space-y-4">
-             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+             <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                 <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
                    <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Export Path</p>
                    <p className="font-mono text-xs">{nfsStatus.server_export_path}</p>
@@ -125,6 +165,26 @@ const Settings = ({ addToast }) => {
                 <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
                    <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Local Root</p>
                    <p className="font-mono text-xs text-slate-400">{nfsStatus.storage_root}</p>
+                </div>
+                <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
+                   <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Free Space</p>
+                   <p className="font-mono text-xs text-slate-300">{nfsStatus.free_space || 'Unknown'}</p>
+                </div>
+             </div>
+
+             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
+                  <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Mount Status</p>
+                  <p className={`text-sm font-bold ${nfsStatus.mounted ? 'text-green-400' : 'text-red-300'}`}>{nfsStatus.mounted ? 'Mounted' : 'Not mounted'}</p>
+                </div>
+                <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
+                  <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Read Test</p>
+                  <p className={`text-sm font-bold ${nfsStatus.readable ? 'text-green-400' : 'text-red-300'}`}>{nfsStatus.readable ? 'Passed' : 'Needs attention'}</p>
+                </div>
+                <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50">
+                  <p className="text-[10px] font-bold text-slate-500 uppercase mb-1">Write Test</p>
+                  <p className={`text-sm font-bold ${nfsStatus.writable ? 'text-green-400' : 'text-red-300'}`}>{nfsStatus.writable ? 'Passed' : 'Needs attention'}</p>
+                  {nfsStatus.write_error && <p className="mt-1 text-[10px] text-red-200/70">{nfsStatus.write_error}</p>}
                 </div>
              </div>
 
@@ -291,25 +351,5 @@ const Settings = ({ addToast }) => {
     </div>
   );
 };
-
-const RefreshCw = ({ className, size }) => (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
-      <path d="M21 3v5h-5" />
-      <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
-      <path d="M3 21v-5h5" />
-    </svg>
-);
 
 export default Settings;

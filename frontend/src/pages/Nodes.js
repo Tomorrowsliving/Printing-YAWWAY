@@ -2,9 +2,11 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { Server, HardDrive, RefreshCw, Plus, Loader2, Layers, Edit, Trash2, ArrowUpCircle, Search, Power, Settings2, Info, Activity, Thermometer, Clock, Cpu, ArrowLeftRight, Usb } from 'lucide-react';
 import { nodeService } from '../services/api';
-import { Modal } from '../components/UI';
+import { ConfirmActionModal, Modal } from '../components/UI';
+import { DetailGrid, EmptyState, HelpText, MetricCard, PageHeader, SearchBox, StatusPill, ToolbarButton } from '../components/DesignSystem';
 import axios from 'axios';
 import { clampPercent, formatLastSeen, formatMb, formatPercent, formatUptime } from '../utils/format';
+import { explainApiError, formatDateTime, nodeStatusMeta } from '../utils/operator';
 
 const OPERATION_DETAILS = {
   nfs_mounting: {
@@ -136,13 +138,17 @@ const NodeOverview = ({ addToast }) => {
   const [storageStatus, setStorageStatus] = useState({});
   const [hardwareStatus, setHardwareStatus] = useState({});
   const [nodeInventory, setNodeInventory] = useState({});
+  const [events, setEvents] = useState([]);
   const [nfsInfo, setNfsInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [usbDetailNode, setUsbDetailNode] = useState(null);
+  const [confirmAction, setConfirmAction] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isDetecting, setIsDetecting] = useState(false);
   const [nodeActions, setNodeActions] = useState({});
+  const [searchTerm, setSearchTerm] = useState('');
   const [viewMode, setViewMode] = useState(() => {
     try {
       return window.localStorage.getItem(NODE_VIEW_MODE_KEY) || 'simple';
@@ -236,6 +242,13 @@ const NodeOverview = ({ addToast }) => {
     } catch (err) {}
   }, []);
 
+  const fetchEvents = useCallback(async () => {
+    try {
+      const res = await axios.get('/api/events', { params: { limit: 200 } });
+      setEvents(Array.isArray(res.data) ? res.data : []);
+    } catch (err) {}
+  }, []);
+
   const fetchNodeStorage = useCallback(async (node) => {
       try {
           setStorageStatus(prev => {
@@ -321,9 +334,13 @@ const NodeOverview = ({ addToast }) => {
   useEffect(() => {
     fetchNodes();
     fetchNfsInfo();
-    const interval = setInterval(fetchNodes, 10000);
+    fetchEvents();
+    const interval = setInterval(() => {
+      fetchNodes();
+      fetchEvents();
+    }, 10000);
     return () => clearInterval(interval);
-  }, [fetchNodes, fetchNfsInfo]);
+  }, [fetchNodes, fetchNfsInfo, fetchEvents]);
 
   const liveHardwareNodeKey = nodes
     .filter(node => node.online || node.active_operation)
@@ -367,7 +384,11 @@ const NodeOverview = ({ addToast }) => {
       setIsModalOpen(false);
       fetchNodes();
     } catch (err) {
-      addToast(err.response?.data?.detail || "Failed to register node", 'error');
+      addToast(explainApiError(err, {
+        what: 'Node registration failed',
+        cause: 'The hostname/IP may already exist, or the API could not save the node.',
+        fix: 'Check the hostname, IP address, and agent port, then try again.',
+      }), 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -380,23 +401,28 @@ const NodeOverview = ({ addToast }) => {
       addToast("Node approved; storage auto-connect queued", "success");
       fetchNodes();
     } catch (err) {
-      addToast(err.response?.data?.detail || "Failed to approve node", "error");
+      addToast(explainApiError(err, {
+        what: 'Node approval failed',
+        cause: 'The API could not approve this node or queue storage auto-connect.',
+        fix: 'Refresh the node list and confirm the node still exists.',
+      }), "error");
     } finally {
       setNodeAction(nodeId, null);
     }
   };
 
   const handleDeleteNode = async (nodeId) => {
-    const node = nodes.find(item => item.id === nodeId);
-    const nodeName = node?.name || node?.hostname || `node ${nodeId}`;
-    if (!window.confirm(`Remove ${nodeName} from the dashboard?\n\nPrinter assignments will be cleared, but printer files and configs stay in central storage.`)) return;
     setNodeAction(nodeId, 'delete');
     try {
       await nodeService.deleteNode(nodeId);
       addToast("Node removed", "success");
       fetchNodes();
     } catch (err) {
-      addToast(err.response?.data?.detail || "Failed to delete node", "error");
+      addToast(explainApiError(err, {
+        what: 'Delete node failed',
+        cause: 'The API could not remove the node or clear assignments.',
+        fix: 'Refresh the node list and check whether the node still exists.',
+      }), "error");
     } finally {
       setNodeAction(nodeId, null);
     }
@@ -409,7 +435,11 @@ const NodeOverview = ({ addToast }) => {
       fetchNodes();
       addToast("Refresh complete", "success");
     } catch (err) {
-      addToast(err.response?.data?.detail || "Node unreachable", 'error');
+      addToast(explainApiError(err, {
+        what: 'Node refresh failed',
+        cause: 'The node-agent health endpoint did not answer.',
+        fix: 'Check the node IP, port 8001, and klipper-farm-node-agent service.',
+      }), 'error');
     } finally {
       setNodeAction(node.id, null);
     }
@@ -422,7 +452,11 @@ const NodeOverview = ({ addToast }) => {
       setEditData(prev => ({ ...prev, agent_port: res.data.agent_port }));
       addToast(`Detected agent on port ${res.data.agent_port}`, "success");
     } catch (err) {
-      addToast(err.response?.data?.detail || "Could not detect agent port", "error");
+      addToast(explainApiError(err, {
+        what: 'Agent port detection failed',
+        cause: 'No node-agent answered on the common ports.',
+        fix: 'Check that the node is powered on and the agent service is running.',
+      }), "error");
     } finally {
       setIsDetecting(false);
     }
@@ -450,7 +484,11 @@ const NodeOverview = ({ addToast }) => {
       setIsEditModalOpen(false);
       fetchNodes();
     } catch (err) {
-      addToast(err.response?.data?.detail || "Failed to update node", "error");
+      addToast(explainApiError(err, {
+        what: 'Node update failed',
+        cause: 'The API could not save the node details.',
+        fix: 'Check required fields and try again.',
+      }), "error");
     } finally {
       setIsSubmitting(false);
     }
@@ -465,14 +503,6 @@ const NodeOverview = ({ addToast }) => {
     };
 
     const config = actionMap[action];
-
-    let confirmMsg = `Initiate ${config.label} for this node?`;
-    if (action === 'mount-nfs') {
-        const serverIp = nfsInfo?.mount_command_nfs4?.split(' ')[3]?.split(':')[0] || 'the server';
-        confirmMsg = `Initiate NFS mount? This will attempt to mount central storage from ${serverIp} on this Pi node.`;
-    }
-
-    if (!window.confirm(confirmMsg)) return;
 
     setNodeAction(nodeId, action);
     try {
@@ -491,15 +521,17 @@ const NodeOverview = ({ addToast }) => {
 
         fetchNodes();
     } catch (err) {
-        const msg = err.response?.data?.detail || err.response?.data?.message || `Failed to initiate ${config.label}`;
-        addToast(msg, "error");
+        addToast(explainApiError(err, {
+          what: `${config.label} failed`,
+          cause: 'The node-agent did not complete the requested operation.',
+          fix: 'Check node-agent status, network reachability, and the event log.',
+        }), "error");
     } finally {
         setNodeAction(nodeId, null);
     }
   };
 
   const handleUpdateNodeAgent = async (nodeId) => {
-    if (!window.confirm("Trigger remote update on this node?")) return;
     setNodeAction(nodeId, 'update-agent');
     try {
       const res = await axios.post(`/api/nodes/${nodeId}/update`);
@@ -516,9 +548,103 @@ const NodeOverview = ({ addToast }) => {
       }
       fetchNodes();
     } catch (err) {
-      addToast(err.response?.data?.detail || "Communication failure during update", "error");
+      addToast(explainApiError(err, {
+        what: 'Node update failed',
+        cause: 'The dashboard could not complete the remote update request.',
+        fix: 'Check node-agent connectivity, then retry from the node card.',
+      }), "error");
     } finally {
       setNodeAction(nodeId, null);
+    }
+  };
+
+  const requestNodeAction = (node, action) => {
+    const nodeName = node?.name || node?.hostname || `node ${node?.id}`;
+    const serverIp = nfsInfo?.mount_command_nfs4?.split(' ')[3]?.split(':')[0] || 'the server';
+    const copy = {
+      'restart-agent': {
+        title: 'Restart Node Agent',
+        actionLabel: 'Restart Agent',
+        description: `Restart klipper-farm-node-agent on ${nodeName}.`,
+        consequences: [
+          'The node may appear offline until the service starts again.',
+          'Printer services stay in place, but live health checks may pause briefly.',
+        ],
+      },
+      reboot: {
+        title: 'Reboot Node',
+        actionLabel: 'Reboot Node',
+        description: `Reboot ${nodeName}.`,
+        consequences: [
+          'The Pi will disconnect from the dashboard.',
+          'Any running printer services on this node will be interrupted.',
+          'The node should return after boot and a new heartbeat.',
+        ],
+      },
+      'restart-services': {
+        title: 'Restart Printer Services',
+        actionLabel: 'Restart Services',
+        description: `Restart all Klipper and Moonraker services on ${nodeName}.`,
+        consequences: [
+          'Active prints on this node may stop.',
+          'Moonraker and Klipper will briefly disconnect.',
+          'Use this after config changes or service errors.',
+        ],
+      },
+      'mount-nfs': {
+        title: 'Test NFS Connection',
+        actionLabel: 'Test NFS Connection',
+        description: `Mount central storage from ${serverIp} on ${nodeName}.`,
+        consequences: [
+          'The node will install or refresh mount helpers if needed.',
+          'The dashboard will recheck /mnt/klipper-farm after the command.',
+          'Printer files stay in central storage.',
+        ],
+        confirmVariant: 'warning',
+      },
+      'update-agent': {
+        title: 'Update Node Agent',
+        actionLabel: 'Start Update',
+        description: `Update the node agent on ${nodeName}.`,
+        consequences: [
+          'The current agent version will be replaced if an update is available.',
+          'The node may disconnect while dependencies install and services restart.',
+          'The result stays visible on the node card until the next update.',
+        ],
+        confirmVariant: 'warning',
+      },
+    }[action];
+
+    setConfirmAction({ node, action, ...(copy || {}) });
+  };
+
+  const requestDeleteNode = (node) => {
+    const nodeName = node?.name || node?.hostname || `node ${node?.id}`;
+    setConfirmAction({
+      node,
+      action: 'delete-node',
+      title: 'Delete Node',
+      actionLabel: 'Delete Node',
+      requireText: 'DELETE',
+      description: `Remove ${nodeName} from the dashboard.`,
+      consequences: [
+        'Printer assignments for this node will be cleared.',
+        'Printer files and configs in central storage will not be deleted.',
+        'The Pi can register again later if its node agent checks in.',
+      ],
+    });
+  };
+
+  const runConfirmedAction = async () => {
+    if (!confirmAction?.node) return;
+    const { node, action } = confirmAction;
+    setConfirmAction(null);
+    if (action === 'delete-node') {
+      await handleDeleteNode(node.id);
+    } else if (action === 'update-agent') {
+      await handleUpdateNodeAgent(node.id);
+    } else {
+      await handleNodeAction(node.id, action);
     }
   };
 
@@ -534,17 +660,34 @@ const NodeOverview = ({ addToast }) => {
     return storage && storage.nfs_available === false;
   }).length;
   const piZeroCount = nodes.filter(node => /zero 2/i.test(node.model || '')).length;
+  const search = searchTerm.trim().toLowerCase();
+  const filteredNodes = nodes.filter((node) => {
+    if (!search) return true;
+    return [
+      node.hostname,
+      node.name,
+      node.ip_address,
+      node.model,
+      node.agent_version,
+    ].some((value) => String(value || '').toLowerCase().includes(search));
+  });
+  const latestNodeEvent = (nodeId, matcher) => events.find((event) => (
+    String(event.node_id) === String(nodeId) && matcher(event.event_type || '')
+  ));
+  const usbDetailInventory = usbDetailNode ? (nodeInventory[usbDetailNode.id] || {}) : {};
+  const usbDetailDevices = usbDetailNode
+    ? (usbDetailInventory.usb_devices || usbDetailNode.usb_devices || [])
+    : [];
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h2 className="text-2xl font-bold">Nodes</h2>
-          <p className="text-xs text-slate-500 mt-1">Raspberry Pi controllers that run Klipper and Moonraker for your printers.</p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="rounded-lg border border-slate-700 bg-slate-800/80 p-1 flex items-center gap-1">
+      <PageHeader
+        eyebrow="Print Farm"
+        title="Nodes"
+        description="Raspberry Pi controllers, storage mounts, runtime installs, USB devices, and service health."
+        actions={(
+          <>
+            <div className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900/80 p-1">
             <button
               type="button"
               onClick={() => updateViewMode('simple')}
@@ -561,50 +704,47 @@ const NodeOverview = ({ addToast }) => {
             </button>
           </div>
 
-          <Link to="/nodes/assignments" className="flex items-center space-x-2 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-bold text-slate-200 transition-colors hover:border-blue-500/40 hover:bg-slate-700 hover:text-blue-200">
+          <Link to="/nodes/assignments" className="inline-flex h-10 items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-4 text-sm font-bold text-slate-200 transition-colors hover:border-blue-500/40 hover:bg-slate-750 hover:text-blue-200">
             <ArrowLeftRight size={18} />
             <span>Printer Assignments</span>
           </Link>
 
-          <button onClick={() => setIsModalOpen(true)} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center space-x-2 shadow-lg shadow-blue-900/20">
-            <Plus size={18} /> <span>Add Node</span>
-          </button>
-        </div>
+          <ToolbarButton icon={Plus} variant="primary" onClick={() => setIsModalOpen(true)}>Add Node</ToolbarButton>
+          </>
+        )}
+      />
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <MetricCard label="Online" value={onlineCount} helper="Heartbeat received" icon={Server} tone="green" />
+        <MetricCard label="Offline" value={offlineCount} helper="Approved but unreachable" icon={Power} tone={offlineCount ? 'red' : 'slate'} />
+        <MetricCard label="Storage alerts" value={storageIssueCount} helper="NFS checks need attention" icon={HardDrive} tone={storageIssueCount ? 'amber' : 'green'} />
+        <MetricCard label="Pi Zero nodes" value={piZeroCount} helper="Keep workloads modest" icon={Info} tone="blue" />
       </div>
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <div className="rounded-lg border border-slate-700 bg-slate-800/70 px-4 py-3">
-          <p className="text-[10px] font-bold uppercase text-slate-500">Online</p>
-          <p className="mt-1 text-xl font-bold text-green-300">{onlineCount}</p>
-        </div>
-        <div className="rounded-lg border border-slate-700 bg-slate-800/70 px-4 py-3">
-          <p className="text-[10px] font-bold uppercase text-slate-500">Offline</p>
-          <p className="mt-1 text-xl font-bold text-slate-200">{offlineCount}</p>
-        </div>
-        <div className="rounded-lg border border-slate-700 bg-slate-800/70 px-4 py-3">
-          <p className="text-[10px] font-bold uppercase text-slate-500">Storage Alerts</p>
-          <p className={`mt-1 text-xl font-bold ${storageIssueCount ? 'text-orange-300' : 'text-green-300'}`}>{storageIssueCount}</p>
-        </div>
-        <div className="rounded-lg border border-slate-700 bg-slate-800/70 px-4 py-3">
-          <p className="text-[10px] font-bold uppercase text-slate-500">Pi Zero Nodes</p>
-          <p className="mt-1 text-xl font-bold text-blue-300">{piZeroCount}</p>
+      <div className="app-card-soft p-4">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="text-sm font-bold text-slate-200">Node search</p>
+            <HelpText>Nodes are Raspberry Pis that run Klipper, Moonraker, and the node agent for printer control.</HelpText>
+          </div>
+          <SearchBox
+            value={searchTerm}
+            onChange={setSearchTerm}
+            placeholder="Search hostname, IP, model, or version..."
+            className="w-full md:w-96"
+          />
         </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {nodes.map((node) => {
+        {filteredNodes.map((node) => {
           const operation = getNodeOperation(node);
           const showOperationPanel = operation && operation.operation !== 'refresh';
           const actionDisabled = isNodeBusy(node.id) || Boolean(node.active_operation);
           const storage = storageStatus[node.id] || {};
           const storageBusy = operation?.operation === 'nfs_mounting' || nodeAction(node.id) === 'mount-nfs';
           const nodeLooksOnline = node.online || Boolean(operation);
-          const statusLabel = operation ? operation.label : node.online ? 'Online' : node.approved ? 'Offline' : 'Discovered';
-          const statusClass = operation
-            ? 'bg-blue-900/50 text-blue-300 border border-blue-500/30'
-            : node.online
-              ? 'bg-green-900/40 text-green-400'
-              : 'bg-red-900/40 text-red-400';
+          const statusMeta = nodeStatusMeta(node, operation);
           const iconClass = operation
             ? 'bg-blue-500/10 text-blue-400'
             : node.online
@@ -640,7 +780,15 @@ const NodeOverview = ({ addToast }) => {
           const healthFreshness = hardware.checked_at ? `Updated ${formatLastSeen(hardware.checked_at)}` : 'Waiting for live sample';
           const inventory = nodeInventory[node.id] || {};
           const usbDevices = inventory.usb_devices || node.usb_devices || [];
+          const usbSerialDevices = usbDevices.filter((device) => {
+            const value = `${device.path || ''} ${device.id || device.device_id || ''}`.toLowerCase();
+            return value.includes('serial') || value.includes('by-id') || value.includes('tty') || value.includes('usb');
+          });
           const serviceInstances = inventory.service_instances || node.service_instances || [];
+          const lastReboot = latestNodeEvent(node.id, (type) => type === 'node_reboot');
+          const lastInstall = latestNodeEvent(node.id, (type) => type.includes('install') || type.includes('software'));
+          const lastNfs = latestNodeEvent(node.id, (type) => type.includes('storage') || type.includes('nfs'));
+          const lastUpdate = latestNodeEvent(node.id, (type) => type.includes('node_update'));
           const warnings = [
             /zero 2/i.test(node.model || '') ? 'Pi Zero 2 W: avoid webcams or multiple printers on this node.' : null,
             Number(temperature || 0) >= 75 ? 'High CPU temperature.' : null,
@@ -651,7 +799,7 @@ const NodeOverview = ({ addToast }) => {
           ].filter(Boolean);
 
           return (
-          <div key={node.id} className={`bg-slate-800 border rounded-xl p-5 space-y-4 transition-all duration-300 ease-out ${node.approved ? 'border-slate-700' : 'border-blue-500 shadow-lg shadow-blue-900/10'}`}>
+          <div key={node.id} className={`app-card p-5 space-y-4 transition-all duration-300 ease-out ${node.approved ? '' : 'border-blue-500/60 shadow-blue-950/20'}`}>
             <div className="flex justify-between items-start min-w-0">
                <div className="flex items-center space-x-3 truncate">
                   <div className={`p-2 rounded-lg transition-all duration-300 ease-out ${iconClass}`}>
@@ -665,10 +813,19 @@ const NodeOverview = ({ addToast }) => {
                     </p>
                   </div>
                </div>
-               <div className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded-full transition-all duration-300 ease-out ${statusClass}`}>
-                 {statusLabel}
-               </div>
+               <StatusPill tone={statusMeta.tone} pulse={Boolean(operation)} title={statusMeta.tooltip}>{statusMeta.label}</StatusPill>
             </div>
+
+            <DetailGrid
+              items={[
+                { label: 'Last heartbeat', value: formatLastSeen(node.last_seen), helper: formatDateTime(node.last_seen) },
+                { label: 'Last update', value: node.last_update_status || 'Never', helper: node.last_update_at ? formatDateTime(node.last_update_at) : lastUpdate?.message },
+                { label: 'Last reboot', value: lastReboot ? formatLastSeen(lastReboot.created_at) : 'Never', helper: lastReboot?.message },
+                { label: 'Last install', value: lastInstall ? formatLastSeen(lastInstall.created_at) : 'Never', helper: lastInstall?.message },
+                { label: 'Last NFS mount', value: lastNfs ? formatLastSeen(lastNfs.created_at) : (storage.checked_at ? formatLastSeen(storage.checked_at) : 'Never'), helper: lastNfs?.message || storage.error },
+              ]}
+              className="grid-cols-2"
+            />
 
             {isAdvancedMode ? (
               <div className="rounded-lg border border-slate-700/60 bg-slate-900/20 p-3 space-y-3 transition-all duration-300 ease-out">
@@ -756,12 +913,12 @@ const NodeOverview = ({ addToast }) => {
 
                   {(!storage.nfs_available && node.approved) && (
                     <button
-                      onClick={() => handleNodeAction(node.id, 'mount-nfs')}
+                      onClick={() => requestNodeAction(node, 'mount-nfs')}
                       disabled={actionDisabled || storageBusy}
                       className="w-full py-1 bg-orange-600/20 hover:bg-orange-600/40 text-orange-400 text-[10px] font-bold rounded border border-orange-500/30 transition-colors flex items-center justify-center space-x-1"
                     >
                       {storageBusy ? <Loader2 size={10} className="animate-spin" /> : <HardDrive size={10} />}
-                      <span>{storageBusy ? 'Auto-Connecting...' : 'Auto-Connect Now'}</span>
+                      <span>{storageBusy ? 'Testing...' : 'Test NFS Connection'}</span>
                     </button>
                   )}
 
@@ -783,18 +940,35 @@ const NodeOverview = ({ addToast }) => {
             )}
 
             {isAdvancedMode && node.last_update_status && (
-              <div className={`p-2 rounded-lg text-[10px] border ${node.last_update_status === 'failed' ? 'bg-red-500/5 border-red-500/20 text-red-400' : 'bg-blue-500/5 border-blue-500/20 text-blue-400'}`}>
-                <p className="font-bold uppercase mb-0.5">Last Update: {node.last_update_status}</p>
-                <p className="opacity-80 italic line-clamp-1">{node.last_update_message}</p>
+              <div className={`p-3 rounded-lg text-[10px] border ${node.last_update_status === 'failed' ? 'bg-red-500/5 border-red-500/20 text-red-300' : node.last_update_status === 'already_up_to_date' ? 'bg-green-500/5 border-green-500/20 text-green-300' : 'bg-blue-500/5 border-blue-500/20 text-blue-300'}`}>
+                <div className="flex items-center justify-between gap-3">
+                  <p className="font-bold uppercase">Update Result: {String(node.last_update_status).replaceAll('_', ' ')}</p>
+                  <span className="font-mono text-slate-500">{node.agent_version || 'unknown version'}</span>
+                </div>
+                <p className="mt-1 opacity-80 line-clamp-2">{node.last_update_message || 'No update message reported.'}</p>
+                <p className="mt-1 text-slate-500">Timestamp: {formatDateTime(node.last_update_at)}</p>
               </div>
             )}
 
             {isAdvancedMode && (
               <div className="rounded-lg border border-slate-700/60 bg-slate-900/30 p-3 space-y-3">
                 <div>
-                  <div className="flex items-center gap-2 mb-2">
-                    <Usb size={14} className="text-purple-300" />
-                    <p className="text-[10px] font-bold uppercase text-slate-400">USB Serial Devices</p>
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div className="flex items-center gap-2">
+                      <Usb size={14} className="text-purple-300" />
+                      <p className="text-[10px] font-bold uppercase text-slate-400">USB Devices</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setUsbDetailNode(node)}
+                      className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 text-[9px] font-bold uppercase text-blue-300 hover:border-blue-500/40"
+                    >
+                      Details
+                    </button>
+                  </div>
+                  <div className="mb-2 grid grid-cols-2 gap-2">
+                    <SimpleMetric label="USB Serial Devices" value={usbSerialDevices.length} />
+                    <SimpleMetric label="Connected USB Devices" value={usbDevices.length} />
                   </div>
                   {usbDevices.length > 0 ? (
                     <div className="space-y-1">
@@ -872,7 +1046,7 @@ const NodeOverview = ({ addToast }) => {
                       disabled={actionDisabled}
                       busy={nodeAction(node.id) === 'restart-agent'}
                       title="Restart node agent"
-                      onClick={() => handleNodeAction(node.id, 'restart-agent')}
+                      onClick={() => requestNodeAction(node, 'restart-agent')}
                     />
                     <ActionButton
                       icon={Layers}
@@ -881,7 +1055,7 @@ const NodeOverview = ({ addToast }) => {
                       disabled={actionDisabled}
                       busy={nodeAction(node.id) === 'restart-services'}
                       title="Restart printer services"
-                      onClick={() => handleNodeAction(node.id, 'restart-services')}
+                      onClick={() => requestNodeAction(node, 'restart-services')}
                     />
                     {node.agent_version && (
                       <ActionButton
@@ -891,7 +1065,7 @@ const NodeOverview = ({ addToast }) => {
                         disabled={actionDisabled}
                         busy={nodeAction(node.id) === 'update-agent'}
                         title="Update node agent"
-                        onClick={() => handleUpdateNodeAgent(node.id)}
+                        onClick={() => requestNodeAction(node, 'update-agent')}
                       />
                     )}
                   </div>
@@ -904,7 +1078,7 @@ const NodeOverview = ({ addToast }) => {
                       disabled={actionDisabled}
                       busy={nodeAction(node.id) === 'reboot'}
                       title="Reboot node"
-                      onClick={() => handleNodeAction(node.id, 'reboot')}
+                      onClick={() => requestNodeAction(node, 'reboot')}
                     />
                     <ActionButton
                       icon={Trash2}
@@ -912,7 +1086,7 @@ const NodeOverview = ({ addToast }) => {
                       tone="red"
                       disabled={actionDisabled}
                       busy={nodeAction(node.id) === 'delete'}
-                      onClick={() => handleDeleteNode(node.id)}
+                      onClick={() => requestDeleteNode(node)}
                     />
                   </div>
                 </>
@@ -922,14 +1096,25 @@ const NodeOverview = ({ addToast }) => {
           </div>
           );
         })}
+        {filteredNodes.length === 0 && (
+          <div className="col-span-full">
+            <EmptyState
+              icon={Server}
+              title={nodes.length === 0 ? 'No nodes registered' : 'No nodes match this search'}
+              description={nodes.length === 0 ? 'Install the node agent on a Raspberry Pi or register a known node manually to begin provisioning printers.' : 'Search by hostname, IP address, model, or version.'}
+              action={<ToolbarButton icon={Plus} variant="primary" onClick={() => setIsModalOpen(true)}>Add Node</ToolbarButton>}
+            />
+          </div>
+        )}
       </div>
 
       <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title="Add Node Manually">
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div><label className="text-[10px] font-bold text-slate-500 uppercase">Hostname</label><input required name="hostname" value={formData.hostname} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
+          <HelpText>Nodes are Raspberry Pis that run Klipper, Moonraker, and the node agent. Most nodes register themselves automatically, but manual registration is useful while recovering or testing a Pi.</HelpText>
+          <div><label className="text-[10px] font-bold text-slate-500 uppercase">Hostname</label><input required name="hostname" value={formData.hostname} onChange={handleInputChange} className="app-input w-full" placeholder="client1" /></div>
           <div className="grid grid-cols-2 gap-4">
-            <div><label className="text-[10px] font-bold text-slate-500 uppercase">IP Address</label><input required name="ip_address" value={formData.ip_address} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
-            <div><label className="text-[10px] font-bold text-slate-500 uppercase">Agent Port</label><input type="number" name="agent_port" value={formData.agent_port} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
+            <div><label className="text-[10px] font-bold text-slate-500 uppercase">IP Address</label><input required name="ip_address" value={formData.ip_address} onChange={handleInputChange} className="app-input w-full" placeholder="10.1.8.136" /></div>
+            <div><label className="text-[10px] font-bold text-slate-500 uppercase">Agent Port</label><input type="number" name="agent_port" value={formData.agent_port} onChange={handleInputChange} className="app-input w-full" /></div>
           </div>
           <div className="flex justify-end pt-4"><button disabled={isSubmitting} className="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded-lg font-bold text-sm shadow-lg shadow-blue-900/20">Register</button></div>
         </form>
@@ -937,20 +1122,63 @@ const NodeOverview = ({ addToast }) => {
 
       <Modal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} title="Edit Node">
         <form onSubmit={handleUpdateNode} className="space-y-4">
-          <div><label className="text-[10px] font-bold text-slate-500 uppercase">Hostname</label><input required name="hostname" value={editData.hostname} onChange={handleEditInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
+          <HelpText>Keep the IP and agent port aligned with the node-agent install. Changing approval can trigger storage auto-connect on the next heartbeat.</HelpText>
+          <div><label className="text-[10px] font-bold text-slate-500 uppercase">Hostname</label><input required name="hostname" value={editData.hostname} onChange={handleEditInputChange} className="app-input w-full" /></div>
           <div className="flex gap-4">
-            <div className="flex-1"><label className="text-[10px] font-bold text-slate-500 uppercase">IP Address</label><input required name="ip_address" value={editData.ip_address} onChange={handleEditInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
-            <div className="w-32"><label className="text-[10px] font-bold text-slate-500 uppercase">Port</label><input type="number" name="agent_port" value={editData.agent_port} onChange={handleEditInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
+            <div className="flex-1"><label className="text-[10px] font-bold text-slate-500 uppercase">IP Address</label><input required name="ip_address" value={editData.ip_address} onChange={handleEditInputChange} className="app-input w-full" /></div>
+            <div className="w-32"><label className="text-[10px] font-bold text-slate-500 uppercase">Port</label><input type="number" name="agent_port" value={editData.agent_port} onChange={handleEditInputChange} className="app-input w-full" /></div>
             <button type="button" onClick={handleDetectPort} disabled={isDetecting} className="self-end p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-blue-400 transition-colors" title="Detect Port">
                {isDetecting ? <Loader2 size={20} className="animate-spin" /> : <Search size={20} />}
             </button>
           </div>
-          <div><label className="text-[10px] font-bold text-slate-500 uppercase">Model</label><input name="model" value={editData.model} onChange={handleEditInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
-          <div><label className="text-[10px] font-bold text-slate-500 uppercase">Notes</label><textarea name="notes" value={editData.notes} onChange={handleEditInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm resize-none outline-none focus:border-blue-500" rows={3} /></div>
+          <div><label className="text-[10px] font-bold text-slate-500 uppercase">Model</label><input name="model" value={editData.model} onChange={handleEditInputChange} className="app-input w-full" placeholder="Raspberry Pi 4" /></div>
+          <div><label className="text-[10px] font-bold text-slate-500 uppercase">Notes</label><textarea name="notes" value={editData.notes} onChange={handleEditInputChange} className="app-textarea w-full resize-none" rows={3} /></div>
           <div className="flex items-center space-x-2"><input type="checkbox" id="approved-check" name="approved" checked={editData.approved} onChange={handleEditInputChange} className="w-4 h-4 rounded bg-slate-900 border-slate-700" /><label htmlFor="approved-check" className="text-xs font-bold text-slate-400 uppercase">Approved</label></div>
           <div className="flex justify-end pt-4"><button disabled={isSubmitting} className="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded-lg font-bold text-sm shadow-lg shadow-blue-900/20">Save Changes</button></div>
         </form>
       </Modal>
+
+      <Modal isOpen={Boolean(usbDetailNode)} onClose={() => setUsbDetailNode(null)} title={`USB Details - ${usbDetailNode?.name || usbDetailNode?.hostname || 'Node'}`}>
+        <div className="space-y-4">
+          <HelpText>Choose the control board connected to this printer. If a serial path changes after unplugging a cable, refresh the node before assigning the MCU.</HelpText>
+          {usbDetailDevices.length > 0 ? (
+            <div className="space-y-3">
+              {usbDetailDevices.map((device, index) => (
+                <div key={`${device.path || device.id || index}`} className="rounded-lg border border-slate-700 bg-slate-900/60 p-3">
+                  <DetailGrid
+                    items={[
+                      { label: 'Device name', value: device.name || device.id || device.device_id || `USB device ${index + 1}` },
+                      { label: 'VID', value: device.vid || device.vendor_id || '--', mono: true },
+                      { label: 'PID', value: device.pid || device.product_id || '--', mono: true },
+                      { label: 'Serial path', value: device.path || device.serial_path || '--', mono: true },
+                    ]}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState
+              icon={Usb}
+              title="No USB devices reported"
+              description="Refresh the node after plugging in the printer control board. The node agent reports serial devices when Linux exposes them under /dev."
+            />
+          )}
+        </div>
+      </Modal>
+
+      <ConfirmActionModal
+        isOpen={Boolean(confirmAction)}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={runConfirmedAction}
+        title={confirmAction?.title}
+        actionLabel={confirmAction?.actionLabel}
+        itemName={confirmAction?.node?.name || confirmAction?.node?.hostname}
+        description={confirmAction?.description}
+        consequences={confirmAction?.consequences || []}
+        requireText={confirmAction?.requireText}
+        confirmVariant={confirmAction?.confirmVariant || 'danger'}
+        busy={Boolean(confirmAction?.node && isNodeBusy(confirmAction.node.id))}
+      />
     </div>
   );
 };

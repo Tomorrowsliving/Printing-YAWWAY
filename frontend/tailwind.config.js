@@ -9,6 +9,7 @@ module.exports = {
       colors: {
         slate: {
           750: '#1e293b', // Custom color for better contrast in dark mode
+          850: '#142033',
         }
       }
     },

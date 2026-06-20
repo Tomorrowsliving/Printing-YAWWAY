@@ -221,9 +221,15 @@ async def _create_farm_backup(db: AsyncSession, source: str = "manual"):
 
         event = Event(
             severity="info",
-            event_type="backup",
+            event_type="backup_created",
             message=f"{source.title()} backup created: {filename}",
-            details={"source": source, "manifest_tables": list(manifest["tables"].keys())},
+            details={
+                "source": source,
+                "filename": filename,
+                "file_path": file_path,
+                "manifest_tables": list(manifest["tables"].keys()),
+                "created_at": datetime.datetime.now().isoformat(),
+            },
         )
         db.add(event)
 
@@ -243,9 +249,18 @@ async def _create_farm_backup(db: AsyncSession, source: str = "manual"):
             severity="error",
             event_type="backup_failed",
             message=f"{source.title()} backup failed: {filename}",
-            details={"error": str(e)},
+            details={
+                "source": source,
+                "filename": filename,
+                "file_path": file_path,
+                "what_failed": "Backup archive could not be created",
+                "likely_cause": "Storage is not writable, the backup path is missing, or one of the source files could not be read",
+                "suggested_fix": "Check the NFS/storage status page, confirm backup storage is mounted, then retry the backup",
+                "error": str(e),
+            },
         ))
         await db.flush()
+        await db.commit()
         raise HTTPException(status_code=500, detail=f"Backup failed: {str(e)}")
 
 @router.post("/create")
@@ -283,8 +298,15 @@ async def restore_backup(backup_id: int, db: AsyncSession = Depends(get_db)):
             restored_path = restore_file_edit_backup(backup.file_path)
             event = Event(
                 severity="warning",
-                event_type="restore",
+                event_type="backup_restored",
                 message=f"File restored from backup: {backup.filename}",
+                details={
+                    "backup_id": backup.id,
+                    "backup_type": backup.backup_type,
+                    "filename": backup.filename,
+                    "file_path": backup.file_path,
+                    "restored_path": restored_path,
+                },
             )
             db.add(event)
             await db.flush()
@@ -304,11 +326,35 @@ async def restore_backup(backup_id: int, db: AsyncSession = Depends(get_db)):
 
         event = Event(
             severity="warning",
-            event_type="restore",
-            message=f"System restored from backup: {backup.filename}"
+            event_type="backup_restored",
+            message=f"System restored from backup: {backup.filename}",
+            details={
+                "backup_id": backup.id,
+                "backup_type": backup.backup_type,
+                "filename": backup.filename,
+                "file_path": backup.file_path,
+                "restored_path": PRINTERS_PATH,
+            },
         )
         db.add(event)
         await db.flush()
         return {"status": "success", "message": "Restore complete"}
     except Exception as e:
+        db.add(Event(
+            severity="error",
+            event_type="backup_restore_failed",
+            message=f"Backup restore failed: {backup.filename}",
+            details={
+                "backup_id": backup.id,
+                "backup_type": backup.backup_type,
+                "filename": backup.filename,
+                "file_path": backup.file_path,
+                "what_failed": "Backup restore could not complete",
+                "likely_cause": "The archive is missing, unreadable, corrupt, or storage is not writable",
+                "suggested_fix": "Check the backup file exists, verify storage is mounted read/write, then retry restore",
+                "error": str(e),
+            },
+        ))
+        await db.flush()
+        await db.commit()
         raise HTTPException(status_code=500, detail=f"Restore failed: {str(e)}")

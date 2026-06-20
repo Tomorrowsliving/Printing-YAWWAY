@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   Printer, Play, AlertTriangle, ExternalLink, Settings as SettingsIcon,
-  RefreshCw, Plus, Loader2, ChevronRight, ChevronLeft, Server, Usb, Check, ShieldAlert, Upload, Book, FileCode, Trash2
+  RefreshCw, Plus, Loader2, ChevronRight, ChevronLeft, Server, Usb, Check, ShieldAlert, Upload, Book, FileCode, Trash2, HardDrive, DatabaseBackup, Copy
 } from 'lucide-react';
 import { printerService, nodeService } from '../services/api';
 import { Link } from 'react-router-dom';
-import { Modal } from '../components/UI';
+import { ConfirmActionModal, Modal } from '../components/UI';
+import { DetailGrid, EmptyState, HelpText, MetricCard, PageHeader, Panel, ProgressBar, SearchBox, StatusPill, ToolbarButton } from '../components/DesignSystem';
 import axios from 'axios';
+import { explainApiError, formatDateTime, printerStatusMeta } from '../utils/operator';
 
 const defaultFormData = {
   name: '',
@@ -32,9 +34,14 @@ const slugify = (value) => (
 const Fleet = ({ addToast }) => {
   const [printers, setPrinters] = useState([]);
   const [nodes, setNodes] = useState([]);
+  const [backups, setBackups] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [storageSummary, setStorageSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [confirmAction, setConfirmAction] = useState(null);
 
   // Wizard state
   const [step, setStep] = useState(1);
@@ -57,9 +64,11 @@ const Fleet = ({ addToast }) => {
   useEffect(() => {
     fetchPrinters();
     fetchNodes();
+    fetchFleetAuxiliary();
     const interval = setInterval(() => {
         fetchPrinters();
         fetchNodes();
+        fetchFleetAuxiliary();
     }, 10000);
     return () => clearInterval(interval);
   }, []);
@@ -122,6 +131,19 @@ const Fleet = ({ addToast }) => {
     } catch (err) {}
   };
 
+  const fetchFleetAuxiliary = async () => {
+    try {
+      const [backupRes, storageRes, eventRes] = await Promise.allSettled([
+        axios.get('/api/backups'),
+        axios.get('/api/storage/nfs-status'),
+        axios.get('/api/events', { params: { limit: 200 } }),
+      ]);
+      if (backupRes.status === 'fulfilled') setBackups(Array.isArray(backupRes.value.data) ? backupRes.value.data : []);
+      if (storageRes.status === 'fulfilled') setStorageSummary(storageRes.value.data);
+      if (eventRes.status === 'fulfilled') setEvents(Array.isArray(eventRes.value.data) ? eventRes.value.data : []);
+    } catch (err) {}
+  };
+
   const checkSoftware = useCallback(async (nodeId, options = {}) => {
     const { background = false, quiet = false } = options;
     if (!background) setSoftwareLoading(true);
@@ -129,7 +151,11 @@ const Fleet = ({ addToast }) => {
       const res = await axios.get(`/api/nodes/${nodeId}/software/status`);
       setSoftwareStatus(res.data);
     } catch (err) {
-      if (!quiet) addToast("Failed to check software status on node", "error");
+      if (!quiet) addToast(explainApiError(err, {
+        what: 'Node software check failed',
+        cause: 'The node-agent software status endpoint did not answer.',
+        fix: 'Refresh the node and confirm the agent is online before provisioning.',
+      }), "error");
     } finally {
       if (!background) setSoftwareLoading(false);
     }
@@ -166,7 +192,11 @@ const Fleet = ({ addToast }) => {
         addToast(`${labels[type]} installed successfully`, "success");
       }
     } catch (err) {
-      addToast(err.response?.data?.detail || `Failed to install ${labels[type]}`, "error");
+      addToast(explainApiError(err, {
+        what: `${labels[type]} install failed`,
+        cause: 'The node-agent could not complete the install request.',
+        fix: 'Check node-agent logs, network access, and available disk space on the Pi.',
+      }), "error");
       setSoftwareLoading(false);
     } finally {
       setSoftwareLoading(false);
@@ -193,7 +223,11 @@ const Fleet = ({ addToast }) => {
       // In a real app, we'd cross-reference with existing printers
       setMcus({ available, used: [] });
     } catch (err) {
-      addToast(err.response?.data?.detail || "Failed to fetch USB devices from node", "error");
+      addToast(explainApiError(err, {
+        what: 'USB device scan failed',
+        cause: 'The node-agent did not return the connected USB serial devices.',
+        fix: 'Check the node-agent service and reconnect the printer control board USB cable.',
+      }), "error");
     } finally {
       setMcuLoading(false);
     }
@@ -208,7 +242,11 @@ const Fleet = ({ addToast }) => {
     } catch (err) {
       const message = err.response?.data?.detail || "Failed to fetch Klipper example configs";
       setExamplesError(message);
-      addToast(message, "error");
+      addToast(explainApiError(err, {
+        what: 'Could not load Klipper examples',
+        cause: 'The backend could not fetch the upstream example list.',
+        fix: 'Try again later or start from a minimal config.',
+      }), "error");
     } finally {
       setExamplesLoading(false);
     }
@@ -225,7 +263,11 @@ const Fleet = ({ addToast }) => {
       setSelectedNodeExample(example.name);
       setStep(5);
     } catch (err) {
-      addToast("Failed to fetch example content", "error");
+      addToast(explainApiError(err, {
+        what: 'Could not load example config',
+        cause: 'The selected example file could not be downloaded.',
+        fix: 'Pick another template or start with the minimal config.',
+      }), "error");
     }
   };
 
@@ -302,42 +344,57 @@ const Fleet = ({ addToast }) => {
       const res = await axios.get(`/api/nodes/${nodeId}/storage/check`);
       setStorageCheck(res.data);
     } catch (err) {
-      addToast("Failed to check storage status on node", "error");
+      addToast(explainApiError(err, {
+        what: 'NFS check failed',
+        cause: 'The node-agent storage check did not answer.',
+        fix: 'Confirm the node is online and the agent can reach /mnt/klipper-farm.',
+      }), "error");
     } finally {
       setStorageLoading(false);
     }
   };
 
   const handlePrinterRestart = async (printerId, target) => {
-    if (!window.confirm(`Restart ${target} for this printer?`)) return;
     try {
         await axios.post(`/api/printers/${printerId}/restart`, { target });
         addToast(`${target} restart initiated`, "success");
+        fetchFleetAuxiliary();
     } catch (err) {
-        addToast(err.response?.data?.detail || "Restart failed", "error");
+        addToast(explainApiError(err, {
+          what: 'Restart services failed',
+          cause: 'The node-agent or Moonraker service restart command did not complete.',
+          fix: 'Check the assigned node, service names, and event log.',
+        }), "error");
     }
   };
 
   const handleEmergencyStop = async (printer) => {
-    if (!window.confirm(`Emergency stop ${printer.name}?`)) return;
     try {
       await axios.post(`/api/printers/${printer.id}/emergency-stop`);
       addToast('Emergency stop sent', 'success');
       fetchPrinters();
+      fetchFleetAuxiliary();
     } catch (err) {
-      addToast(err.response?.data?.detail || 'Emergency stop failed', 'error');
+      addToast(explainApiError(err, {
+        what: 'Emergency stop failed',
+        cause: 'Moonraker did not accept the emergency stop command.',
+        fix: 'Use the printer hardware controls if motion is unsafe, then check Moonraker connectivity.',
+      }), 'error');
     }
   };
 
   const handleDeletePrinter = async (printer) => {
-    if (!window.confirm(`Delete ${printer.name || 'this printer'} from the fleet?`)) return;
-
     try {
       await printerService.deletePrinter(printer.id);
       addToast(`${printer.name || 'Printer'} deleted`, "success");
       fetchPrinters();
+      fetchFleetAuxiliary();
     } catch (err) {
-      addToast(err.response?.data?.detail || "Failed to delete printer", "error");
+      addToast(explainApiError(err, {
+        what: 'Delete printer failed',
+        cause: 'The API could not remove the printer profile.',
+        fix: 'Refresh the fleet and check whether the printer still exists.',
+      }), "error");
     }
   };
 
@@ -392,23 +449,64 @@ const Fleet = ({ addToast }) => {
       if (createdPrinterId) {
         await printerService.deletePrinter(createdPrinterId).catch(() => {});
       }
-      addToast(err.response?.data?.detail || "Failed to create printer", 'error');
+      addToast(explainApiError(err, {
+        what: 'Printer creation failed',
+        cause: 'The dashboard could not create the central profile or provision services on the node.',
+        fix: 'Check NFS status, MCU selection, and node-agent connectivity, then retry from the review screen.',
+      }), 'error');
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const getStatusColor = (status) => {
-    if (!status) return 'bg-slate-500';
-    switch (status.toLowerCase()) {
-      case 'printing': return 'bg-blue-500';
-      case 'idle': return 'bg-green-500';
-      case 'online': return 'bg-green-500';
-      case 'starting': return 'bg-orange-500';
-      case 'error': return 'bg-red-500';
-      case 'offline': return 'bg-slate-500';
-      default: return 'bg-slate-400';
-    }
+  const requestPrinterAction = (printer, action, target = 'all') => {
+    const printerName = printer?.name || 'this printer';
+    const copy = {
+      delete: {
+        title: 'Delete Printer',
+        actionLabel: 'Delete Printer',
+        requireText: 'DELETE',
+        description: `Delete ${printerName} from the fleet.`,
+        consequences: [
+          'The logical printer profile will be removed from the dashboard.',
+          'Assignments are removed, but central config and G-code files stay in storage.',
+          'Use Backups before deleting if you may need to restore the profile later.',
+        ],
+      },
+      restart: {
+        title: 'Restart Printer Services',
+        actionLabel: 'Restart Services',
+        description: `Restart Klipper and Moonraker for ${printerName}.`,
+        consequences: [
+          'Active prints on this printer may stop.',
+          'Mainsail and Moonraker will briefly disconnect.',
+          'Use this after config changes or service errors.',
+        ],
+        confirmVariant: 'warning',
+      },
+      emergency: {
+        title: 'Emergency Stop',
+        actionLabel: 'Send Emergency Stop',
+        description: `Send an emergency stop command to ${printerName}.`,
+        consequences: [
+          'Klipper will stop printer motion immediately if Moonraker is reachable.',
+          'You may need a firmware restart before printing again.',
+          'Use physical controls if the printer is unsafe and the command cannot reach Moonraker.',
+        ],
+        confirmVariant: 'danger',
+      },
+    }[action];
+
+    setConfirmAction({ printer, action, target, ...(copy || {}) });
+  };
+
+  const runConfirmedAction = async () => {
+    if (!confirmAction?.printer) return;
+    const { printer, action, target } = confirmAction;
+    setConfirmAction(null);
+    if (action === 'delete') await handleDeletePrinter(printer);
+    if (action === 'restart') await handlePrinterRestart(printer.id, target || 'all');
+    if (action === 'emergency') await handleEmergencyStop(printer);
   };
 
   const getPrinterNode = (printer) => printer.node || nodes.find(n => n.id === printer.assigned_node_id);
@@ -420,6 +518,15 @@ const Fleet = ({ addToast }) => {
   const onlineNodes = nodes.filter(n => n.online);
   const selectedNode = nodes.find(n => n.id === formData.assigned_node_id);
   const mainsailUrl = selectedNode?.ip_address ? `http://${selectedNode.ip_address}` : null;
+  const generatedPaths = {
+    config: `/mnt/klipper-farm/printers/${formData.slug || '<slug>'}/config`,
+    gcodes: `/mnt/klipper-farm/printers/${formData.slug || '<slug>'}/gcodes`,
+    logs: `/mnt/klipper-farm/printers/${formData.slug || '<slug>'}/logs`,
+  };
+  const generatedServices = {
+    klipper: `klipper-${formData.slug || '<slug>'}.service`,
+    moonraker: `moonraker-${formData.slug || '<slug>'}.service`,
+  };
   const installJob = activeInstallJob;
   const installJobRunning = installJob?.status === 'running';
   const installJobLogs = Array.isArray(installJob?.log) ? installJob.log.slice(-5) : [];
@@ -433,6 +540,73 @@ const Fleet = ({ addToast }) => {
   const filteredExamples = examples.filter(example =>
     example.name.toLowerCase().includes(exampleFilter.trim().toLowerCase())
   );
+  const fleetSummary = {
+    total: printers.length,
+    printing: printers.filter(printer => printer.status === 'printing').length,
+    ready: printers.filter(printer => ['idle', 'online'].includes(printer.status)).length,
+    needsAttention: printers.filter(printer => ['offline', 'error'].includes(printer.status)).length,
+  };
+  const latestPrinterEvent = (printerId, matcher) => events.find((event) => (
+    String(event.printer_id) === String(printerId) && matcher(event.event_type || '')
+  ));
+  const search = searchTerm.trim().toLowerCase();
+  const filteredPrinters = printers.filter((printer) => {
+    if (!search) return true;
+    const node = getPrinterNode(printer);
+    return [
+      printer.name,
+      printer.slug,
+      printer.status,
+      printer.notes?.model,
+      printer.model,
+      node?.hostname,
+      node?.name,
+      node?.ip_address,
+    ].some((value) => String(value || '').toLowerCase().includes(search));
+  });
+  const failedBackups = backups.filter((backup) => backup.status !== 'success');
+  const missingNfsDirs = Object.entries(storageSummary?.required_directories || {})
+    .filter(([, exists]) => !exists)
+    .map(([name]) => name);
+  const warnings = [
+    ...nodes.filter(node => node.approved && !node.online).map(node => ({
+      key: `offline-node-${node.id}`,
+      label: 'Offline node',
+      message: `${node.name || node.hostname} has no recent heartbeat.`,
+    })),
+    ...printers.filter(printer => !printer.assigned_node_id && !printer.node).map(printer => ({
+      key: `unassigned-printer-${printer.id}`,
+      label: 'Unassigned printer',
+      message: `${printer.name} is not assigned to a node.`,
+    })),
+    ...failedBackups.slice(0, 4).map(backup => ({
+      key: `failed-backup-${backup.id}`,
+      label: 'Failed backup',
+      message: backup.error_message || backup.filename,
+    })),
+    ...missingNfsDirs.map(dir => ({
+      key: `missing-nfs-${dir}`,
+      label: 'Missing NFS path',
+      message: `${dir} directory is missing under central storage.`,
+    })),
+  ];
+  const configurationSummary = [
+    `Printer: ${formData.name || '-'}`,
+    `Slug: ${formData.slug || '-'}`,
+    `Node: ${selectedNode?.hostname || '-'}`,
+    `MCU: ${formData.expected_mcu_serial || '-'}`,
+    `Klipper service: ${generatedServices.klipper}`,
+    `Moonraker service: ${generatedServices.moonraker}`,
+    `Moonraker port: ${formData.moonraker_port || 7125}`,
+    `Config path: ${generatedPaths.config}`,
+    `G-code path: ${generatedPaths.gcodes}`,
+    `Logs path: ${generatedPaths.logs}`,
+  ].join('\n');
+
+  const copyConfigurationSummary = async () => {
+    await navigator.clipboard.writeText(configurationSummary);
+    addToast('Configuration summary copied', 'success');
+  };
 
   if (loading && printers.length === 0) {
     return (
@@ -445,111 +619,202 @@ const Fleet = ({ addToast }) => {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h2 className="text-2xl font-bold">Printers</h2>
-          <p className="text-xs text-slate-500 mt-1">Printer status, assigned controller, print progress, and quick controls.</p>
-        </div>
-        <button
-          onClick={() => { setStep(1); setIsModalOpen(true); }}
-          className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-bold transition-colors shadow-lg"
-        >
-          <Plus size={18} />
-          <span>Add Printer</span>
-        </button>
+      <PageHeader
+        eyebrow="Print Farm"
+        title="Fleet"
+        description="Monitor every printer, see what is running, and keep common controls close without overwhelming new users."
+        actions={(
+          <>
+            <ToolbarButton icon={RefreshCw} variant="secondary" onClick={() => { fetchPrinters(); fetchNodes(); }}>
+              Refresh
+            </ToolbarButton>
+            <ToolbarButton
+              icon={Plus}
+              variant="primary"
+              onClick={() => { setStep(1); setIsModalOpen(true); }}
+            >
+              Add Printer
+            </ToolbarButton>
+          </>
+        )}
+      />
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <MetricCard label="Printers" value={fleetSummary.total} helper="Registered profiles" icon={Printer} tone="slate" />
+        <MetricCard label="Online printers" value={fleetSummary.ready + fleetSummary.printing} helper="Ready or actively printing" icon={Check} tone="green" />
+        <MetricCard label="Online nodes" value={nodes.filter(node => node.online).length} helper="Node agent heartbeats" icon={Server} tone="green" />
+        <MetricCard label="Active prints" value={fleetSummary.printing} helper="Jobs currently active" icon={Play} tone="blue" />
+        <MetricCard label="Pending backups" value={failedBackups.length} helper="Failed or incomplete backups" icon={DatabaseBackup} tone={failedBackups.length ? 'amber' : 'slate'} />
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        {printers.map((printer) => {
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
+        <Panel title="Storage Summary" description="Central storage, backups, and file inventory" icon={HardDrive}>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <MetricCard
+              label="Storage usage"
+              value={storageSummary?.storage_usage_percent != null ? `${storageSummary.storage_usage_percent}%` : 'Check NFS'}
+              helper={storageSummary?.free_space ? `${storageSummary.free_space} free` : storageSummary?.storage_root || 'Central storage path'}
+              icon={HardDrive}
+              tone={storageSummary?.storage_usage_percent >= 85 ? 'red' : 'slate'}
+            />
+            <MetricCard label="Backup count" value={storageSummary?.backup_count ?? backups.length} helper="Farm and file-edit backups" icon={DatabaseBackup} tone="purple" />
+            <MetricCard label="G-code count" value={storageSummary?.gcode_count ?? '--'} helper="Managed G-code files" icon={FileCode} tone="blue" />
+          </div>
+        </Panel>
+
+        <Panel title="Warnings" description="Items that need operator attention" icon={AlertTriangle}>
+          {warnings.length > 0 ? (
+            <div className="space-y-2">
+              {warnings.slice(0, 6).map((warning) => (
+                <div key={warning.key} className="rounded-lg border border-amber-500/20 bg-amber-500/10 p-3">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-amber-300">{warning.label}</p>
+                  <p className="mt-1 text-xs leading-5 text-amber-100/80">{warning.message}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState icon={Check} title="No warnings" description="No offline nodes, unassigned printers, failed backups, or missing NFS directories were found." />
+          )}
+        </Panel>
+      </div>
+
+      <div className="app-card-soft p-4">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="text-sm font-bold text-slate-200">Printer search</p>
+            <HelpText>Printers are logical profiles stored centrally and assigned to nodes for Klipper and Moonraker services.</HelpText>
+          </div>
+          <SearchBox
+            value={searchTerm}
+            onChange={setSearchTerm}
+            placeholder="Search name, model, node, or status..."
+            className="w-full md:w-96"
+          />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        {filteredPrinters.map((printer) => {
           const assignedNode = getPrinterNode(printer);
           const printerMainsailUrl = getPrinterMainsailUrl(printer);
+          const statusMeta = printerStatusMeta(printer);
+          const lastConfig = latestPrinterEvent(printer.id, (type) => type.includes('config') || type.includes('profile'));
+          const lastPrint = latestPrinterEvent(printer.id, (type) => type.includes('print'));
+          const lastAssignment = latestPrinterEvent(printer.id, (type) => type.includes('assignment') || type.includes('migration'));
+          const progressValue = printer.status === 'printing'
+            ? Math.max(1, Math.min(100, printer.progress || 0))
+            : printer.status === 'offline'
+              ? 0
+              : 100;
 
           return (
-            <div key={printer.id} className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden flex flex-col sm:row hover:border-slate-600 transition-colors shadow-sm">
-              <div className="sm:w-48 h-48 bg-slate-900 flex items-center justify-center border-b sm:border-b-0 sm:border-r border-slate-700">
+            <div key={printer.id} className="app-card overflow-hidden transition-colors hover:border-slate-600">
+              <div className="grid grid-cols-1 md:grid-cols-[176px_minmax(0,1fr)]">
+              <div className="flex h-44 items-center justify-center border-b border-slate-800 bg-slate-950 md:h-full md:border-b-0 md:border-r">
                 {printer.webcam_url ? (
                   <img src={printer.webcam_url} alt={printer.name} className="w-full h-full object-cover" />
                 ) : (
-                  <Printer size={64} className="text-slate-700" />
+                  <div className="flex flex-col items-center gap-3 text-slate-700">
+                    <Printer size={54} />
+                    <span className="text-[10px] font-bold uppercase tracking-widest">No webcam</span>
+                  </div>
                 )}
               </div>
 
-              <div className="flex-1 p-5 flex flex-col justify-between">
-                <div className="flex justify-between items-start">
-                  <div>
-                    <div className="flex items-center space-x-2">
-                      <h3 className="font-bold text-lg">{printer.name}</h3>
-                      <div className={`w-3 h-3 rounded-full ${getStatusColor(printer.status)} shadow-sm`}></div>
+              <div className="flex min-w-0 flex-col gap-5 p-5">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="truncate text-lg font-bold text-slate-50">{printer.name}</h3>
+                      <StatusPill tone={statusMeta.tone} status={statusMeta.key} title={statusMeta.tooltip}>{statusMeta.label}</StatusPill>
                     </div>
-                    <p className="text-xs text-slate-400">Node: {assignedNode?.hostname || assignedNode?.name || 'Unassigned'}</p>
-                    {assignedNode?.ip_address && <p className="text-[10px] text-slate-500 font-mono">{assignedNode.ip_address}</p>}
+                    <p className="mt-1 text-xs text-slate-400">Node: {assignedNode?.hostname || assignedNode?.name || 'Unassigned'}</p>
+                    {assignedNode?.ip_address && <p className="mt-0.5 font-mono text-[10px] text-slate-500">{assignedNode.ip_address}</p>}
                   </div>
-                  <div className="flex space-x-2">
-                    <button
-                      onClick={() => handleDeletePrinter(printer)}
-                      className="p-2 bg-red-900/20 hover:bg-red-900/40 rounded-lg transition-colors text-red-400"
+                  <div className="flex shrink-0 items-center gap-2">
+                    <ToolbarButton
+                      onClick={() => requestPrinterAction(printer, 'delete')}
+                      icon={Trash2}
+                      size="icon"
+                      variant="danger"
                       title="Delete Printer"
                       aria-label={`Delete ${printer.name}`}
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                    <Link to={`/printers/${printer.id}`} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors text-slate-300">
+                    />
+                    <Link to={`/printers/${printer.id}`} className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 text-slate-300 transition-colors hover:bg-slate-750 hover:text-white" title="Open printer">
                       <SettingsIcon size={16} />
                     </Link>
                     {printerMainsailUrl && (
-                      <a href={printerMainsailUrl} target="_blank" rel="noopener noreferrer" className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors text-slate-300">
+                      <a href={printerMainsailUrl} target="_blank" rel="noopener noreferrer" className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 text-slate-300 transition-colors hover:bg-slate-750 hover:text-white" title="Open Mainsail">
                         <ExternalLink size={16} />
                       </a>
                     )}
                   </div>
                 </div>
 
-                <div className="py-4">
-                  <div className="flex justify-between items-end mb-1">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">{printer.status || 'offline'}</span>
+                <DetailGrid
+                  items={[
+                    { label: 'Created', value: formatDateTime(printer.created_at) },
+                    { label: 'Last config change', value: lastConfig ? formatDateTime(lastConfig.created_at) : formatDateTime(printer.updated_at), helper: lastConfig?.message },
+                    { label: 'Last print', value: lastPrint ? formatDateTime(lastPrint.created_at) : 'Never', helper: lastPrint?.message },
+                    { label: 'Last assignment', value: lastAssignment ? formatDateTime(lastAssignment.created_at) : (assignedNode ? 'Assigned' : 'Unassigned'), helper: lastAssignment?.message },
+                  ]}
+                  className="grid-cols-2"
+                />
+
+                <div>
+                  <div className="mb-2 flex items-end justify-between gap-3">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Print progress</span>
                     {printer.progress != null && <span className="text-[10px] font-bold text-blue-300">{printer.progress}%</span>}
                   </div>
-                  <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden">
-                    <div
-                      className={`h-full ${getStatusColor(printer.status)} transition-all duration-500`}
-                      style={{ width: printer.status === 'printing' ? `${Math.max(1, Math.min(100, printer.progress || 0))}%` : printer.status === 'offline' ? '0%' : '100%' }}
-                    ></div>
-                  </div>
+                  <ProgressBar value={progressValue} tone={printer.status === 'error' ? 'red' : printer.status === 'printing' ? 'blue' : printer.status === 'offline' ? 'red' : 'green'} />
                   <p className="mt-2 min-h-4 truncate text-[11px] text-slate-500">
                     {printer.active_gcode ? `Active G-code: ${printer.active_gcode}` : 'No active G-code'}
                   </p>
                 </div>
 
-                <div className="flex space-x-2">
-                  <button
-                    onClick={() => handlePrinterRestart(printer.id, 'all')}
-                    className="flex-1 bg-slate-700 hover:bg-slate-600 py-2 rounded-lg text-[10px] font-bold transition-colors text-slate-300 flex items-center justify-center"
+                <div className="grid grid-cols-[1fr_auto_auto] gap-2">
+                  <ToolbarButton
+                    onClick={() => requestPrinterAction(printer, 'restart', 'all')}
+                    icon={RefreshCw}
+                    variant="secondary"
                   >
-                    <RefreshCw size={12} className="mr-1" /> RESTART
-                  </button>
-                  <button
-                    onClick={() => handleEmergencyStop(printer)}
-                    className="px-3 bg-red-900/20 hover:bg-red-900/40 py-2 rounded-lg text-red-500 transition-colors" title="Emergency Stop"
-                  >
-                    <ShieldAlert size={16} />
-                  </button>
-                  <button className="px-4 bg-blue-600 hover:bg-blue-700 py-2 rounded-lg transition-colors text-white shadow-lg shadow-blue-900/20"><Play size={16} fill="currentColor" /></button>
+                    Restart
+                  </ToolbarButton>
+                  <ToolbarButton
+                    onClick={() => requestPrinterAction(printer, 'emergency')}
+                    icon={ShieldAlert}
+                    variant="danger"
+                    size="icon"
+                    title="Emergency Stop"
+                  />
+                  <ToolbarButton icon={Play} variant="primary" size="icon" title="Print actions" />
                 </div>
+              </div>
               </div>
             </div>
           );
         })}
-        {printers.length === 0 && <div className="col-span-full py-16 text-center text-slate-500 italic border border-dashed border-slate-700 rounded-xl">No printers found. Click Add Printer to begin.</div>}
+        {filteredPrinters.length === 0 && (
+          <div className="col-span-full">
+            <EmptyState
+              icon={Printer}
+              title={printers.length === 0 ? 'No printers yet' : 'No printers match this search'}
+              description={printers.length === 0 ? 'Add your first printer profile, choose a node, and provision Klipper/Moonraker services from the guided setup.' : 'Search by printer name, model, assigned node, IP address, or status.'}
+              action={<ToolbarButton icon={Plus} variant="primary" onClick={() => { setStep(1); setIsModalOpen(true); }}>Add Printer</ToolbarButton>}
+            />
+          </div>
+        )}
       </div>
 
       <Modal isOpen={isModalOpen} onClose={closeWizard} title={`Guided Printer Setup - Step ${step} of 5`}>
         {step === 1 && (
           <div className="space-y-4">
             <h3 className="font-bold text-slate-300">1. Printer Profile</h3>
-            <div><label className="text-[10px] font-bold text-slate-500 uppercase">Printer Name</label><input name="name" value={formData.name} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" placeholder="e.g. Ender 3 #1" /></div>
+            <HelpText>Printers are logical profiles stored centrally and assigned to nodes. Pick a clear name; the slug becomes part of service names and storage paths.</HelpText>
+            <div><label className="text-[10px] font-bold text-slate-500 uppercase">Printer Name</label><input name="name" value={formData.name} onChange={handleInputChange} className="app-input w-full" placeholder="e.g. Ender 3 #1" /></div>
             <div className="grid grid-cols-2 gap-4">
-               <div><label className="text-[10px] font-bold text-slate-500 uppercase">Model</label><input name="model" value={formData.model} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
-               <div><label className="text-[10px] font-bold text-slate-500 uppercase">Slug</label><input name="slug" value={formData.slug} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500" /></div>
+               <div><label className="text-[10px] font-bold text-slate-500 uppercase">Model</label><input name="model" value={formData.model} onChange={handleInputChange} className="app-input w-full" placeholder="Ender 3" /></div>
+               <div><label className="text-[10px] font-bold text-slate-500 uppercase">Slug</label><input name="slug" value={formData.slug} onChange={handleInputChange} className="app-input w-full" /></div>
             </div>
             <div className="flex justify-end pt-4"><button onClick={handleProfileNext} className="bg-blue-600 px-6 py-2 rounded-lg font-bold flex items-center">Next <ChevronRight size={18} /></button></div>
           </div>
@@ -558,6 +823,7 @@ const Fleet = ({ addToast }) => {
         {step === 2 && (
           <div className="space-y-4 text-left">
             <h3 className="font-bold text-slate-300">2. Select Target Node</h3>
+            <HelpText>Choose the Raspberry Pi that this printer is physically connected to. Online nodes can provision services and scan USB serial devices.</HelpText>
             <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
                {onlineNodes.map(node => (
                  <button key={node.id} onClick={() => handleNodeSelect(node.id)} className="w-full flex items-center justify-between p-4 bg-slate-900 border border-slate-700 rounded-xl hover:border-blue-500 group transition-all text-left">
@@ -684,6 +950,7 @@ const Fleet = ({ addToast }) => {
 
             <div className="space-y-2">
                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Select USB Serial</p>
+               <HelpText>Choose the control board connected to this printer. The serial path is saved so this profile can be matched to the same MCU later.</HelpText>
                {mcuLoading ? <div className="py-8 flex justify-center"><RefreshCw className="animate-spin text-blue-500" /></div> : (
                  <div className="space-y-2 max-h-48 overflow-y-auto">
                       {mcus.available.map(dev => (
@@ -775,19 +1042,28 @@ const Fleet = ({ addToast }) => {
 
         {step === 5 && (
            <div className="space-y-4">
-              <h3 className="font-bold text-slate-300">5. Review & Provision</h3>
-              <div className="bg-slate-900 rounded-xl divide-y divide-slate-800 text-[11px] border border-slate-800">
-                 <div className="p-3 flex justify-between"><span>Printer:</span><span className="font-bold text-blue-400">{formData.name}</span></div>
-                 <div className="p-3 flex justify-between"><span>Node:</span><span className="text-slate-300">{nodes.find(n=>n.id === formData.assigned_node_id)?.hostname}</span></div>
-                 <div className="p-3 flex justify-between"><span>Config:</span><span className="text-slate-300">{formData.config_source === 'example' ? `Template: ${selectedExample}` : 'Minimal Template'}</span></div>
-                 <div className="p-3">
-                    <span className="block text-slate-500 uppercase font-bold mb-1">Target MCU</span>
-                    <span className="font-mono text-slate-400 break-all">{formData.expected_mcu_serial}</span>
-                 </div>
-                 <div className="p-3">
-                    <span className="block text-slate-500 uppercase font-bold mb-1">Storage Path (NFS)</span>
-                    <span className="font-mono text-slate-400 break-all">/mnt/klipper-farm/printers/{formData.slug}/</span>
-                 </div>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h3 className="font-bold text-slate-300">5. Review & Provision</h3>
+                <ToolbarButton icon={Copy} variant="secondary" size="sm" onClick={copyConfigurationSummary}>
+                  Copy Summary
+                </ToolbarButton>
+              </div>
+              <HelpText>Review the generated service names, port, and central storage paths before creation. Provisioning creates the profile first, then asks the node to create Klipper and Moonraker services.</HelpText>
+              <div className="bg-slate-900 rounded-xl border border-slate-800 p-3">
+                 <DetailGrid
+                   items={[
+                     { label: 'Printer', value: formData.name },
+                     { label: 'Selected node', value: selectedNode?.hostname || 'Missing node', helper: selectedNode?.ip_address },
+                     { label: 'Selected MCU', value: formData.expected_mcu_serial || 'No MCU selected', mono: true },
+                     { label: 'Config source', value: formData.config_source === 'example' ? `Template: ${selectedExample}` : 'Minimal Template' },
+                     { label: 'Klipper service', value: generatedServices.klipper, mono: true },
+                     { label: 'Moonraker service', value: generatedServices.moonraker, mono: true },
+                     { label: 'Moonraker port', value: formData.moonraker_port || 7125, mono: true },
+                     { label: 'Config path', value: generatedPaths.config, mono: true },
+                     { label: 'G-code path', value: generatedPaths.gcodes, mono: true },
+                     { label: 'Logs path', value: generatedPaths.logs, mono: true },
+                   ]}
+                 />
               </div>
 
               <div className="bg-blue-900/10 border border-blue-900/30 p-3 rounded-lg flex items-center space-x-3">
@@ -804,6 +1080,20 @@ const Fleet = ({ addToast }) => {
            </div>
         )}
       </Modal>
+
+      <ConfirmActionModal
+        isOpen={Boolean(confirmAction)}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={runConfirmedAction}
+        title={confirmAction?.title}
+        actionLabel={confirmAction?.actionLabel}
+        itemName={confirmAction?.printer?.name}
+        description={confirmAction?.description}
+        consequences={confirmAction?.consequences || []}
+        requireText={confirmAction?.requireText}
+        confirmVariant={confirmAction?.confirmVariant || 'danger'}
+        busy={isSubmitting}
+      />
     </div>
   );
 };

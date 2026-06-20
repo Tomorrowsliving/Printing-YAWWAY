@@ -161,6 +161,7 @@ async def save_file(path: str, req: SaveFileRequest, db: AsyncSession = Depends(
             severity="info",
             event_type="backup",
             message=f"File edit backup created: {backup_name}",
+            details={"backup_path": backup_path, "source_path": path},
         ))
 
     if pruned_paths:
@@ -169,11 +170,22 @@ async def save_file(path: str, req: SaveFileRequest, db: AsyncSession = Depends(
     with open(path, "w", encoding="utf-8") as f:
         f.write(req.content)
 
+    db.add(Event(
+        severity="info",
+        event_type="file_saved",
+        message=f"Managed file saved: {os.path.basename(path)}",
+        details={
+            "path": path,
+            "backup_created": bool(backup_path),
+            "backup_path": backup_path,
+            "pruned_backups": len(pruned_paths or []),
+        },
+    ))
     await db.flush()
     return {"status": "success", "backup_created": bool(backup_path)}
 
 @router.post("/upload")
-async def upload_file(printer_slug: str, file_type: str, file: UploadFile = File(...)):
+async def upload_file(printer_slug: str, file_type: str, file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
     if file_type == "backups":
         raise HTTPException(status_code=400, detail="Upload restore archives from the Backups section")
     target_dir = os.path.join(STORAGE_ROOT, printer_slug, storage_subdir_for_file_type(file_type))
@@ -190,6 +202,13 @@ async def upload_file(printer_slug: str, file_type: str, file: UploadFile = File
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
+    db.add(Event(
+        severity="info",
+        event_type="file_uploaded",
+        message=f"File uploaded: {filename}",
+        details={"printer_slug": printer_slug, "file_type": file_type, "path": file_path},
+    ))
+    await db.flush()
     return {"filename": filename, "status": "success"}
 
 @router.post("/rename")
@@ -221,14 +240,22 @@ async def download_file(path: str):
     return FileResponse(path, filename=os.path.basename(path))
 
 @router.delete("/delete")
-async def delete_file(path: str):
+async def delete_file(path: str, db: AsyncSession = Depends(get_db)):
     validate_storage_file_path(path)
 
     if os.path.exists(path):
+        filename = os.path.basename(path)
         if os.path.isdir(path):
             shutil.rmtree(path)
         else:
             os.remove(path)
+        db.add(Event(
+            severity="warning",
+            event_type="file_deleted",
+            message=f"Managed file deleted: {filename}",
+            details={"path": path},
+        ))
+        await db.flush()
         return {"status": "success"}
     else:
         raise HTTPException(status_code=404, detail="File not found")

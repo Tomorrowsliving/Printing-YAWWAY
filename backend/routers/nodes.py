@@ -496,6 +496,14 @@ async def update_node(node_id: int, node_in: NodeCreate, request: Request, db: A
     await db.commit()
     await db.refresh(node)
     if node.approved and not was_approved:
+        db.add(Event(
+            node_id=node.id,
+            severity="info",
+            event_type="node_approved",
+            message=f"Node approved: {node.hostname}",
+            details={"source": "node_edit", "ip_address": node.ip_address, "agent_port": node.agent_port},
+        ))
+        await db.commit()
         schedule_auto_mount_node_storage(node, request, "node_approved_from_edit")
     return serialize_node(node)
 
@@ -534,7 +542,12 @@ async def delete_node(node_id: int, db: AsyncSession = Depends(get_db)):
     await db.execute(update(Event).where(Event.node_id == node_id).values(node_id=None))
     await db.delete(node)
 
-    event = Event(severity="warning", event_type="node_deleted", message=f"Node {node_hostname} was removed")
+    event = Event(
+        severity="warning",
+        event_type="node_deleted",
+        message=f"Node deleted: {node_hostname}",
+        details={"node_id": node_id, "hostname": node_hostname, "assignments_cleared": True},
+    )
     db.add(event)
     await db.commit()
     return {"status": "success", "message": f"Node {node_hostname} deleted"}
@@ -625,7 +638,13 @@ async def approve_node(node_id: int, request: Request, db: AsyncSession = Depend
     node.approved = True
     node.status = "approved"
     node.updated_at = utcnow()
-    db.add(Event(node_id=node.id, severity="info", event_type="node_approved", message=f"Node {node.hostname} approved"))
+    db.add(Event(
+        node_id=node.id,
+        severity="info",
+        event_type="node_approved",
+        message=f"Node approved: {node.hostname}",
+        details={"ip_address": node.ip_address, "agent_port": node.agent_port},
+    ))
     await db.commit()
     await db.refresh(node)
     schedule_auto_mount_node_storage(node, request, "node_approved")
@@ -751,6 +770,7 @@ async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
     node = await get_node_or_404(node_id, db)
 
     url = f"http://{node.ip_address}:{node.agent_port}/update"
+    previous_version = node.agent_version
     try:
         set_node_operation(
             node.id,
@@ -759,6 +779,13 @@ async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
             ttl_seconds=180,
         )
         node.status = "updating"
+        db.add(Event(
+            node_id=node.id,
+            severity="info",
+            event_type="node_update_started",
+            message=f"Update started for node {node.hostname}",
+            details={"previous_version": previous_version, "url": url},
+        ))
         await db.commit()
 
         async with httpx.AsyncClient() as client:
@@ -772,10 +799,32 @@ async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
 
         if update_res.get("success"):
             node.status = "online" # or "restart_required" if we add that state
-            db.add(Event(node_id=node.id, severity="info", event_type="node_update", message=f"Update successful: {node.last_update_message}"))
+            db.add(Event(
+                node_id=node.id,
+                severity="info",
+                event_type="node_update_succeeded",
+                message=f"Update succeeded for node {node.hostname}: {node.last_update_message}",
+                details={
+                    "previous_version": previous_version,
+                    "current_version": update_res.get("current_version") or update_res.get("version") or node.agent_version,
+                    "status": node.last_update_status,
+                    "timestamp": node.last_update_at.isoformat(),
+                },
+            ))
         else:
             node.status = "error"
-            db.add(Event(node_id=node.id, severity="error", event_type="node_update", message=f"Update failed: {node.last_update_message}"))
+            db.add(Event(
+                node_id=node.id,
+                severity="error",
+                event_type="node_update_failed",
+                message=f"Update failed for node {node.hostname}: {node.last_update_message}",
+                details={
+                    "previous_version": previous_version,
+                    "status": node.last_update_status,
+                    "timestamp": node.last_update_at.isoformat(),
+                    "fix": "Check node-agent logs and retry the update.",
+                },
+            ))
 
         await db.commit()
         await db.refresh(node)
@@ -788,6 +837,18 @@ async def update_node_agent(node_id: int, db: AsyncSession = Depends(get_db)):
         node.last_update_status = "failed"
         node.last_update_message = str(e)
         node.last_update_at = utcnow()
+        db.add(Event(
+            node_id=node.id,
+            severity="error",
+            event_type="node_update_failed",
+            message=f"Update failed for node {node.hostname}: {e}",
+            details={
+                "previous_version": previous_version,
+                "status": node.last_update_status,
+                "timestamp": node.last_update_at.isoformat(),
+                "fix": "Check node-agent connectivity and retry the update.",
+            },
+        ))
         await db.commit()
         raise HTTPException(status_code=400, detail=f"Update communication failed at {url}: {str(e)}")
 

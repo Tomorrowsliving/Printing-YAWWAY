@@ -20,6 +20,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import { printerService } from '../services/api';
+import { ConfirmActionModal } from './UI';
 
 const DEFAULT_BED_PROBE = {
   enabled: true,
@@ -713,6 +714,7 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
   const [busy, setBusy] = useState('');
   const [preview, setPreview] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [confirmApplyOpen, setConfirmApplyOpen] = useState(false);
   const [configState, setConfigState] = useState(null);
   const [configStateLoading, setConfigStateLoading] = useState(false);
 
@@ -888,7 +890,7 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
     restart_services: form.restart_services,
   });
 
-  const runHelper = async (mode) => {
+  const runHelper = async (mode, confirmed = false) => {
     if (!form.bed_probe.enabled && form.plugins.length === 0) {
       addToast('Select a bed probe or plugin option first', 'info');
       return;
@@ -900,7 +902,8 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
       return;
     }
 
-    if (mode === 'apply' && !window.confirm('Apply these Klipper config changes and create a backup first?')) {
+    if (mode === 'apply' && !confirmed) {
+      setConfirmApplyOpen(true);
       return;
     }
 
@@ -1239,6 +1242,26 @@ const ConfigHelperCard = ({ printer, addToast, fetchPrinter, fetchRuntime, cardC
           </div>
         </div>
       </div>
+      <ConfirmActionModal
+        isOpen={confirmApplyOpen}
+        onClose={() => setConfirmApplyOpen(false)}
+        onConfirm={() => {
+          setConfirmApplyOpen(false);
+          runHelper('apply', true);
+        }}
+        title="Overwrite Config"
+        actionLabel="Apply Config"
+        itemName={printer?.name}
+        description="Apply generated Klipper config changes to printer.cfg."
+        consequences={[
+          'An automatic backup is created before writing.',
+          'Matching config sections may be replaced in the live printer config.',
+          form.restart_services ? 'Printer services will restart after the config is written.' : 'Printer services will not restart automatically.',
+        ]}
+        requireText="DELETE"
+        confirmVariant="warning"
+        busy={busy === 'apply'}
+      />
     </div>
   );
 };

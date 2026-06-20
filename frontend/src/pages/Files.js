@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Download, Edit, File, FileWarning, Loader2, RefreshCw, Save, Trash2, Upload, X } from 'lucide-react';
 import axios from 'axios';
+import { ConfirmActionModal } from '../components/UI';
+import { HelpText, PageHeader, Panel, SearchBox, ToolbarButton } from '../components/DesignSystem';
+import { explainApiError } from '../utils/operator';
 
 const FILE_TYPES = [
   { value: 'config', label: 'Printer Configs', editable: true, uploadable: true },
@@ -29,6 +32,8 @@ const FileManager = ({ addToast }) => {
   const [renamingPath, setRenamingPath] = useState('');
   const [renameValue, setRenameValue] = useState('');
   const [uploading, setUploading] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [confirmAction, setConfirmAction] = useState(null);
 
   const selectedTypeConfig = useMemo(
     () => FILE_TYPES.find(type => type.value === selectedType) || FILE_TYPES[0],
@@ -42,7 +47,11 @@ const FileManager = ({ addToast }) => {
         setPrinters(data);
         if (data.length > 0) setSelectedPrinter(data[0].slug);
       })
-      .catch(() => addToast('Failed to fetch printers', 'error'));
+      .catch((err) => addToast(explainApiError(err, {
+        what: 'Printer list failed to load',
+        cause: 'The file manager could not fetch printer profiles.',
+        fix: 'Refresh the page and confirm the backend is running.',
+      }), 'error'));
   }, [addToast]);
 
   const fetchFiles = useCallback(async () => {
@@ -53,7 +62,11 @@ const FileManager = ({ addToast }) => {
       setFiles(Array.isArray(res.data) ? res.data : []);
     } catch (err) {
       setFiles([]);
-      addToast(err.response?.data?.detail || 'Failed to list files', 'error');
+      addToast(explainApiError(err, {
+        what: 'File list failed to load',
+        cause: 'The selected printer path or file category could not be read.',
+        fix: 'Check central storage, printer assignment, and NFS mount status.',
+      }), 'error');
     } finally {
       setLoading(false);
     }
@@ -69,11 +82,15 @@ const FileManager = ({ addToast }) => {
       setEditingFile(file);
       setEditContent(res.data.content);
     } catch (err) {
-      addToast('Failed to read file', 'error');
+      addToast(explainApiError(err, {
+        what: 'File read failed',
+        cause: 'The backend could not read this managed file.',
+        fix: 'Check that the file still exists and central storage is mounted.',
+      }), 'error');
     }
   };
 
-  const handleSave = async () => {
+  const performSave = async () => {
     setIsSaving(true);
     try {
       const res = await axios.post('/api/files/save', { content: editContent }, { params: { path: editingFile.path } });
@@ -81,21 +98,60 @@ const FileManager = ({ addToast }) => {
       setEditingFile(null);
       fetchFiles();
     } catch (err) {
-      addToast(err.response?.data?.detail || 'Failed to save file', 'error');
+      addToast(explainApiError(err, {
+        what: 'File save failed',
+        cause: 'The backend could not write this file or create its backup.',
+        fix: 'Check central storage write access and try again.',
+      }), 'error');
     } finally {
       setIsSaving(false);
     }
   };
 
-  const handleDelete = async (file) => {
-    if (!window.confirm(`Delete ${file.name}?`)) return;
+  const handleSave = () => {
+    setConfirmAction({
+      action: 'save',
+      title: 'Overwrite Config',
+      actionLabel: 'Save & Backup',
+      requireText: 'DELETE',
+      description: `Save changes to ${editingFile?.name || 'this file'}.`,
+      consequences: [
+        'An automatic backup will be created before writing.',
+        'The live managed file will be overwritten with the editor contents.',
+        'A bad printer.cfg can prevent Klipper from starting until restored or fixed.',
+      ],
+      confirmVariant: 'warning',
+    });
+  };
+
+  const performDelete = async (file) => {
     try {
       await axios.delete('/api/files/delete', { params: { path: file.path } });
       addToast('File deleted', 'success');
       fetchFiles();
     } catch (err) {
-      addToast(err.response?.data?.detail || 'Failed to delete file', 'error');
+      addToast(explainApiError(err, {
+        what: 'File delete failed',
+        cause: 'The backend could not remove this managed file.',
+        fix: 'Check central storage permissions and whether the file still exists.',
+      }), 'error');
     }
+  };
+
+  const handleDelete = async (file) => {
+    setConfirmAction({
+      action: 'delete',
+      file,
+      title: 'Delete File',
+      actionLabel: 'Delete File',
+      requireText: 'DELETE',
+      description: `Delete ${file.name}.`,
+      consequences: [
+        'The file will be removed from managed storage.',
+        'This does not create a new backup first.',
+        'Any printer or service expecting this file may fail until it is restored.',
+      ],
+    });
   };
 
   const handleUpload = async (event) => {
@@ -112,7 +168,11 @@ const FileManager = ({ addToast }) => {
       addToast('File uploaded', 'success');
       fetchFiles();
     } catch (err) {
-      addToast(err.response?.data?.detail || 'Upload failed', 'error');
+      addToast(explainApiError(err, {
+        what: 'Upload failed',
+        cause: 'The backend could not write the uploaded file.',
+        fix: 'Check file type, central storage write access, and selected printer.',
+      }), 'error');
     } finally {
       setUploading(false);
       event.target.value = '';
@@ -132,32 +192,55 @@ const FileManager = ({ addToast }) => {
       setRenameValue('');
       fetchFiles();
     } catch (err) {
-      addToast(err.response?.data?.detail || 'Rename failed', 'error');
+      addToast(explainApiError(err, {
+        what: 'Rename failed',
+        cause: 'The backend could not rename this file.',
+        fix: 'Check for an existing file with the same name and central storage permissions.',
+      }), 'error');
     }
   };
 
   const downloadUrl = (file) => `/api/files/download?path=${encodeURIComponent(file.path)}`;
+  const filteredFiles = useMemo(() => {
+    const term = searchTerm.trim().toLowerCase();
+    if (!term) return files;
+    return files.filter((file) => [
+      file.name,
+      file.path,
+      file.name?.split('.').pop(),
+    ].some((value) => String(value || '').toLowerCase().includes(term)));
+  }, [files, searchTerm]);
+
+  const runConfirmedAction = async () => {
+    const action = confirmAction;
+    setConfirmAction(null);
+    if (action?.action === 'save') await performSave();
+    if (action?.action === 'delete' && action.file) await performDelete(action.file);
+  };
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-2xl font-bold">Files</h2>
-          <p className="text-sm text-slate-400">Configs, macros, logs, G-code and file backups</p>
-        </div>
-      </div>
+      <PageHeader
+        eyebrow="Maintenance"
+        title="Files"
+        description="Browse, upload, edit, rename, download, and delete managed printer files with backups before configuration saves."
+      />
 
-      <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 flex flex-wrap gap-4 items-end">
+      <Panel title="File Filters" description="Choose a printer and file category" icon={File}>
+      <div className="mb-4">
+        <HelpText>Changes create an automatic backup before saving. Use Backups & Restore if you need to roll a config file back.</HelpText>
+      </div>
+      <div className="flex flex-wrap gap-4 items-end">
         <div className="space-y-1">
           <label className="text-[10px] font-bold text-slate-500 uppercase">Printer</label>
-          <select value={selectedPrinter} onChange={(e) => setSelectedPrinter(e.target.value)} className="w-56 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500">
+          <select value={selectedPrinter} onChange={(e) => setSelectedPrinter(e.target.value)} className="app-select w-56">
             <option value="">Select printer</option>
             {printers.map(printer => <option key={printer.id} value={printer.slug}>{printer.name}</option>)}
           </select>
         </div>
         <div className="space-y-1">
           <label className="text-[10px] font-bold text-slate-500 uppercase">File Type</label>
-          <select value={selectedType} onChange={(e) => setSelectedType(e.target.value)} className="w-56 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm outline-none focus:border-blue-500">
+          <select value={selectedType} onChange={(e) => setSelectedType(e.target.value)} className="app-select w-56">
             {FILE_TYPES.map(type => <option key={type.value} value={type.value}>{type.label}</option>)}
           </select>
         </div>
@@ -168,12 +251,17 @@ const FileManager = ({ addToast }) => {
             <input type="file" className="hidden" onChange={handleUpload} />
           </label>
         )}
-        <button onClick={fetchFiles} className="h-10 w-10 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors flex items-center justify-center">
-          <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
-        </button>
+        <ToolbarButton onClick={fetchFiles} icon={RefreshCw} variant="secondary" size="icon" busy={loading} title="Refresh" />
+        <SearchBox
+          value={searchTerm}
+          onChange={setSearchTerm}
+          placeholder="Search filename, extension, or path..."
+          className="min-w-64 flex-1"
+        />
       </div>
+      </Panel>
 
-      <div className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
+      <div className="app-card overflow-hidden">
         {loading ? (
           <div className="p-12 flex justify-center"><Loader2 className="animate-spin text-blue-500" size={32} /></div>
         ) : (
@@ -187,7 +275,7 @@ const FileManager = ({ addToast }) => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-700">
-              {files.map((file) => (
+              {filteredFiles.map((file) => (
                 <tr key={file.path} className="hover:bg-slate-700/30 transition-colors">
                   <td className="px-6 py-4">
                     {renamingPath === file.path ? (
@@ -229,11 +317,11 @@ const FileManager = ({ addToast }) => {
                   </td>
                 </tr>
               ))}
-              {files.length === 0 && (
+              {filteredFiles.length === 0 && (
                 <tr>
                   <td colSpan="4" className="px-6 py-12 text-center text-slate-500">
                     <FileWarning size={32} className="mb-2 opacity-20 mx-auto" />
-                    No files found for this printer and type.
+                    {files.length === 0 ? 'No files found for this printer and type.' : 'No files match this search.'}
                   </td>
                 </tr>
               )}
@@ -255,8 +343,9 @@ const FileManager = ({ addToast }) => {
               </div>
               <button onClick={() => setEditingFile(null)} className="p-2 hover:bg-slate-700 rounded-lg transition-colors"><X size={20} /></button>
             </div>
-            <div className="flex-1 p-4 bg-slate-900">
-              <textarea value={editContent} onChange={(e) => setEditContent(e.target.value)} className="w-full h-full bg-transparent text-blue-100 font-mono text-sm p-4 outline-none resize-none" spellCheck="false" />
+            <div className="flex min-h-0 flex-1 flex-col p-4 bg-slate-900">
+              <HelpText className="mb-3">Changes create an automatic backup before saving. Review carefully before overwriting config files.</HelpText>
+              <textarea value={editContent} onChange={(e) => setEditContent(e.target.value)} className="min-h-0 flex-1 w-full bg-transparent text-blue-100 font-mono text-sm p-4 outline-none resize-none" spellCheck="false" />
             </div>
             <div className="p-4 border-t border-slate-700 flex justify-end space-x-3 bg-slate-800/50">
               <button onClick={() => setEditingFile(null)} className="px-4 py-2 text-sm font-bold text-slate-400 hover:text-white transition-colors">Cancel</button>
@@ -267,6 +356,20 @@ const FileManager = ({ addToast }) => {
           </div>
         </div>
       )}
+
+      <ConfirmActionModal
+        isOpen={Boolean(confirmAction)}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={runConfirmedAction}
+        title={confirmAction?.title}
+        actionLabel={confirmAction?.actionLabel}
+        itemName={confirmAction?.file?.name || editingFile?.name}
+        description={confirmAction?.description}
+        consequences={confirmAction?.consequences || []}
+        requireText={confirmAction?.requireText}
+        confirmVariant={confirmAction?.confirmVariant || 'danger'}
+        busy={isSaving}
+      />
     </div>
   );
 };

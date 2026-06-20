@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { ArrowRight, AlertCircle, Server, Printer as PrinterIcon, ArrowLeftRight, Loader2 } from 'lucide-react';
 import axios from 'axios';
+import { PageHeader, Panel } from '../components/DesignSystem';
+import { ConfirmActionModal } from '../components/UI';
 
 
 
@@ -13,6 +15,7 @@ const Assignments = ({ addToast }) => {
   const [loading, setLoading] = useState(false);
   const [checking, setChecking] = useState(false);
   const [dataLoading, setDataLoading] = useState(true);
+  const [confirmAction, setConfirmAction] = useState(null);
 
   useEffect(() => {
     fetchData();
@@ -34,16 +37,37 @@ const Assignments = ({ addToast }) => {
     }
   };
 
+  const executeMigration = async (printer, targetNodeId) => {
+    setLoading(true);
+    try {
+      await axios.post(`/api/assignments/migrate`, {
+        printer_id: printer.id,
+        target_node_id: targetNodeId,
+        confirmed: true
+      });
+      addToast(`Successfully migrated ${printer.name}`, "success");
+      fetchData();
+      setSelectedPrinter(null);
+      setTargetNode('');
+      setPreflight(null);
+    } catch (err) {
+      addToast(err.response?.data?.detail || "Migration failed", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleMigrate = async () => {
     if (!selectedPrinter || !targetNode) return;
 
-    const targetNodeObj = nodes.find(n => n.id === parseInt(targetNode));
+    const targetNodeId = parseInt(targetNode);
+    const targetNodeObj = nodes.find(n => n.id === targetNodeId);
     setChecking(true);
     let check = preflight;
     try {
       const res = await axios.post('/api/assignments/check', {
         printer_id: selectedPrinter.id,
-        target_node_id: parseInt(targetNode)
+        target_node_id: targetNodeId
       });
       check = res.data;
       setPreflight(check);
@@ -55,26 +79,21 @@ const Assignments = ({ addToast }) => {
       setChecking(false);
     }
 
-    const warningText = check?.warnings?.length ? `\n\nWarnings:\n${check.warnings.join('\n')}` : '';
-    if (!window.confirm(`Migrate ${selectedPrinter.name} to ${targetNodeObj.hostname}?${warningText}`)) return;
-
-    setLoading(true);
-    try {
-      await axios.post(`/api/assignments/migrate`, {
-        printer_id: selectedPrinter.id,
-        target_node_id: parseInt(targetNode),
-        confirmed: true
-      });
-      addToast(`Successfully migrated ${selectedPrinter.name}`, "success");
-      fetchData();
-      setSelectedPrinter(null);
-      setTargetNode('');
-      setPreflight(null);
-    } catch (err) {
-      addToast(err.response?.data?.detail || "Migration failed", "error");
-    } finally {
-      setLoading(false);
-    }
+    setConfirmAction({
+      action: 'migrate',
+      printer: selectedPrinter,
+      targetNodeId,
+      title: 'Migrate Printer',
+      actionLabel: 'Migrate Printer',
+      description: `Move ${selectedPrinter.name} to ${targetNodeObj?.hostname || 'the selected node'}.`,
+      consequences: [
+        `Assignment will move from the current node to ${targetNodeObj?.hostname || 'the selected node'}.`,
+        'The target node must see the expected MCU serial device.',
+        'Services on the old node may be stopped automatically if reachable.',
+        ...(check?.warnings || []).map((warning) => `Warning: ${warning}`),
+      ],
+      confirmVariant: check?.warnings?.length ? 'warning' : 'primary',
+    });
   };
 
   const runPreflight = async () => {
@@ -94,22 +113,26 @@ const Assignments = ({ addToast }) => {
     }
   };
 
+  const runConfirmedAction = async () => {
+    const action = confirmAction;
+    setConfirmAction(null);
+    if (action?.action === 'migrate') await executeMigration(action.printer, action.targetNodeId);
+  };
+
   if (dataLoading) {
      return <div className="p-8 text-center text-slate-500 animate-pulse font-medium">Initialising Migration Manager...</div>;
   }
 
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold">Assignments & Migration</h2>
-      </div>
+      <PageHeader
+        eyebrow="Print Farm"
+        title="Assignments & Migration"
+        description="Move a printer to another node with USB, service, and Moonraker preflight checks before anything changes."
+      />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 space-y-4 shadow-sm">
-          <div className="flex items-center space-x-2 border-b border-slate-700 pb-3">
-             <PrinterIcon size={18} className="text-blue-400" />
-             <h3 className="font-bold text-sm">Select Printer</h3>
-          </div>
+        <Panel title="Select Printer" description="Choose the machine to move" icon={PrinterIcon}>
           <div className="space-y-2 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
             {printers.map(printer => (
               <button
@@ -134,14 +157,9 @@ const Assignments = ({ addToast }) => {
             ))}
             {printers.length === 0 && <div className="p-8 text-center text-slate-600 italic text-sm">No printers found.</div>}
           </div>
-        </div>
+        </Panel>
 
-        <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 space-y-6 shadow-sm">
-          <div className="flex items-center space-x-2 border-b border-slate-700 pb-3">
-             <ArrowLeftRight size={18} className="text-orange-400" />
-             <h3 className="font-bold text-sm">Migration Workflow</h3>
-          </div>
-
+        <Panel title="Migration Workflow" description="Preflight, confirm, execute, then verify" icon={ArrowLeftRight} bodyClassName="space-y-6">
           {selectedPrinter ? (
             <div className="space-y-6">
               <div className="flex items-center justify-between bg-slate-900 p-6 rounded-2xl border border-slate-800 shadow-inner">
@@ -210,7 +228,7 @@ const Assignments = ({ addToast }) => {
               <button
                 onClick={handleMigrate}
                 disabled={!targetNode || loading}
-                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 disabled:text-slate-500 py-4 rounded-xl font-bold transition-all flex items-center justify-center space-x-3 shadow-lg shadow-blue-900/20"
+                className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 disabled:text-slate-500 py-4 rounded-lg font-bold transition-all flex items-center justify-center space-x-3 shadow-lg shadow-blue-900/20"
               >
                 {loading ? <Loader2 className="animate-spin" size={20} /> : <><ArrowLeftRight size={20} /><span>Execute Migration</span></>}
               </button>
@@ -223,8 +241,20 @@ const Assignments = ({ addToast }) => {
               <p className="text-sm">Select a printer from the list to begin migration</p>
             </div>
           )}
-        </div>
+        </Panel>
       </div>
+      <ConfirmActionModal
+        isOpen={Boolean(confirmAction)}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={runConfirmedAction}
+        title={confirmAction?.title}
+        actionLabel={confirmAction?.actionLabel}
+        itemName={confirmAction?.printer?.name}
+        description={confirmAction?.description}
+        consequences={confirmAction?.consequences || []}
+        confirmVariant={confirmAction?.confirmVariant || 'warning'}
+        busy={loading}
+      />
     </div>
   );
 };
